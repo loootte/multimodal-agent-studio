@@ -91,16 +91,47 @@ def original_error_text(payload) -> str:
     return "\n".join(parts)
 
 
-def parse_ws_message(raw) -> dict | None:
+def _progress_fields(value, maximum) -> dict:
+    fields = {"value": value, "max": maximum, "percent": None}
+    if isinstance(value, bool) or isinstance(maximum, bool):
+        return fields
+    if isinstance(value, (int, float)) and isinstance(maximum, (int, float)) and maximum:
+        fields["percent"] = int(round(100 * float(value) / float(maximum)))
+    return fields
+
+
+def parse_ws_events(raw) -> list[dict]:
     if isinstance(raw, (bytes, bytearray)) or not isinstance(raw, str):
-        return None
+        return []
     try:
         message = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return []
     if not isinstance(message, dict):
-        return None
+        return []
     kind = message.get("type")
+    data = message.get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    if kind == "progress_state":
+        events = []
+        nodes = data.get("nodes") or {}
+        if not isinstance(nodes, dict):
+            return []
+        for node_id, state in nodes.items():
+            if not isinstance(state, dict) or state.get("state") == "finished":
+                continue
+            event = {
+                "type": "progress",
+                "prompt_id": data.get("prompt_id") or state.get("prompt_id") or None,
+                "node": str(node_id),
+                "raw": data,
+            }
+            event.update(_progress_fields(state.get("value"), state.get("max")))
+            if event["percent"] is None and not event["max"]:
+                continue
+            events.append(event)
+        return events
     if kind not in {
         "progress",
         "executing",
@@ -109,10 +140,7 @@ def parse_ws_message(raw) -> dict | None:
         "execution_success",
         "execution_interrupted",
     }:
-        return None
-    data = message.get("data") or {}
-    if not isinstance(data, dict):
-        return None
+        return []
     event = {
         "type": kind,
         "prompt_id": data.get("prompt_id") or None,
@@ -120,15 +148,13 @@ def parse_ws_message(raw) -> dict | None:
         "raw": data,
     }
     if kind == "progress":
-        value = data.get("value")
-        maximum = data.get("max")
-        event["value"] = value
-        event["max"] = maximum
-        if isinstance(value, (int, float)) and isinstance(maximum, (int, float)) and not isinstance(value, bool) and not isinstance(maximum, bool) and maximum:
-            event["percent"] = int(round(100 * float(value) / float(maximum)))
-        else:
-            event["percent"] = None
-    return event
+        event.update(_progress_fields(data.get("value"), data.get("max")))
+    return [event]
+
+
+def parse_ws_message(raw) -> dict | None:
+    events = parse_ws_events(raw)
+    return events[0] if events else None
 
 
 def bind_prompt_id(event: dict, active_ids: set[str]) -> dict | None:
@@ -450,26 +476,46 @@ class ComfyClient:
             ws.settimeout(1)
         return ws
 
+    def _read_ws(self):
+        recv_data = getattr(self._ws, "recv_data", None)
+        if recv_data is None:
+            return self._ws.recv()
+        from websocket import ABNF
+
+        opcode, data = recv_data()
+        if opcode == ABNF.OPCODE_CLOSE:
+            from websocket import WebSocketConnectionClosedException
+
+            raise WebSocketConnectionClosedException("closed")
+        if opcode == ABNF.OPCODE_BINARY or data is None:
+            return None
+        if isinstance(data, bytes):
+            return data.decode("utf-8", "replace")
+        if isinstance(data, str):
+            return data
+        return None
+
     def _listen(self) -> None:
         from websocket import WebSocketConnectionClosedException, WebSocketTimeoutException
 
         while not self._stop.is_set():
             try:
-                raw = self._ws.recv()
+                raw = self._read_ws()
             except WebSocketTimeoutException:
                 continue
             except WebSocketConnectionClosedException:
-                self._mark_ws_dead("WebSocket 已断开，改为轮询 /history")
+                if not self._stop.is_set():
+                    self._mark_ws_dead("WebSocket 已断开，改为轮询 /history")
                 return
             except Exception:
                 if self._stop.is_set():
                     return
                 self._mark_ws_dead("WebSocket 已断开，改为轮询 /history")
                 return
-            event = parse_ws_message(raw)
-            if event is None:
+            if not raw:
                 continue
-            self._accept(event)
+            for event in parse_ws_events(raw):
+                self._accept(event)
 
     def _accept(self, event: dict) -> None:
         with self._cond:
@@ -554,10 +600,10 @@ def upload(base: str, path: str) -> str:
     return ComfyClient(base).upload_image(path)
 
 
-def run(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str) -> list[str]:
+def run(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str, on_event=None) -> list[str]:
     import comfy_poc
 
-    return comfy_poc.execute_workflow(base, template, workflow, fields, timeout, output_dir)
+    return comfy_poc.execute_workflow(base, template, workflow, fields, timeout, output_dir, on_event=on_event)
 
 
 def _check_fail(message: str) -> None:
@@ -594,6 +640,18 @@ def _check_routing() -> None:
         _check_fail("只有一个任务时，没有 prompt_id 的进度应该归到它。")
     if bind_prompt_id(progress_b, {"prompt-a"})["prompt_id"] != "prompt-b":
         _check_fail("别的 prompt_id 被并进了当前任务。")
+    state = parse_ws_events(json.dumps({
+        "type": "progress_state",
+        "data": {"prompt_id": "prompt-a", "nodes": {"5": {"value": 1, "max": 20}}},
+    }))
+    if len(state) != 1 or state[0]["type"] != "progress" or state[0]["percent"] != 5 or state[0]["prompt_id"] != "prompt-a":
+        _check_fail(f"progress_state 没有变成进度事件：{state}")
+    finished = parse_ws_events(json.dumps({
+        "type": "progress_state",
+        "data": {"prompt_id": "prompt-a", "nodes": {"4": {"value": 1, "max": 1, "state": "finished"}}},
+    }))
+    if finished:
+        _check_fail("已经结束的节点还在重复进度。")
 
 
 class _FakeResponse:

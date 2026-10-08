@@ -25,4 +25,4 @@ ops/                      运行手册和部署说明
 
 ## 例外：issue #1
 
-`poc/comfyui/` 是一张本地脚本，用来把提示词打进固定的 ComfyUI API 工作流，并按会话把生成结果收成工件。它不是 `apps/` 或 `services/`，也不提前决定第 1 阶段的语言。换工作流 JSON 时，调用命令不变。工件文件在 `poc/comfyui/artifacts/`，不进 Git。
+`poc/comfyui/` 是一张本地脚本，用来把提示词打进固定的 ComfyUI API 工作流，并按会话把生成结果收成工件。同一次生成的工具、进度、成片和错误记在同一条助手消息里。它不是 `apps/` 或 `services/`，也不提前决定第 1 阶段的语言。换工作流 JSON 时，调用命令不变。工件文件和聊天记录在 `poc/comfyui/artifacts/`，不进 Git。

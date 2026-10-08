@@ -1,8 +1,8 @@
 # ComfyUI 出图 / 出视频 POC
 
-这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`，[issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的 ComfyUI 客户端，以及 [issue #5](https://github.com/loootte/multimodal-agent-studio/issues/5) 的会话工件库。一条命令复制模板，只写白名单字段，提交后等进度，再把文件收进当前会话。
+这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`，[issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的 ComfyUI 客户端，[issue #5](https://github.com/loootte/multimodal-agent-studio/issues/5) 的会话工件库，以及 [issue #6](https://github.com/loootte/multimodal-agent-studio/issues/6) 的聊天事件。一条命令复制模板，只写白名单字段，提交后等进度，再把文件收进当前会话，并记在同一条助手消息上。
 
-它不是聊天界面，也不让模型改工作流。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
+模型不能改工作流。网页界面和模型网关仍然不在这张脚本里。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
 
 ## 准备
 
@@ -103,6 +103,22 @@ python poc/comfyui/artifacts.py serve
 ```
 
 `check` 不连接 ComfyUI。`serve` 只听 `127.0.0.1:8765`。会话可以用配置里的 `session_id`，或环境变量 `COMFY_SESSION`。
+
+## 聊天事件
+
+[issue #6](https://github.com/loootte/multimodal-agent-studio/issues/6) 把一次生成记在同一条助手消息上。事件顺序是 `tool_call`、若干 `progress`，然后以 `artifact` 或 `error` 结束。`progress` 只有当前步、总步和百分比，不带节点名。图片卡片和视频卡片都引用 `artifact_id`。视频卡片多一个时长。
+
+失败写在这条消息的最后一个 `error` 上，不另起一条成功消息。刷新后从本机 `transcript.json` 读回同一条消息，卡片仍按 `artifact_id` 显示。流断开时消息保持未完成，并留下 `prompt_id`。`resume` 用这个 `prompt_id` 接回，不再 `POST /prompt`。
+
+卡片上有三个动作。重新生成交出原来的工具和参数，并去掉 seed，留给后续更换种子，这里不重新提交。改比例只替换画幅。用作参考把该 `artifact_id` 写进下一轮用户输入的 `image_ref`，不把画面写成一段文字。
+
+```
+python poc/comfyui/chat.py check
+python poc/comfyui/chat.py show
+python poc/comfyui/chat.py run generate_image --json-file image-call.json
+```
+
+`check` 不连接 ComfyUI。聊天记录在工件目录的会话文件夹里，不进 Git。
 
 ## 工作流里会被替换的字段
 

@@ -11,6 +11,7 @@ import json
 import os
 import random
 import sys
+from contextlib import contextmanager
 
 import artifacts
 import comfy_client
@@ -19,6 +20,7 @@ import template_fill
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOOL_NAMES = ("generate_image", "generate_video")
+_run_listener = None
 FORBIDDEN_IN_SCHEMA = (
     "LoadImage",
     "KSampler",
@@ -167,6 +169,84 @@ def values_match(tool: str, workflow: dict, fields: dict, prompt: str, aspect: s
     return None
 
 
+@contextmanager
+def listen_run(callback):
+    """生成过程中把提交和进度交给聊天记录。不改变工具参数。"""
+    global _run_listener
+    previous = _run_listener
+    _run_listener = callback
+    try:
+        yield
+    finally:
+        _run_listener = previous
+
+
+def validate_tool(name: str, arguments: dict) -> dict | None:
+    """提交前的参数校验。通过时返回 None，不调用 ComfyUI。"""
+    if name not in TOOL_NAMES:
+        return tool_error(name, "unknown_tool", "只能调用 generate_image 或 generate_video。")
+    if not isinstance(arguments, dict):
+        return tool_error(name, "invalid_parameter", "工具参数必须是对象。")
+    if name == "generate_image":
+        return _validate_image(arguments)
+    return _validate_video(arguments)
+
+
+def _validate_image(arguments: dict) -> dict | None:
+    tool = "generate_image"
+    problem = unexpected(tool, arguments) or require_prompt(tool, arguments)
+    if problem:
+        return problem
+    styles = load_styles()
+    aspect, problem = parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
+    if problem:
+        return problem
+    if "seed" in arguments and arguments["seed"] is not None:
+        _seed, problem = parse_seed(tool, arguments)
+        if problem:
+            return problem
+    _style, problem = parse_style(tool, arguments, styles)
+    if problem:
+        return problem
+    config = comfy_poc.load_config()
+    _template, fields, _timeout = template_fill.load_job(config, "image")
+    if aspect not in (fields.get("aspects") or {}):
+        return tool_error(tool, "invalid_aspect_ratio", "这张文生图模板没有这个画幅。", "aspect_ratio")
+    return None
+
+
+def _validate_video(arguments: dict) -> dict | None:
+    tool = "generate_video"
+    problem = unexpected(tool, arguments) or require_prompt(tool, arguments)
+    if problem:
+        return problem
+    if "duration_sec" not in arguments:
+        return tool_error(tool, "invalid_duration", "duration_sec 是必填项。", "duration_sec")
+    duration = arguments["duration_sec"]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+        return tool_error(tool, "invalid_duration", "duration_sec 必须是大于 0 的秒数。", "duration_sec")
+    aspect, problem = parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
+    if problem:
+        return problem
+    image_ref = arguments.get("image_ref")
+    config = comfy_poc.load_config()
+    if image_ref is not None:
+        if not isinstance(image_ref, str) or not image_ref.strip():
+            return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
+        try:
+            artifacts.resolve_image_ref(config, image_ref)
+        except artifacts.ArtifactError as exc:
+            return tool_error(tool, "image_not_found", exc.message, "image_ref")
+    kind = "video_i2v" if image_ref else "video"
+    _template, fields, _timeout = template_fill.load_job(config, kind)
+    if aspect not in (fields.get("aspects") or {}):
+        return tool_error(tool, "invalid_aspect_ratio", "这张视频模板没有这个画幅。", "aspect_ratio")
+    limit = template_fill.max_duration_sec(fields)
+    if float(duration) > limit:
+        return tool_error(tool, "duration_too_long", f"duration_sec 超过模板上限 {limit:g} 秒。", "duration_sec")
+    return None
+
+
 def _published_result(tool: str, records: list[dict], extra: dict) -> dict:
     result = {"ok": True, "tool": tool}
     result.update(records[0])
@@ -223,7 +303,9 @@ def _generate_image(arguments: dict) -> dict:
     if style and template_fill.read_back(workflow, fields, "negative_prompt") != styles[style]:
         return tool_error(tool, "internal_error", "风格句没有写进模板。")
     template_fill.assert_template_edit(template, workflow, fields)
-    files = comfy_client.run(config["comfy_url"], template, workflow, fields, timeout, config["output_dir"])
+    files = comfy_client.run(
+        config["comfy_url"], template, workflow, fields, timeout, config["output_dir"], on_event=_run_listener,
+    )
     records = artifacts.remember_outputs(
         config,
         files,
@@ -293,7 +375,9 @@ def _generate_video(arguments: dict) -> dict:
     if problem:
         return problem
     template_fill.assert_template_edit(template, workflow, fields)
-    files = comfy_client.run(config["comfy_url"], template, workflow, fields, timeout, config["output_dir"])
+    files = comfy_client.run(
+        config["comfy_url"], template, workflow, fields, timeout, config["output_dir"], on_event=_run_listener,
+    )
     records = artifacts.remember_outputs(
         config,
         files,

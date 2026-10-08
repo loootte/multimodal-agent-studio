@@ -38,6 +38,10 @@ class ArtifactError(Exception):
         self.message = message
 
 
+def is_artifact_id(value: str) -> bool:
+    return isinstance(value, str) and bool(_ARTIFACT_ID.fullmatch(value))
+
+
 def check_token(value: str, label: str) -> str:
     if not isinstance(value, str) or not _TOKEN.fullmatch(value):
         raise ArtifactError(f"{label}不合法。")
@@ -64,7 +68,7 @@ def open_store(config: dict) -> tuple["ArtifactStore", str]:
 
 def resolve_image_ref(config: dict, image_ref: str) -> tuple[str, str | None]:
     """给运行时取出本地文件。返回值里的路径不能写进模型请求。"""
-    if _ARTIFACT_ID.fullmatch(image_ref or ""):
+    if is_artifact_id(image_ref or ""):
         store, session_id = open_store(config)
         path = store.file_for(session_id, image_ref)
         if not path:

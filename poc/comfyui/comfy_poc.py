@@ -293,16 +293,24 @@ def template_kind(args) -> str:
     return "video"
 
 
-def execute_workflow(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str) -> list[str]:
+def execute_workflow(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str, on_event=None) -> list[str]:
     client = comfy_client.ComfyClient(base)
+
+    def relay(event: dict) -> None:
+        report_event(event, workflow)
+        if on_event is not None:
+            on_event(event)
+
     try:
         template_fill.assert_template_edit(template, workflow, fields)
         prompt_id = client.submit(workflow)
+        if on_event is not None:
+            on_event({"type": "submitted", "prompt_id": prompt_id})
         stream = sys.stdout if _talk else sys.stderr
         print(f"prompt_id {prompt_id}", file=stream, flush=True)
         if client.queued(prompt_id):
             print(f"队列中 {prompt_id}", file=sys.stderr, flush=True)
-        entry = client.wait(prompt_id, timeout, on_event=lambda event: report_event(event, workflow))
+        entry = client.wait(prompt_id, timeout, on_event=relay)
         confirm_history_prompt(entry, workflow, fields)
         return client.save_outputs(entry, output_dir)
     finally:
