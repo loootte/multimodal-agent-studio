@@ -1,0 +1,12 @@
+{
+  "positive_prompt": {"node": "2", "input": "text"},
+  "negative_prompt": {"node": "3", "input": "text"},
+  "width": {"node": "4", "input": "width"},
+  "height": {"node": "4", "input": "height"},
+  "seed": {"node": "5", "input": "seed"},
+  "aspects": {
+    "1:1": {"width": 1024, "height": 1024},
+    "16:9": {"width": 1344, "height": 768},
+    "9:16": {"width": 768, "height": 1344}
+  }
+}

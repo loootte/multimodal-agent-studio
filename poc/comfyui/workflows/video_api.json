@@ -1,0 +1,143 @@
+{
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "Base\\Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf"
+    }
+  },
+  "2": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["1", 0],
+      "lora_name": "Fast\\Wan22-I2V-A14B-4steps-lora-rank64-Seko-V1-H.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "3": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": ["2", 0],
+      "shift": 5.0
+    }
+  },
+  "4": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "Base\\Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf"
+    }
+  },
+  "5": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["4", 0],
+      "lora_name": "Fast\\Wan22-I2V-A14B-4steps-lora-rank64-Seko-V1-L.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "6": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": ["5", 0],
+      "shift": 5.0
+    }
+  },
+  "7": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "cpu"
+    }
+  },
+  "8": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "a red ceramic teapot on a wooden table, the camera slowly pushes in",
+      "clip": ["7", 0]
+    }
+  },
+  "9": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "blurry, low quality, watermark, text, static, overexposed, deformed",
+      "clip": ["7", 0]
+    }
+  },
+  "10": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "Wan2_1_VAE_bf16.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+      "positive": ["8", 0],
+      "negative": ["9", 0],
+      "vae": ["10", 0],
+      "width": 512,
+      "height": 288,
+      "length": 17,
+      "batch_size": 1
+    }
+  },
+  "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["3", 0],
+      "add_noise": "enable",
+      "noise_seed": 1,
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["11", 0],
+      "negative": ["11", 1],
+      "latent_image": ["11", 2],
+      "start_at_step": 0,
+      "end_at_step": 2,
+      "return_with_leftover_noise": "enable"
+    }
+  },
+  "13": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["6", 0],
+      "add_noise": "disable",
+      "noise_seed": 1,
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["11", 0],
+      "negative": ["11", 1],
+      "latent_image": ["12", 0],
+      "start_at_step": 2,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "disable"
+    }
+  },
+  "14": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["13", 0],
+      "vae": ["10", 0]
+    }
+  },
+  "15": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": ["14", 0],
+      "fps": 16.0
+    }
+  },
+  "16": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": ["15", 0],
+      "filename_prefix": "poc-video",
+      "format": "mp4",
+      "codec": "auto"
+    }
+  }
+}

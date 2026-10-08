@@ -1,0 +1,14 @@
+{
+  "comfy_url": "http://127.0.0.1:8188",
+  "output_dir": "output",
+  "image": {
+    "workflow": "workflows/image_api.json",
+    "fields": "workflows/image.fields.json",
+    "timeout_sec": 900
+  },
+  "video": {
+    "workflow": "workflows/video_api.json",
+    "fields": "workflows/video.fields.json",
+    "timeout_sec": 2700
+  }
+}

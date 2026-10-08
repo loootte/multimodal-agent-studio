@@ -1,0 +1,25 @@
+{
+  "positive_prompt": {"node": "8", "input": "text"},
+  "negative_prompt": {"node": "9", "input": "text"},
+  "width": {"node": "11", "input": "width"},
+  "height": {"node": "11", "input": "height"},
+  "frames": {"node": "11", "input": "length"},
+  "seed": [
+    {"node": "12", "input": "noise_seed"},
+    {"node": "13", "input": "noise_seed"}
+  ],
+  "reference_image": {
+    "node": "20",
+    "input": "image",
+    "class_type": "LoadImage",
+    "link_to": {"node": "11", "input": "start_image", "output": 0}
+  },
+  "aspects": {
+    "1:1": {"width": 384, "height": 384},
+    "16:9": {"width": 512, "height": 288},
+    "9:16": {"width": 288, "height": 512}
+  },
+  "max_frames": 33,
+  "frame_step": 4,
+  "fps": 16
+}
