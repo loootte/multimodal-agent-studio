@@ -1,6 +1,6 @@
 # ComfyUI 出图 / 出视频 POC
 
-这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`，以及 [issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的 ComfyUI 客户端。一条命令复制模板，只写白名单字段，提交后等进度，再把文件下载到本地。
+这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`，[issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的 ComfyUI 客户端，以及 [issue #5](https://github.com/loootte/multimodal-agent-studio/issues/5) 的会话工件库。一条命令复制模板，只写白名单字段，提交后等进度，再把文件收进当前会话。
 
 它不是聊天界面，也不让模型改工作流。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
 
@@ -21,6 +21,8 @@ copy config.example.json config.json
 | `COMFY_IMAGE_WORKFLOW` | 文生图工作流 JSON |
 | `COMFY_VIDEO_WORKFLOW` | 视频工作流 JSON |
 | `COMFY_OUTPUT_DIR` | 下载目录 |
+| `COMFY_ARTIFACT_DIR` | 工件库目录 |
+| `COMFY_SESSION` | 当前会话。不传则用配置里的 `session_id` |
 
 依赖：Python 3.10+，以及 `websocket-client`（`import websocket`）。没有 WebSocket 时会退回轮询 `/history`。
 
@@ -70,7 +72,7 @@ python poc/comfyui/comfy_poc.py video --prompt "a red ceramic teapot on a wooden
 {"prompt":"a red ceramic teapot on a wooden table, soft window light","aspect_ratio":"1:1","seed":7,"style":"photograph"}
 ```
 
-文生视频不传 `image_ref`。图生视频在同一结构上增加 `image_ref`，值是本地图片路径。
+文生视频不传 `image_ref`。图生视频在同一结构上增加 `image_ref`，值是上一张图的 `artifact_id`。
 
 ```json
 {"prompt":"a red ceramic teapot on a wooden table, the camera slowly pushes in","duration_sec":1,"aspect_ratio":"16:9"}
@@ -86,6 +88,21 @@ python poc/comfyui/agent_tools.py call generate_video --json-file video-call.jso
 `style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
 
 `comfy_poc.py` 失败时把 ComfyUI 的错误原文打到标准错误，退出码非 0。客户端不把这段原文改写成另一句话。
+
+成功的工具结果里有 `artifact_id`，没有服务器上的绝对路径，也没有像素或 base64。`image_ref` 用上一轮的 `artifact_id`。运行时按当前会话把文件取出来，再交给图生视频。
+
+## 工件
+
+[issue #5](https://github.com/loootte/multimodal-agent-studio/issues/5) 把每次成功的生成按会话收进 `artifact_dir`（默认 `artifacts/`，不进 Git）。一条记录有文件、类型、宽高、视频时长、seed、用过的模板、用户原句，以及真正写进工作流的 prompt。
+
+模型和聊天只引用 `artifact_id`。展示地址是 `/sessions/{session_id}/artifacts/{artifact_id}`。会话不对，或者拿着 ComfyUI 的 `/view` 文件名来要，都读不到文件。
+
+```
+python poc/comfyui/artifacts.py check
+python poc/comfyui/artifacts.py serve
+```
+
+`check` 不连接 ComfyUI。`serve` 只听 `127.0.0.1:8765`。会话可以用配置里的 `session_id`，或环境变量 `COMFY_SESSION`。
 
 ## 工作流里会被替换的字段
 

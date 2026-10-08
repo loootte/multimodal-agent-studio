@@ -12,6 +12,7 @@ import os
 import random
 import sys
 
+import artifacts
 import comfy_client
 import comfy_poc
 import template_fill
@@ -72,7 +73,7 @@ def tool_specs() -> list[dict]:
         },
         {
             "name": "generate_video",
-            "description": "根据画面描述生成一段视频。传入参考图时走图生视频，否则走文生视频。",
+            "description": "根据画面描述生成一段视频。传入 artifact_id 时走图生视频，否则走文生视频。",
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
@@ -81,7 +82,7 @@ def tool_specs() -> list[dict]:
                     "prompt": {"type": "string", "minLength": 1, "description": "画面描述。"},
                     "duration_sec": {"type": "number", "exclusiveMinimum": 0, "description": "时长（秒）。超过模板上限会被拒绝。"},
                     "aspect_ratio": {"type": "string", "enum": aspects, "description": "画幅，只能是白名单里的值。"},
-                    "image_ref": {"type": "string", "description": "可选。本地参考图路径。传入则图生视频，不传则文生视频。"},
+                    "image_ref": {"type": "string", "description": "可选。上一张图的 artifact_id。传入则图生视频，不传则文生视频。"},
                 },
             },
         },
@@ -166,6 +167,15 @@ def values_match(tool: str, workflow: dict, fields: dict, prompt: str, aspect: s
     return None
 
 
+def _published_result(tool: str, records: list[dict], extra: dict) -> dict:
+    result = {"ok": True, "tool": tool}
+    result.update(records[0])
+    if len(records) > 1:
+        result["artifact_ids"] = [item["artifact_id"] for item in records]
+    result.update(extra)
+    return result
+
+
 def generate_image(prompt: str, aspect_ratio: str, seed: int | None = None, style: str | None = None) -> dict:
     arguments = {"prompt": prompt, "aspect_ratio": aspect_ratio, "seed": seed, "style": style}
     return call_tool("generate_image", {key: value for key, value in arguments.items() if value is not None or key in {"prompt", "aspect_ratio"}})
@@ -214,15 +224,17 @@ def _generate_image(arguments: dict) -> dict:
         return tool_error(tool, "internal_error", "风格句没有写进模板。")
     template_fill.assert_template_edit(template, workflow, fields)
     files = comfy_client.run(config["comfy_url"], template, workflow, fields, timeout, config["output_dir"])
-    return {
-        "ok": True,
-        "tool": tool,
-        "prompt": arguments["prompt"],
-        "aspect_ratio": aspect,
-        "seed": seed,
-        "style": style,
-        "files": files,
-    }
+    records = artifacts.remember_outputs(
+        config,
+        files,
+        kind="image",
+        user_prompt=arguments["prompt"],
+        workflow_prompt=template_fill.read_back(workflow, fields, "positive_prompt"),
+        seed=int(template_fill.read_back(workflow, fields, "seed")),
+        width=int(template_fill.read_back(workflow, fields, "width")),
+        height=int(template_fill.read_back(workflow, fields, "height")),
+    )
+    return _published_result(tool, records, {"aspect_ratio": aspect, "style": style})
 
 
 def _generate_video(arguments: dict) -> dict:
@@ -242,13 +254,17 @@ def _generate_video(arguments: dict) -> dict:
     if problem:
         return problem
     image_ref = arguments.get("image_ref")
+    config = comfy_poc.load_config()
+    local_image = None
+    ref_id = None
     if image_ref is not None:
         if not isinstance(image_ref, str) or not image_ref.strip():
-            return tool_error(tool, "image_not_found", "image_ref 必须是本地图片路径。", "image_ref")
-        if not os.path.isfile(image_ref):
-            return tool_error(tool, "image_not_found", "找不到参考图。", "image_ref")
+            return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
+        try:
+            local_image, ref_id = artifacts.resolve_image_ref(config, image_ref)
+        except artifacts.ArtifactError as exc:
+            return tool_error(tool, "image_not_found", exc.message, "image_ref")
     kind = "video_i2v" if image_ref else "video"
-    config = comfy_poc.load_config()
     template, fields, timeout = template_fill.load_job(config, kind)
     if aspect not in (fields.get("aspects") or {}):
         return tool_error(tool, "invalid_aspect_ratio", "这张视频模板没有这个画幅。", "aspect_ratio")
@@ -264,9 +280,9 @@ def _generate_video(arguments: dict) -> dict:
     workflow = template_fill.copy_template(template)
     template_fill.fill_common(workflow, fields, arguments["prompt"], aspect, seed, None)
     template_fill.fill_frames(workflow, fields, frames)
-    if image_ref:
+    if local_image:
         template_fill.assert_image_to_video(workflow, fields)
-        uploaded = comfy_client.upload(config["comfy_url"], image_ref)
+        uploaded = comfy_client.upload(config["comfy_url"], local_image)
         template_fill.set_reference_name(workflow, fields, uploaded)
         template_fill.assert_image_to_video(workflow, fields)
         mode = "image_to_video"
@@ -278,18 +294,21 @@ def _generate_video(arguments: dict) -> dict:
         return problem
     template_fill.assert_template_edit(template, workflow, fields)
     files = comfy_client.run(config["comfy_url"], template, workflow, fields, timeout, config["output_dir"])
-    return {
-        "ok": True,
-        "tool": tool,
-        "prompt": arguments["prompt"],
-        "aspect_ratio": aspect,
-        "duration_sec": duration,
-        "frames": frames,
-        "seed": seed,
-        "image_ref": image_ref,
-        "mode": mode,
-        "files": files,
-    }
+    records = artifacts.remember_outputs(
+        config,
+        files,
+        kind=kind,
+        user_prompt=arguments["prompt"],
+        workflow_prompt=template_fill.read_back(workflow, fields, "positive_prompt"),
+        seed=int(template_fill.read_back(workflow, fields, "seed")),
+        width=int(template_fill.read_back(workflow, fields, "width")),
+        height=int(template_fill.read_back(workflow, fields, "height")),
+        duration_sec=float(frames) / float(fields.get("fps") or 16),
+    )
+    extra = {"aspect_ratio": aspect, "frames": frames, "mode": mode}
+    if ref_id:
+        extra["image_ref"] = ref_id
+    return _published_result(tool, records, extra)
 
 
 def call_tool(name: str, arguments: dict) -> dict:
@@ -304,6 +323,8 @@ def call_tool(name: str, arguments: dict) -> dict:
             return _generate_video(arguments)
     except template_fill.TemplateError as exc:
         return tool_error(name, "template_error", exc.message)
+    except artifacts.ArtifactError as exc:
+        return tool_error(name, "artifact_error", exc.message)
     except comfy_poc.ComfyFailure as exc:
         return tool_error(name, "comfyui_error", public_comfy_message(exc))
 
@@ -373,6 +394,96 @@ def self_check() -> None:
     for item in samples:
         if item["ok"] or "workflow" in json.dumps(item):
             comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
+    artifacts.self_check()
+    _check_artifact_handoff()
+
+
+def _check_artifact_handoff() -> None:
+    import tempfile
+
+    temporary = tempfile.TemporaryDirectory()
+    root = temporary.name
+    old_dir = os.environ.get("COMFY_ARTIFACT_DIR")
+    old_session = os.environ.get("COMFY_SESSION")
+    os.environ["COMFY_ARTIFACT_DIR"] = root
+    os.environ["COMFY_SESSION"] = "session-a"
+    png = artifacts._png(8, 6)
+    source = os.path.join(root, "in.png")
+    rendered = os.path.join(root, "out.mp4")
+    with open(source, "wb") as handle:
+        handle.write(png)
+    with open(rendered, "wb") as handle:
+        handle.write(artifacts._mp4(0, 512, 288, 16, 17))
+    store = artifacts.ArtifactStore(root)
+    image = store.save(
+        session_id="session-a",
+        source_path=source,
+        seed=7,
+        template="workflows/image_api.json",
+        user_prompt="user says a red teapot",
+        workflow_prompt="a red ceramic teapot on a wooden table",
+        width=8,
+        height=6,
+    )
+    seen = {}
+
+    def fake_upload(_base, path):
+        with open(path, "rb") as handle:
+            seen["upload"] = handle.read()
+        return "ref.png"
+
+    def fake_run(*_args, **_kwargs):
+        return [rendered]
+
+    original_upload = comfy_client.upload
+    original_run = comfy_client.run
+    comfy_client.upload = fake_upload
+    comfy_client.run = fake_run
+    try:
+        result = call_tool(
+            "generate_video",
+            {
+                "prompt": "the camera slowly pushes in",
+                "duration_sec": 1,
+                "aspect_ratio": "16:9",
+                "image_ref": image["artifact_id"],
+            },
+        )
+    finally:
+        comfy_client.upload = original_upload
+        comfy_client.run = original_run
+        if old_dir is None:
+            os.environ.pop("COMFY_ARTIFACT_DIR", None)
+        else:
+            os.environ["COMFY_ARTIFACT_DIR"] = old_dir
+        if old_session is None:
+            os.environ.pop("COMFY_SESSION", None)
+        else:
+            os.environ["COMFY_SESSION"] = old_session
+    try:
+        if not result.get("ok"):
+            comfy_poc.fail(f"artifact_id 没有交给 generate_video：{result}")
+        if seen.get("upload") != png:
+            comfy_poc.fail("generate_video 没有取回上一张图的文件。")
+        if result.get("image_ref") != image["artifact_id"]:
+            comfy_poc.fail("结果没有沿用上一张图的 artifact_id。")
+        if "files" in result or source in json.dumps(result) or rendered in json.dumps(result):
+            comfy_poc.fail("工具结果里出现了文件路径。")
+        body = artifacts.model_request(
+            "session-a",
+            "用刚才那张图做视频",
+            [image["artifact_id"], result["artifact_id"]],
+        )
+        artifacts.assert_model_text(
+            body,
+            [image["artifact_id"], result["artifact_id"]],
+            [source, rendered, store.file_for("session-a", image["artifact_id"]) or ""],
+            [png, open(rendered, "rb").read()],
+        )
+        if artifacts.ArtifactStore(root).file_for("session-b", result["artifact_id"]) is not None:
+            comfy_poc.fail("下一轮视频工件能被别的会话读到。")
+    finally:
+        temporary.cleanup()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -411,7 +522,7 @@ def main(argv: list[str] | None = None) -> None:
                 result = tool_error(args.name, "invalid_parameter", f"参数不是 JSON：{exc.msg}")
             else:
                 result = call_tool(args.name, payload)
-    except (comfy_poc.ComfyFailure, template_fill.TemplateError) as exc:
+    except (comfy_poc.ComfyFailure, template_fill.TemplateError, artifacts.ArtifactError) as exc:
         print(exc.message, file=sys.stderr)
         raise SystemExit(1) from exc
     print(json.dumps(result, ensure_ascii=False, indent=2))

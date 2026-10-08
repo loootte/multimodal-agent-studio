@@ -12,6 +12,7 @@ import os
 import random
 import sys
 
+import artifacts
 import comfy_client
 import template_fill
 from comfy_client import ComfyFailure
@@ -315,10 +316,15 @@ def main(argv: list[str] | None = None) -> None:
         saved = _main(argv)
     except template_fill.TemplateError as exc:
         _exit_failure(exc.message, exc.payload)
+    except artifacts.ArtifactError as exc:
+        _exit_failure(exc.message, None)
     except ComfyFailure as exc:
         _exit_failure(exc.message, exc.payload)
-    for path in saved or []:
+    for path in (saved or {}).get("paths") or []:
         print(f"输出 {path}", flush=True)
+    for record in (saved or {}).get("records") or []:
+        print(f"artifact_id {record['artifact_id']}", flush=True)
+        print(f"url {record['url']}", flush=True)
 
 
 def _exit_failure(message: str, payload) -> None:
@@ -328,7 +334,7 @@ def _exit_failure(message: str, payload) -> None:
     raise SystemExit(1)
 
 
-def _main(argv: list[str] | None) -> list[str] | None:
+def _main(argv: list[str] | None) -> dict | None:
     args = build_parser().parse_args(argv)
     config = load_config()
     if args.command == "check":
@@ -356,7 +362,23 @@ def _main(argv: list[str] | None) -> list[str] | None:
     if args.print_prompt:
         print(json.dumps(prompt, ensure_ascii=False, indent=2))
         return None
-    return execute_workflow(config["comfy_url"], template, prompt, fields, timeout, config["output_dir"])
+    paths = execute_workflow(config["comfy_url"], template, prompt, fields, timeout, config["output_dir"])
+    duration = None
+    if args.command == "video":
+        frame_count = int(template_fill.read_back(prompt, fields, "frames"))
+        duration = frame_count / float(fields.get("fps") or 16)
+    records = artifacts.remember_outputs(
+        config,
+        paths,
+        kind=template_kind(args),
+        user_prompt=args.prompt,
+        workflow_prompt=template_fill.read_back(prompt, fields, "positive_prompt"),
+        seed=int(template_fill.read_back(prompt, fields, "seed")),
+        width=int(template_fill.read_back(prompt, fields, "width")),
+        height=int(template_fill.read_back(prompt, fields, "height")),
+        duration_sec=duration,
+    )
+    return {"paths": paths, "records": records}
 
 
 if __name__ == "__main__":

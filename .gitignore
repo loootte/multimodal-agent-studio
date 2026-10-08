@@ -9,3 +9,4 @@ __pycache__/
 .DS_Store
 poc/comfyui/config.json
 poc/comfyui/output/
+poc/comfyui/artifacts/

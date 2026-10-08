@@ -1,6 +1,8 @@
 {
   "comfy_url": "http://127.0.0.1:8188",
   "output_dir": "output",
+  "artifact_dir": "artifacts",
+  "session_id": "local",
   "image": {
     "workflow": "workflows/image_api.json",
     "fields": "workflows/image.fields.json",
