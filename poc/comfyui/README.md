@@ -1,8 +1,8 @@
 # ComfyUI 出图 / 出视频 POC
 
-这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本。一条命令提交一张固定的 ComfyUI API 工作流，把提示词写进 CLIP 文本节点，等进度，再把文件下载到本地。
+这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板。一条命令复制模板，只写白名单字段，等进度，再把文件下载到本地。
 
-它不是聊天界面，也不让模型改工作流。换模板只换 JSON 和旁边的字段对照，命令不变。
+它不是聊天界面，也不让模型改工作流。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
 
 ## 准备
 
@@ -29,11 +29,16 @@ copy config.example.json config.json
 在仓库根目录：
 
 ```
+python poc/comfyui/comfy_poc.py check
 python poc/comfyui/comfy_poc.py image --prompt "a red ceramic teapot on a wooden table, soft window light"
+python poc/comfyui/comfy_poc.py i2i --prompt "a red ceramic teapot on a wooden table, soft window light" --image path\to\reference.png
 python poc/comfyui/comfy_poc.py video --prompt "a red ceramic teapot on a wooden table, the camera slowly pushes in" --frames 17
+python poc/comfyui/comfy_poc.py video --prompt "a red ceramic teapot on a wooden table, the camera slowly pushes in" --image path\to\reference.png --frames 17
 ```
 
-可选参数：`--negative`、`--aspect`（只允许 `1:1`、`16:9`、`9:16`）、`--seed`。视频还可以传 `--seconds`。`--frames` 和 `--seconds` 同时存在时用帧数。`--image 本地图片` 会上传到 ComfyUI 的 input，并连到图生视频的起始帧；不传就是文生视频。
+`check` 不连接 ComfyUI。它确认对照表里的节点都在，故意写错的节点不会发出请求，自由 JSON 和白名单之外的改动也会在提交前被拒绝。
+
+可选参数：`--negative`、`--aspect`（只允许 `1:1`、`16:9`、`9:16`）、`--seed`、`--steps`。不传 `--steps` 就保留模板里的步数。视频还可以传 `--seconds`。`--frames` 和 `--seconds` 同时存在时用帧数。视频不传 `--image` 用文生视频模板；传入则用图生视频模板，只替换参考图文件名，不往图里加节点。
 
 `--print-prompt` 只打印替换后的工作流，不提交。
 
@@ -53,14 +58,28 @@ SDXL checkpoint `waiIllustriousSDXL_v160.safetensors`。20 步，euler / normal�
 | negative_prompt | 3 CLIPTextEncode | text | 不传则保留模板默认句 |
 | width / height | 4 EmptyLatentImage | width, height | 由画幅决定 |
 | seed | 5 KSampler | seed | |
+| steps | 5 KSampler | steps | 不传则保留模板里的 20 |
 
 画幅：`1:1` 1024×1024，`16:9` 1344×768，`9:16` 768×1344。
 
 节点 1 是模型，6 是 VAEDecode，7 是 SaveImage。这三个不在白名单里。
 
-### 视频 `workflows/video_api.json`
+### 图生图 `workflows/image_i2i_api.json`
 
-Wan 2.2 I2V A14B Q4 GGUF，高噪和低噪各 2 步，一共 4 步，CFG 1，euler / simple。文本编码器是 `umt5_xxl_fp8_e4m3fn_scaled.safetensors`，类型 `wan`，放在 CPU。默认不接参考图。
+同一张 SDXL checkpoint。参考图先按画幅缩放，再以 denoise 0.45 重绘。denoise 写死在模板里，不在白名单中。
+
+| 字段 | 节点 | 输入 | 说明 |
+| --- | --- | --- | --- |
+| positive_prompt | 2 CLIPTextEncode | text | 正向提示词 |
+| negative_prompt | 3 CLIPTextEncode | text | 不传则保留模板默认句 |
+| width / height | 5 ImageScale | width, height | 由画幅决定 |
+| seed | 7 KSampler | seed | |
+| steps | 7 KSampler | steps | 不传则保留模板里的 20 |
+| reference_image | 4 LoadImage | image | 模板里已经接到节点 5。只替换文件名 |
+
+### 文生视频 `workflows/video_api.json`
+
+Wan 2.2 I2V A14B Q4 GGUF，高噪和低噪各 2 步，一共 4 步，CFG 1，euler / simple。文本编码器是 `umt5_xxl_fp8_e4m3fn_scaled.safetensors`，类型 `wan`，放在 CPU。这张模板没有参考图输入。
 
 | 字段 | 节点 | 输入 | 说明 |
 | --- | --- | --- | --- |
@@ -69,10 +88,14 @@ Wan 2.2 I2V A14B Q4 GGUF，高噪和低噪各 2 步，一共 4 步，CFG 1，eul
 | width / height | 11 WanImageToVideo | width, height | 宽高都是 16 的倍数 |
 | frames | 11 WanImageToVideo | length | 对齐到 4n+1，不超过 max_frames |
 | seed | 12 和 13 KSamplerAdvanced | noise_seed | 两个采样节点用同一个种子 |
-| reference_image | 20 LoadImage | image | 只有传入本地参考图时才把节点 20 放进提交图，并让节点 11 的 start_image 指向它。采样用的是节点 11 输出的条件和 latent |
+| steps | 12 和 13 KSamplerAdvanced | steps | 模板按 4 步准备。采样区间 0–2 和 2–4 不在白名单里 |
 
-画幅：`1:1` 384×384，`16:9` 512×288，`9:16` 288×512。帧数上限 33，约 2 秒（16 fps）。
+画幅：`1:1` 384×384，`16:9` 512×288，`9:16` 288×512。帧数上限 33，16 fps，最长约 2.06 秒。超过上限的请求会在对齐时被截到 33 帧。
+
+### 图生视频 `workflows/video_i2v_api.json`
+
+和文生视频同一套 Wan 节点。节点 20 LoadImage 已经在模板里，并接到节点 11 的 `start_image`。对照表是 `workflows/video_i2v.fields.json`，白名单与文生视频相同，另加 `reference_image`。时长上限同样是 33 帧。
 
 其余节点不替换：1 和 4 是 GGUF UNet，2 和 5 是 4 步 LoRA，3 和 6 是 ModelSamplingSD3，7 是 CLIPLoader，10 是 VAE，14 是 VAEDecode，15 是 CreateVideo，16 是 SaveVideo。
 
-模型文件名写在工作流 JSON 里，因为那是导出的内容。换成本机另一张模板时，同时换 `*.fields.json` 里的节点号。命令不用改。
+模型文件名写在工作流 JSON 里，因为那是导出的内容。权重文件不进仓库。换成本机另一张模板时，同时换配置和 `*.fields.json` 里的节点号。提交代码不用改。对照表里的节点不存在时，请求不会发到 ComfyUI，错误里写明缺的字段。

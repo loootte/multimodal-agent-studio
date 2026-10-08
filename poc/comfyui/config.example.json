@@ -6,9 +6,19 @@
     "fields": "workflows/image.fields.json",
     "timeout_sec": 900
   },
+  "image_i2i": {
+    "workflow": "workflows/image_i2i_api.json",
+    "fields": "workflows/image_i2i.fields.json",
+    "timeout_sec": 900
+  },
   "video": {
     "workflow": "workflows/video_api.json",
     "fields": "workflows/video.fields.json",
+    "timeout_sec": 2700
+  },
+  "video_i2v": {
+    "workflow": "workflows/video_i2v_api.json",
+    "fields": "workflows/video_i2v.fields.json",
     "timeout_sec": 2700
   }
 }

@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+import template_fill
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASPECTS = ("1:1", "16:9", "9:16")
 
@@ -179,24 +181,15 @@ def apply_frames(prompt: dict, fields: dict, args) -> None:
     print(f"帧数 {length}（请求 {requested}，上限 {limit}，步长 {step}，fps {fps:g}）", flush=True)
 
 
-def apply_reference(prompt: dict, fields: dict, uploaded_name: str | None) -> None:
-    if not uploaded_name:
+def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
+    if steps is None:
         return
-    spec = fields.get("reference_image")
-    if not isinstance(spec, dict):
-        fail("视频字段对照里没有 reference_image，不能提交参考图。")
-    node_id = str(spec["node"])
-    prompt[node_id] = {
-        "class_type": spec.get("class_type") or "LoadImage",
-        "inputs": {spec["input"]: uploaded_name},
-    }
-    link = spec.get("link_to") or {}
-    set_inputs(
-        prompt,
-        {"node": link["node"], "input": link["input"]},
-        [node_id, int(link.get("output") or 0)],
-    )
-    print(f"参考图写入节点 {node_id} 的 {spec['input']}：{uploaded_name}", flush=True)
+    if steps < 1:
+        fail("steps 必须大于 0。")
+    if "steps" not in fields:
+        fail("这张模板的对照表没有 steps。")
+    set_inputs(prompt, fields["steps"], int(steps))
+    print(f"步数 {int(steps)}", flush=True)
 
 
 def request_json(url: str, payload: dict | None = None, timeout: int = 120):
@@ -285,7 +278,8 @@ def upload_image(base: str, path: str) -> str:
     return name
 
 
-def submit_prompt(base: str, prompt: dict, client_id: str) -> str:
+def submit_prompt(base: str, prompt: dict, client_id: str, template: dict, fields: dict) -> str:
+    template_fill.assert_template_edit(template, prompt, fields)
     result = request_json(base + "/prompt", {"prompt": prompt, "client_id": client_id})
     node_errors = result.get("node_errors") or {}
     if node_errors or not result.get("prompt_id"):
@@ -485,39 +479,72 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--negative", default=None, help="负向提示词。不传则保留模板里的默认值。")
         command.add_argument("--aspect", default="1:1", choices=ASPECTS, help="画幅。只允许这三项。")
         command.add_argument("--seed", type=int, default=None, help="随机种子。不传则本次随机生成。")
+        command.add_argument("--steps", type=int, default=None, help="采样步数。不传则保留模板里的值。")
         command.add_argument("--print-prompt", action="store_true", help="只打印替换后的工作流，不提交。")
 
     image = subparsers.add_parser("image", help="文生图。")
     add_common(image)
-    video = subparsers.add_parser("video", help="文生视频。传入 --image 时改为图生视频。")
+    i2i = subparsers.add_parser("i2i", help="图生图。使用 image_i2i 模板和本地参考图。")
+    add_common(i2i)
+    i2i.add_argument("--image", required=True, help="本地参考图。")
+    video = subparsers.add_parser("video", help="文生视频。传入 --image 时改用 video_i2v 模板。")
     add_common(video)
     video.add_argument("--frames", type=int, default=None, help="帧数。会按字段对照里的步长对齐，并不超过上限。")
     video.add_argument("--seconds", type=float, default=None, help="时长（秒）。同时传了 --frames 时以帧数为准。")
-    video.add_argument("--image", default=None, help="本地参考图。不传则不连接 LoadImage。")
+    video.add_argument("--image", default=None, help="本地参考图。传入则使用图生视频模板。")
+    subparsers.add_parser("check", help="校验模板对照表。不连接 ComfyUI。")
     return parser
+
+
+def template_kind(args) -> str:
+    if args.command == "image":
+        return "image"
+    if args.command == "i2i":
+        return "image_i2i"
+    if args.image:
+        return "video_i2v"
+    return "video"
 
 
 def main(argv: list[str] | None = None) -> None:
     configure_stdio()
+    try:
+        _main(argv)
+    except template_fill.TemplateError as exc:
+        fail(exc.message, exc.payload)
+
+
+def _main(argv: list[str] | None) -> None:
     args = build_parser().parse_args(argv)
     config = load_config()
-    prompt, fields, timeout = job_paths(config, args.command)
+    if args.command == "check":
+        template_fill.run_check(config)
+        print("template_check ok")
+        return
+    template, fields, timeout = job_paths(config, template_kind(args))
+    template_fill.validate_fields(template, fields)
+    prompt = template_fill.copy_template(template)
     apply_common(prompt, fields, args)
-    uploaded = None
+    apply_steps(prompt, fields, args.steps)
     if args.command == "video":
         apply_frames(prompt, fields, args)
-        if args.image:
-            if args.print_prompt:
-                uploaded = os.path.basename(args.image)
-            else:
-                uploaded = upload_image(config["comfy_url"], args.image)
-        apply_reference(prompt, fields, uploaded)
+    image_path = getattr(args, "image", None)
+    if image_path:
+        if "reference_image" not in fields:
+            raise template_fill.TemplateError("这张模板的对照表没有 reference_image，不能提交参考图。")
+        uploaded = os.path.basename(image_path) if args.print_prompt else upload_image(config["comfy_url"], image_path)
+        template_fill.set_reference_name(prompt, fields, uploaded)
+        spec = fields["reference_image"]
+        print(f"参考图写入节点 {spec['node']} 的 {spec['input']}：{uploaded}", flush=True)
+    elif "reference_image" in fields:
+        raise template_fill.TemplateError("这张模板需要参考图，未提交。")
+    template_fill.assert_template_edit(template, prompt, fields)
     if args.print_prompt:
         print(json.dumps(prompt, ensure_ascii=False, indent=2))
         return
 
     client_id = str(uuid.uuid4())
-    prompt_id = submit_prompt(config["comfy_url"], prompt, client_id)
+    prompt_id = submit_prompt(config["comfy_url"], prompt, client_id, template, fields)
     print(f"prompt_id {prompt_id}", flush=True)
     entry = wait_for_result(config["comfy_url"], prompt, prompt_id, client_id, timeout)
     confirm_history_prompt(entry, prompt, fields)

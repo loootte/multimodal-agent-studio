@@ -1,0 +1,19 @@
+{
+  "positive_prompt": {"node": "2", "input": "text"},
+  "negative_prompt": {"node": "3", "input": "text"},
+  "width": {"node": "5", "input": "width"},
+  "height": {"node": "5", "input": "height"},
+  "seed": {"node": "7", "input": "seed"},
+  "steps": {"node": "7", "input": "steps"},
+  "reference_image": {
+    "node": "4",
+    "input": "image",
+    "class_type": "LoadImage",
+    "link_to": {"node": "5", "input": "image", "output": 0}
+  },
+  "aspects": {
+    "1:1": {"width": 1024, "height": 1024},
+    "16:9": {"width": 1344, "height": 768},
+    "9:16": {"width": 768, "height": 1344}
+  }
+}
