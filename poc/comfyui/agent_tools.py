@@ -96,13 +96,9 @@ def tool_error(tool: str, code: str, message: str, parameter: str | None = None)
 
 
 def public_comfy_message(exc: comfy_poc.ComfyFailure) -> str:
-    payload = exc.payload
-    if isinstance(payload, dict):
-        if isinstance(payload.get("exception_message"), str) and payload["exception_message"].strip():
-            return payload["exception_message"].strip()
-        error = payload.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"].strip():
-            return error["message"].strip()
+    text = comfy_client.original_error_text(exc.payload)
+    if text:
+        return text
     return exc.message
 
 

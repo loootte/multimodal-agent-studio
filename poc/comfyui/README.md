@@ -1,6 +1,6 @@
 # ComfyUI 出图 / 出视频 POC
 
-这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，以及 [issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`。一条命令复制模板，只写白名单字段，等进度，再把文件下载到本地。
+这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`，以及 [issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的 ComfyUI 客户端。一条命令复制模板，只写白名单字段，提交后等进度，再把文件下载到本地。
 
 它不是聊天界面，也不让模型改工作流。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
 
@@ -23,6 +23,22 @@ copy config.example.json config.json
 | `COMFY_OUTPUT_DIR` | 下载目录 |
 
 依赖：Python 3.10+，以及 `websocket-client`（`import websocket`）。没有 WebSocket 时会退回轮询 `/history`。
+
+## 客户端
+
+[issue #4](https://github.com/loootte/multimodal-agent-studio/issues/4) 的提交层在 `comfy_client.py`。默认地址是 `http://127.0.0.1:8188`，配置里的 `comfy_url` 或环境变量 `COMFY_URL` 可以换掉它。
+
+`submit` 调用 `POST /prompt`。它拿到 `prompt_id` 后立即返回，不等采样结束。WebSocket `/ws` 接收 `progress`、`executing` 和 `executed`。进度事件带有这次的 `prompt_id`、当前步 `value`、总步 `max`，以及采样百分比。两个 `prompt_id` 的事件分开放，不会写进同一个列表。
+
+WebSocket 断开或连不上时，改查 `GET /history/{prompt_id}`。文件用 `GET /view?filename=&subfolder=&type=output` 下载。`cancel` 先把这次任务移出等待队列，再 `POST /interrupt`，请求里带这次的 `prompt_id`。取消和执行失败都不会记为成功。
+
+缺节点或缺模型时，异常里的句子和载荷都保留 ComfyUI 返回的原文，这里不翻译。
+
+```
+python poc/comfyui/comfy_client.py check
+```
+
+`check` 不连接 ComfyUI。`comfy_poc.py` 的 `image` 和 `video` 命令仍会等文件下完再退出：它们先调用 `submit`，再等待进度。
 
 ## 命令
 
@@ -69,7 +85,7 @@ python poc/comfyui/agent_tools.py call generate_video --json-file video-call.jso
 
 `style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
 
-`comfy_poc.py` 失败时把 ComfyUI 的错误原文打到标准错误，退出码非 0。
+`comfy_poc.py` 失败时把 ComfyUI 的错误原文打到标准错误，退出码非 0。客户端不把这段原文改写成另一句话。
 
 ## 工作流里会被替换的字段
 

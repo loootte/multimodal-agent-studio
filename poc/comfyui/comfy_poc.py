@@ -11,24 +11,14 @@ import json
 import os
 import random
 import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import uuid
 
+import comfy_client
 import template_fill
+from comfy_client import ComfyFailure
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASPECTS = ("1:1", "16:9", "9:16")
 _talk = True
-
-
-class ComfyFailure(Exception):
-    def __init__(self, message: str, payload=None):
-        super().__init__(message)
-        self.message = message
-        self.payload = payload
 
 
 class talk_off:
@@ -211,266 +201,40 @@ def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
     note(f"步数 {int(steps)}")
 
 
-def request_json(url: str, payload: dict | None = None, timeout: int = 120):
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = raw
-        fail(f"ComfyUI HTTP {exc.code} {url}", parsed)
-    except urllib.error.URLError as exc:
-        fail(f"连不上 ComfyUI：{url} ({exc.reason})")
-    if not body:
-        return {}
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        fail(f"ComfyUI 返回的不是 JSON：{url}", body[:2000])
-
-
 def upload_image(base: str, path: str) -> str:
-    if not os.path.isfile(path):
-        fail(f"参考图不存在：{path}")
-    filename = os.path.basename(path)
-    ext = os.path.splitext(filename)[1].lower()
-    mime = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-    }.get(ext, "application/octet-stream")
-    boundary = "----ComfyPoc" + uuid.uuid4().hex
-    with open(path, "rb") as handle:
-        file_bytes = handle.read()
-
-    def field(name: str, value: str) -> bytes:
-        return (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n"
-        ).encode("utf-8")
-
-    file_head = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
-        f"Content-Type: {mime}\r\n\r\n"
-    ).encode("utf-8")
-    body = b"".join(
-        [
-            field("overwrite", "true"),
-            field("type", "input"),
-            file_head,
-            file_bytes,
-            f"\r\n--{boundary}--\r\n".encode("utf-8"),
-        ]
-    )
-    req = urllib.request.Request(
-        base + "/upload/image",
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        fail(f"上传参考图失败，HTTP {exc.code}", raw)
-    except urllib.error.URLError as exc:
-        fail(f"上传参考图失败：{exc.reason}")
-    name = payload.get("name")
-    if not name:
-        fail("上传参考图后 ComfyUI 没有返回文件名。", payload)
-    subfolder = payload.get("subfolder") or ""
-    if subfolder:
-        return subfolder.replace("\\", "/") + "/" + name
-    return name
+    return comfy_client.ComfyClient(base).upload_image(path)
 
 
 def submit_prompt(base: str, prompt: dict, client_id: str, template: dict, fields: dict) -> str:
     template_fill.assert_template_edit(template, prompt, fields)
-    result = request_json(base + "/prompt", {"prompt": prompt, "client_id": client_id})
-    node_errors = result.get("node_errors") or {}
-    if node_errors or not result.get("prompt_id"):
-        fail("ComfyUI 拒绝了这张工作流。", result)
-    return result["prompt_id"]
-
-
-def history_entry(base: str, prompt_id: str):
-    payload = request_json(f"{base}/history/{urllib.parse.quote(prompt_id)}")
-    if not isinstance(payload, dict):
-        return None
-    entry = payload.get(prompt_id)
-    if isinstance(entry, dict):
-        return entry
-    return None
-
-
-def status_of(entry: dict) -> tuple[str, bool]:
-    status = entry.get("status") or {}
-    return str(status.get("status_str") or ""), bool(status.get("completed"))
-
-
-def output_files(entry: dict) -> list[dict]:
-    found = []
-    outputs = entry.get("outputs") or {}
-    if not isinstance(outputs, dict):
-        return found
-    for node_out in outputs.values():
-        if not isinstance(node_out, dict):
-            continue
-        for key in ("images", "gifs", "videos", "audio"):
-            items = node_out.get(key) or []
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if isinstance(item, dict) and item.get("filename"):
-                    found.append(item)
-    return found
-
-
-def download_file(base: str, item: dict, output_dir: str) -> str:
-    filename = item["filename"]
-    subfolder = item.get("subfolder") or ""
-    folder_type = item.get("type") or "output"
-    query = urllib.parse.urlencode(
-        {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    )
-    url = f"{base}/view?{query}"
-    relative = os.path.join(subfolder, filename) if subfolder else filename
-    destination = os.path.join(output_dir, relative)
-    os.makedirs(os.path.dirname(destination) or output_dir, exist_ok=True)
+    client = comfy_client.ComfyClient(base, client_id=client_id)
     try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        fail(f"下载输出失败，HTTP {exc.code} {filename}", raw)
-    except urllib.error.URLError as exc:
-        fail(f"下载输出失败：{filename} ({exc.reason})")
-    if not data:
-        fail(f"下载到的文件是空的：{filename}")
-    with open(destination, "wb") as handle:
-        handle.write(data)
-    return os.path.abspath(destination)
+        return client.submit(prompt)
+    finally:
+        client.close()
 
 
-def ws_url(base: str, client_id: str) -> str:
-    parsed = urllib.parse.urlparse(base)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    return urllib.parse.urlunparse(
-        (scheme, parsed.netloc, "/ws", "", urllib.parse.urlencode({"clientId": client_id}), "")
-    )
-
-
-def handle_ws_message(raw, prompt_id: str, prompt: dict) -> str | None:
-    if isinstance(raw, bytes):
-        return None
-    try:
-        message = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    kind = message.get("type")
-    data = message.get("data") or {}
-    if not isinstance(data, dict):
-        return None
-    message_prompt = data.get("prompt_id")
-    if message_prompt and message_prompt != prompt_id:
-        return None
-    if kind == "executing":
-        node = data.get("node")
+def report_event(event: dict, workflow: dict) -> None:
+    kind = event.get("type")
+    if kind == "progress":
+        value = event.get("value")
+        maximum = event.get("max") or 0
+        percent = event.get("percent")
+        node = event.get("node")
+        if maximum:
+            if _talk:
+                prefix = f"节点 {node} " if node else ""
+                print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
+            elif percent is not None:
+                print(f"进度 {percent}%", file=sys.stderr, flush=True)
+    elif kind == "executing" and _talk:
+        node = event.get("node")
         if node is None:
             note("执行结束，正在取结果")
         else:
-            class_type = (prompt.get(str(node)) or {}).get("class_type") or ""
+            class_type = (workflow.get(str(node)) or {}).get("class_type") or ""
             label = f"{node}（{class_type}）" if class_type else str(node)
             note(f"执行节点 {label}")
-    elif kind == "progress":
-        value = data.get("value")
-        maximum = data.get("max") or 0
-        node = data.get("node")
-        if maximum:
-            percent = int(round(100 * float(value) / float(maximum)))
-            prefix = f"节点 {node} " if node else ""
-            if _talk:
-                print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
-            else:
-                print(f"进度 {percent}%", file=sys.stderr, flush=True)
-    elif kind == "execution_error":
-        fail("ComfyUI 执行失败。", data)
-    elif kind == "execution_success":
-        return "success"
-    return None
-
-
-def wait_for_result(base: str, prompt: dict, prompt_id: str, client_id: str, timeout: int) -> dict:
-    ws = None
-    try:
-        from websocket import (  # type: ignore
-            WebSocketConnectionClosedException,
-            WebSocketTimeoutException,
-            create_connection,
-        )
-
-        ws = create_connection(
-            ws_url(base, client_id),
-            timeout=10,
-            header=[f"Origin: {base}"],
-        )
-        ws.settimeout(1)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        print(f"WebSocket 连不上，改为轮询 /history：{exc}", file=sys.stderr, flush=True)
-        ws = None
-        WebSocketTimeoutException = ()  # type: ignore
-        WebSocketConnectionClosedException = ()  # type: ignore
-
-    deadline = time.time() + timeout
-    last_poll = 0.0
-    entry = None
-    try:
-        while time.time() < deadline:
-            if ws is not None:
-                try:
-                    signal = handle_ws_message(ws.recv(), prompt_id, prompt)
-                    if signal == "success":
-                        last_poll = 0.0
-                except WebSocketTimeoutException:
-                    pass
-                except WebSocketConnectionClosedException:
-                    print("WebSocket 已断开，改为轮询 /history", file=sys.stderr, flush=True)
-                    ws = None
-            now = time.time()
-            if now - last_poll >= 2:
-                last_poll = now
-                entry = history_entry(base, prompt_id)
-                if entry:
-                    status_str, completed = status_of(entry)
-                    if status_str == "error":
-                        fail("ComfyUI 执行失败。", entry.get("status"))
-                    if status_str == "success" or (completed and output_files(entry)):
-                        if output_files(entry):
-                            return entry
-            if ws is None:
-                time.sleep(1)
-    finally:
-        if ws is not None:
-            ws.close()
-    fail(
-        f"等待超时（{timeout} 秒）。视频和图片使用各自的超时，这次没有拿到输出。",
-        (entry or {}).get("status"),
-    )
 
 
 def confirm_history_prompt(entry: dict, prompt: dict, fields: dict) -> None:
@@ -529,28 +293,19 @@ def template_kind(args) -> str:
 
 
 def execute_workflow(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str) -> list[str]:
-    client_id = str(uuid.uuid4())
-    prompt_id = submit_prompt(base, workflow, client_id, template, fields)
-    stream = sys.stdout if _talk else sys.stderr
-    print(f"prompt_id {prompt_id}", file=stream, flush=True)
-    entry = wait_for_result(base, workflow, prompt_id, client_id, timeout)
-    confirm_history_prompt(entry, workflow, fields)
-    os.makedirs(output_dir, exist_ok=True)
-    unique = []
-    seen = set()
-    for item in output_files(entry):
-        key = (item.get("filename"), item.get("subfolder"), item.get("type"))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    chosen = [item for item in unique if item.get("type") in (None, "output")]
-    if not chosen:
-        chosen = [item for item in unique if item.get("type") == "temp"]
-    saved = [download_file(base, item, output_dir) for item in chosen]
-    if not saved:
-        fail("执行成功，但历史记录里没有可下载的文件。", entry.get("outputs"))
-    return saved
+    client = comfy_client.ComfyClient(base)
+    try:
+        template_fill.assert_template_edit(template, workflow, fields)
+        prompt_id = client.submit(workflow)
+        stream = sys.stdout if _talk else sys.stderr
+        print(f"prompt_id {prompt_id}", file=stream, flush=True)
+        if client.queued(prompt_id):
+            print(f"队列中 {prompt_id}", file=sys.stderr, flush=True)
+        entry = client.wait(prompt_id, timeout, on_event=lambda event: report_event(event, workflow))
+        confirm_history_prompt(entry, workflow, fields)
+        return client.save_outputs(entry, output_dir)
+    finally:
+        client.close()
 
 
 def main(argv: list[str] | None = None) -> None:
