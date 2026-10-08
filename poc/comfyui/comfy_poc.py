@@ -21,6 +21,34 @@ import template_fill
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASPECTS = ("1:1", "16:9", "9:16")
+_talk = True
+
+
+class ComfyFailure(Exception):
+    def __init__(self, message: str, payload=None):
+        super().__init__(message)
+        self.message = message
+        self.payload = payload
+
+
+class talk_off:
+    """工具调用时不把节点和 workflow 打到标准输出。"""
+
+    def __enter__(self):
+        global _talk
+        self._previous = _talk
+        _talk = False
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        global _talk
+        _talk = self._previous
+        return False
+
+
+def note(message: str) -> None:
+    if _talk:
+        print(message, flush=True)
 
 
 def configure_stdio() -> None:
@@ -31,10 +59,7 @@ def configure_stdio() -> None:
 
 
 def fail(message: str, payload=None) -> None:
-    print(message, file=sys.stderr)
-    if payload is not None:
-        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
-    raise SystemExit(1)
+    raise ComfyFailure(message, payload)
 
 
 def load_json(path: str):
@@ -152,14 +177,8 @@ def apply_common(prompt: dict, fields: dict, args) -> None:
     written = prompt[str(positive["node"])]["inputs"][positive["input"]]
     if written != args.prompt:
         fail("替换后的正向提示词和输入不一致。", {"node": positive, "text": written})
-    print(
-        f"正向提示词写入节点 {positive['node']} 的 {positive['input']}：{written}",
-        flush=True,
-    )
-    print(
-        f"画幅 {args.aspect} → {int(size['width'])}x{int(size['height'])}，seed {seed}",
-        flush=True,
-    )
+    note(f"正向提示词写入节点 {positive['node']} 的 {positive['input']}：{written}")
+    note(f"画幅 {args.aspect} → {int(size['width'])}x{int(size['height'])}，seed {seed}")
 
 
 def apply_frames(prompt: dict, fields: dict, args) -> None:
@@ -178,7 +197,7 @@ def apply_frames(prompt: dict, fields: dict, args) -> None:
         fail("帧数必须大于 0。")
     length = snap_frames(requested, step, limit)
     set_inputs(prompt, fields["frames"], length)
-    print(f"帧数 {length}（请求 {requested}，上限 {limit}，步长 {step}，fps {fps:g}）", flush=True)
+    note(f"帧数 {length}（请求 {requested}，上限 {limit}，步长 {step}，fps {fps:g}）")
 
 
 def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
@@ -189,7 +208,7 @@ def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
     if "steps" not in fields:
         fail("这张模板的对照表没有 steps。")
     set_inputs(prompt, fields["steps"], int(steps))
-    print(f"步数 {int(steps)}", flush=True)
+    note(f"步数 {int(steps)}")
 
 
 def request_json(url: str, payload: dict | None = None, timeout: int = 120):
@@ -371,11 +390,11 @@ def handle_ws_message(raw, prompt_id: str, prompt: dict) -> str | None:
     if kind == "executing":
         node = data.get("node")
         if node is None:
-            print("执行结束，正在取结果", flush=True)
+            note("执行结束，正在取结果")
         else:
             class_type = (prompt.get(str(node)) or {}).get("class_type") or ""
             label = f"{node}（{class_type}）" if class_type else str(node)
-            print(f"执行节点 {label}", flush=True)
+            note(f"执行节点 {label}")
     elif kind == "progress":
         value = data.get("value")
         maximum = data.get("max") or 0
@@ -383,7 +402,10 @@ def handle_ws_message(raw, prompt_id: str, prompt: dict) -> str | None:
         if maximum:
             percent = int(round(100 * float(value) / float(maximum)))
             prefix = f"节点 {node} " if node else ""
-            print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
+            if _talk:
+                print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
+            else:
+                print(f"进度 {percent}%", file=sys.stderr, flush=True)
     elif kind == "execution_error":
         fail("ComfyUI 执行失败。", data)
     elif kind == "execution_success":
@@ -427,7 +449,7 @@ def wait_for_result(base: str, prompt: dict, prompt_id: str, client_id: str, tim
                 except WebSocketTimeoutException:
                     pass
                 except WebSocketConnectionClosedException:
-                    print("WebSocket 已断开，改为轮询 /history", flush=True)
+                    print("WebSocket 已断开，改为轮询 /history", file=sys.stderr, flush=True)
                     ws = None
             now = time.time()
             if now - last_poll >= 2:
@@ -455,7 +477,7 @@ def confirm_history_prompt(entry: dict, prompt: dict, fields: dict) -> None:
     stored = entry.get("prompt")
     graph = stored[2] if isinstance(stored, list) and len(stored) >= 3 else None
     if not isinstance(graph, dict):
-        print("历史记录里没有完整工作流，提交前已经核对过提示词。", flush=True)
+        note("历史记录里没有完整工作流，提交前已经核对过提示词。")
         return
     positive = targets(fields["positive_prompt"])[0]
     node_id = str(positive["node"])
@@ -467,7 +489,7 @@ def confirm_history_prompt(entry: dict, prompt: dict, fields: dict) -> None:
             "历史记录里的提示词和本次提交不一致。",
             {"node": node_id, "input": field, "expected": expected, "actual": actual},
         )
-    print(f"已核对历史记录：节点 {node_id}.{field} 与本次提示词一致。", flush=True)
+    note(f"已核对历史记录：节点 {node_id}.{field} 与本次提示词一致。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -506,21 +528,58 @@ def template_kind(args) -> str:
     return "video"
 
 
+def execute_workflow(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str) -> list[str]:
+    client_id = str(uuid.uuid4())
+    prompt_id = submit_prompt(base, workflow, client_id, template, fields)
+    stream = sys.stdout if _talk else sys.stderr
+    print(f"prompt_id {prompt_id}", file=stream, flush=True)
+    entry = wait_for_result(base, workflow, prompt_id, client_id, timeout)
+    confirm_history_prompt(entry, workflow, fields)
+    os.makedirs(output_dir, exist_ok=True)
+    unique = []
+    seen = set()
+    for item in output_files(entry):
+        key = (item.get("filename"), item.get("subfolder"), item.get("type"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    chosen = [item for item in unique if item.get("type") in (None, "output")]
+    if not chosen:
+        chosen = [item for item in unique if item.get("type") == "temp"]
+    saved = [download_file(base, item, output_dir) for item in chosen]
+    if not saved:
+        fail("执行成功，但历史记录里没有可下载的文件。", entry.get("outputs"))
+    return saved
+
+
 def main(argv: list[str] | None = None) -> None:
     configure_stdio()
+    saved = None
     try:
-        _main(argv)
+        saved = _main(argv)
     except template_fill.TemplateError as exc:
-        fail(exc.message, exc.payload)
+        _exit_failure(exc.message, exc.payload)
+    except ComfyFailure as exc:
+        _exit_failure(exc.message, exc.payload)
+    for path in saved or []:
+        print(f"输出 {path}", flush=True)
 
 
-def _main(argv: list[str] | None) -> None:
+def _exit_failure(message: str, payload) -> None:
+    print(message, file=sys.stderr)
+    if payload is not None:
+        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _main(argv: list[str] | None) -> list[str] | None:
     args = build_parser().parse_args(argv)
     config = load_config()
     if args.command == "check":
         template_fill.run_check(config)
         print("template_check ok")
-        return
+        return None
     template, fields, timeout = job_paths(config, template_kind(args))
     template_fill.validate_fields(template, fields)
     prompt = template_fill.copy_template(template)
@@ -535,36 +594,14 @@ def _main(argv: list[str] | None) -> None:
         uploaded = os.path.basename(image_path) if args.print_prompt else upload_image(config["comfy_url"], image_path)
         template_fill.set_reference_name(prompt, fields, uploaded)
         spec = fields["reference_image"]
-        print(f"参考图写入节点 {spec['node']} 的 {spec['input']}：{uploaded}", flush=True)
+        note(f"参考图写入节点 {spec['node']} 的 {spec['input']}：{uploaded}")
     elif "reference_image" in fields:
         raise template_fill.TemplateError("这张模板需要参考图，未提交。")
     template_fill.assert_template_edit(template, prompt, fields)
     if args.print_prompt:
         print(json.dumps(prompt, ensure_ascii=False, indent=2))
-        return
-
-    client_id = str(uuid.uuid4())
-    prompt_id = submit_prompt(config["comfy_url"], prompt, client_id, template, fields)
-    print(f"prompt_id {prompt_id}", flush=True)
-    entry = wait_for_result(config["comfy_url"], prompt, prompt_id, client_id, timeout)
-    confirm_history_prompt(entry, prompt, fields)
-    os.makedirs(config["output_dir"], exist_ok=True)
-    unique = []
-    seen = set()
-    for item in output_files(entry):
-        key = (item.get("filename"), item.get("subfolder"), item.get("type"))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    chosen = [item for item in unique if item.get("type") in (None, "output")]
-    if not chosen:
-        chosen = [item for item in unique if item.get("type") == "temp"]
-    saved = [download_file(config["comfy_url"], item, config["output_dir"]) for item in chosen]
-    if not saved:
-        fail("执行成功，但历史记录里没有可下载的文件。", entry.get("outputs"))
-    for path in saved:
-        print(f"输出 {path}", flush=True)
+        return None
+    return execute_workflow(config["comfy_url"], template, prompt, fields, timeout, config["output_dir"])
 
 
 if __name__ == "__main__":

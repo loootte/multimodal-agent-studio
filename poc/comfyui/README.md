@@ -1,6 +1,6 @@
 # ComfyUI 出图 / 出视频 POC
 
-这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板。一条命令复制模板，只写白名单字段，等进度，再把文件下载到本地。
+这是 [issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 的本地脚本，加上 [issue #3](https://github.com/loootte/multimodal-agent-studio/issues/3) 的可更换模板，以及 [issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 的 `generate_image` / `generate_video`。一条命令复制模板，只写白名单字段，等进度，再把文件下载到本地。
 
 它不是聊天界面，也不让模型改工作流。换模板只换配置里的 JSON 和旁边的字段对照，提交代码不动。模型拼出的自由 JSON 不会被 `POST /prompt`。
 
@@ -40,9 +40,36 @@ python poc/comfyui/comfy_poc.py video --prompt "a red ceramic teapot on a wooden
 
 可选参数：`--negative`、`--aspect`（只允许 `1:1`、`16:9`、`9:16`）、`--seed`、`--steps`。不传 `--steps` 就保留模板里的步数。视频还可以传 `--seconds`。`--frames` 和 `--seconds` 同时存在时用帧数。视频不传 `--image` 用文生视频模板；传入则用图生视频模板，只替换参考图文件名，不往图里加节点。
 
-`--print-prompt` 只打印替换后的工作流，不提交。
+`--print-prompt` 只打印替换后的工作流，不提交。这是这条脚本的调试口。Agent 工具不会打印 workflow。
 
-失败时把 ComfyUI 的 `node_errors` 或执行错误原样打到标准错误，退出码非 0。图片和视频各有超时，写在配置的 `timeout_sec`。
+## Agent 工具
+
+[issue #2](https://github.com/loootte/multimodal-agent-studio/issues/2) 在这层只暴露两个工具：`generate_image` 和 `generate_video`。模型看不到 ComfyUI 节点。
+
+参数放在 JSON 文件里再调用。`generate_image` 可以带可选的 `seed` 和 `style`。`generate_video` 不接收 `seed`，种子由运行时生成并写回结果。
+
+文生图：
+
+```json
+{"prompt":"a red ceramic teapot on a wooden table, soft window light","aspect_ratio":"1:1","seed":7,"style":"photograph"}
+```
+
+文生视频不传 `image_ref`。图生视频在同一结构上增加 `image_ref`，值是本地图片路径。
+
+```json
+{"prompt":"a red ceramic teapot on a wooden table, the camera slowly pushes in","duration_sec":1,"aspect_ratio":"16:9"}
+```
+
+```
+python poc/comfyui/agent_tools.py list
+python poc/comfyui/agent_tools.py check
+python poc/comfyui/agent_tools.py call generate_image --json-file image-call.json
+python poc/comfyui/agent_tools.py call generate_video --json-file video-call.json
+```
+
+`style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
+
+`comfy_poc.py` 失败时把 ComfyUI 的错误原文打到标准错误，退出码非 0。
 
 ## 工作流里会被替换的字段
 

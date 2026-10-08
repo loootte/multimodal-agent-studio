@@ -3,6 +3,7 @@
 提交前核对两件事：对照表指向的节点必须已经在模板里；
 准备提交的图必须仍是这份模板，只允许白名单输入发生变化。
 模型拼出来的自由 JSON 不能进入 POST /prompt。
+#2 的工具也只调用这一层，不在工具函数里拼节点。
 """
 
 from __future__ import annotations
@@ -275,3 +276,73 @@ def _dirty_copy(workflow: dict, fields: dict) -> dict:
                 inputs[key] = value + 1
                 return filled
     raise TemplateError("没有找到白名单之外的输入可做测试。")
+
+
+def load_job(config: dict, kind: str):
+    import comfy_poc
+
+    workflow, fields, timeout = comfy_poc.job_paths(config, kind)
+    validate_fields(workflow, fields)
+    return copy_template(workflow), fields, timeout
+
+
+def max_duration_sec(fields: dict) -> float:
+    fps = float(fields.get("fps") or 16)
+    limit = int(fields.get("max_frames") or 33)
+    if fps <= 0:
+        raise TemplateError("模板的 fps 必须大于 0。")
+    return limit / fps
+
+
+def frames_for_duration(fields: dict, duration_sec: float) -> int:
+    import comfy_poc
+
+    fps = float(fields.get("fps") or 16)
+    step = int(fields.get("frame_step") or 4)
+    limit = int(fields.get("max_frames") or 33)
+    requested = int(round(float(duration_sec) * fps))
+    if requested > limit:
+        raise TemplateError(f"duration_sec 超过模板上限 {max_duration_sec(fields):g} 秒。")
+    return comfy_poc.snap_frames(requested, step, limit)
+
+
+def fill_common(workflow: dict, fields: dict, prompt: str, aspect: str, seed: int, negative: str | None):
+    import comfy_poc
+    from types import SimpleNamespace
+
+    comfy_poc.apply_common(
+        workflow,
+        fields,
+        SimpleNamespace(prompt=prompt, aspect=aspect, seed=seed, negative=negative),
+    )
+    return workflow
+
+
+def fill_frames(workflow: dict, fields: dict, length: int) -> None:
+    import comfy_poc
+    from types import SimpleNamespace
+
+    comfy_poc.apply_frames(workflow, fields, SimpleNamespace(frames=length, seconds=None))
+
+
+def assert_text_to_video(workflow: dict, fields: dict) -> None:
+    if "reference_image" in fields:
+        raise TemplateError("文生视频模板不应包含参考图字段。")
+    width = fields.get("width")
+    if isinstance(width, dict):
+        node = workflow.get(str(width.get("node"))) or {}
+        if "start_image" in (node.get("inputs") or {}):
+            raise TemplateError("文生视频模板不应连接参考图。")
+
+
+def assert_image_to_video(workflow: dict, fields: dict) -> None:
+    spec = fields.get("reference_image")
+    if not isinstance(spec, dict):
+        raise TemplateError("图生视频模板没有 reference_image 字段。")
+    _check_reference(workflow, spec)
+
+
+def read_back(workflow: dict, fields: dict, key: str):
+    spec = fields[key]
+    target = spec[0] if isinstance(spec, list) else spec
+    return workflow[str(target["node"])]["inputs"][target["input"]]
