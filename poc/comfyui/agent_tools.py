@@ -1,0 +1,421 @@
+"""模型能调用的两个生成工具。
+
+工具列表里没有 ComfyUI 节点。参数先校验，再交给模板填充和客户端。
+标准输出只有工具结果，没有 workflow JSON。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import sys
+
+import comfy_client
+import comfy_poc
+import template_fill
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TOOL_NAMES = ("generate_image", "generate_video")
+FORBIDDEN_IN_SCHEMA = (
+    "LoadImage",
+    "KSampler",
+    "CLIPTextEncode",
+    "class_type",
+    "UnetLoader",
+    "SaveImage",
+    "SaveVideo",
+    "WanImageToVideo",
+)
+
+
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def load_styles() -> dict[str, str]:
+    path = os.path.join(SCRIPT_DIR, "styles.json")
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict) or not data:
+        comfy_poc.fail(f"风格表不可用：{path}")
+    styles = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not isinstance(value, str) or not key or not value.strip():
+            comfy_poc.fail(f"风格表里的 {key!r} 不是一句可用的风格句。")
+        styles[key] = value
+    return styles
+
+
+def tool_specs() -> list[dict]:
+    aspects = list(comfy_poc.ASPECTS)
+    styles = sorted(load_styles())
+    return [
+        {
+            "name": "generate_image",
+            "description": "根据画面描述生成一张图片。",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["prompt", "aspect_ratio"],
+                "properties": {
+                    "prompt": {"type": "string", "minLength": 1, "description": "画面描述。"},
+                    "aspect_ratio": {"type": "string", "enum": aspects, "description": "画幅，只能是白名单里的值。"},
+                    "seed": {"type": "integer", "minimum": 0, "description": "可选。不传则由运行时生成。"},
+                    "style": {"type": "string", "enum": styles, "description": "可选。只映射到固定的风格句。"},
+                },
+            },
+        },
+        {
+            "name": "generate_video",
+            "description": "根据画面描述生成一段视频。传入参考图时走图生视频，否则走文生视频。",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["prompt", "duration_sec", "aspect_ratio"],
+                "properties": {
+                    "prompt": {"type": "string", "minLength": 1, "description": "画面描述。"},
+                    "duration_sec": {"type": "number", "exclusiveMinimum": 0, "description": "时长（秒）。超过模板上限会被拒绝。"},
+                    "aspect_ratio": {"type": "string", "enum": aspects, "description": "画幅，只能是白名单里的值。"},
+                    "image_ref": {"type": "string", "description": "可选。本地参考图路径。传入则图生视频，不传则文生视频。"},
+                },
+            },
+        },
+    ]
+
+
+def tool_error(tool: str, code: str, message: str, parameter: str | None = None) -> dict:
+    error = {"code": code, "message": message}
+    if parameter:
+        error["parameter"] = parameter
+    return {"ok": False, "tool": tool, "error": error}
+
+
+def public_comfy_message(exc: comfy_poc.ComfyFailure) -> str:
+    payload = exc.payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("exception_message"), str) and payload["exception_message"].strip():
+            return payload["exception_message"].strip()
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"].strip():
+            return error["message"].strip()
+    return exc.message
+
+
+def unexpected(tool: str, arguments: dict) -> dict | None:
+    allowed = {
+        "generate_image": {"prompt", "aspect_ratio", "seed", "style"},
+        "generate_video": {"prompt", "duration_sec", "aspect_ratio", "image_ref"},
+    }[tool]
+    extra = sorted(set(arguments) - allowed)
+    if extra:
+        return tool_error(tool, "unexpected_parameter", f"不能传这些参数：{', '.join(extra)}。", extra[0])
+    return None
+
+
+def require_prompt(tool: str, arguments: dict) -> dict | None:
+    if "prompt" not in arguments:
+        return tool_error(tool, "missing_prompt", "prompt 是必填项。", "prompt")
+    prompt = arguments["prompt"]
+    if not isinstance(prompt, str) or not prompt.strip():
+        return tool_error(tool, "missing_prompt", "prompt 必须是非空字符串。", "prompt")
+    return None
+
+
+def parse_aspect(tool: str, arguments: dict, allowed: set[str]) -> tuple[str | None, dict | None]:
+    if "aspect_ratio" not in arguments:
+        return None, tool_error(tool, "invalid_aspect_ratio", "aspect_ratio 是必填项。", "aspect_ratio")
+    aspect = arguments["aspect_ratio"]
+    if not isinstance(aspect, str) or aspect not in allowed:
+        names = "、".join(comfy_poc.ASPECTS)
+        return None, tool_error(tool, "invalid_aspect_ratio", f"aspect_ratio 只能是 {names}。", "aspect_ratio")
+    return aspect, None
+
+
+def parse_seed(tool: str, arguments: dict) -> tuple[int | None, dict | None]:
+    if "seed" not in arguments or arguments["seed"] is None:
+        return random.randrange(0, 2**32), None
+    seed = arguments["seed"]
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        return None, tool_error(tool, "invalid_seed", "seed 必须是大于等于 0 的整数。", "seed")
+    return seed, None
+
+
+def parse_style(tool: str, arguments: dict, styles: dict[str, str]) -> tuple[str | None, dict | None]:
+    if "style" not in arguments or arguments["style"] is None:
+        return None, None
+    style = arguments["style"]
+    if not isinstance(style, str) or style not in styles:
+        names = "、".join(sorted(styles))
+        return None, tool_error(tool, "unknown_style", f"style 只能是 {names}。", "style")
+    return style, None
+
+
+def values_match(tool: str, workflow: dict, fields: dict, prompt: str, aspect: str, seed: int, frames: int | None = None) -> dict | None:
+    if template_fill.read_back(workflow, fields, "positive_prompt") != prompt:
+        return tool_error(tool, "internal_error", "填进模板的提示词和参数不一致。")
+    size = fields["aspects"][aspect]
+    if template_fill.read_back(workflow, fields, "width") != int(size["width"]):
+        return tool_error(tool, "internal_error", "填进模板的宽度和画幅不一致。")
+    if template_fill.read_back(workflow, fields, "height") != int(size["height"]):
+        return tool_error(tool, "internal_error", "填进模板的高度和画幅不一致。")
+    if template_fill.read_back(workflow, fields, "seed") != seed:
+        return tool_error(tool, "internal_error", "填进模板的 seed 和参数不一致。")
+    if frames is not None and template_fill.read_back(workflow, fields, "frames") != frames:
+        return tool_error(tool, "internal_error", "填进模板的帧数和时长不一致。")
+    return None
+
+
+def generate_image(prompt: str, aspect_ratio: str, seed: int | None = None, style: str | None = None) -> dict:
+    arguments = {"prompt": prompt, "aspect_ratio": aspect_ratio, "seed": seed, "style": style}
+    return call_tool("generate_image", {key: value for key, value in arguments.items() if value is not None or key in {"prompt", "aspect_ratio"}})
+
+
+def generate_video(prompt: str, duration_sec: float, aspect_ratio: str, image_ref: str | None = None) -> dict:
+    arguments = {
+        "prompt": prompt,
+        "duration_sec": duration_sec,
+        "aspect_ratio": aspect_ratio,
+        "image_ref": image_ref,
+    }
+    return call_tool(
+        "generate_video",
+        {key: value for key, value in arguments.items() if value is not None or key != "image_ref"},
+    )
+
+
+def _generate_image(arguments: dict) -> dict:
+    tool = "generate_image"
+    problem = unexpected(tool, arguments) or require_prompt(tool, arguments)
+    if problem:
+        return problem
+    styles = load_styles()
+    aspect, problem = parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
+    if problem:
+        return problem
+    seed, problem = parse_seed(tool, arguments)
+    if problem:
+        return problem
+    style, problem = parse_style(tool, arguments, styles)
+    if problem:
+        return problem
+    config = comfy_poc.load_config()
+    workflow, fields, timeout = template_fill.load_job(config, "image")
+    if aspect not in (fields.get("aspects") or {}):
+        return tool_error(tool, "invalid_aspect_ratio", "这张文生图模板没有这个画幅。", "aspect_ratio")
+    negative = styles[style] if style else None
+    template_fill.fill_common(workflow, fields, arguments["prompt"], aspect, seed, negative)
+    problem = values_match(tool, workflow, fields, arguments["prompt"], aspect, seed)
+    if problem:
+        problem["tool"] = tool
+        return problem
+    if style and template_fill.read_back(workflow, fields, "negative_prompt") != styles[style]:
+        return tool_error(tool, "internal_error", "风格句没有写进模板。")
+    files = comfy_client.run(config["comfy_url"], workflow, fields, timeout, config["output_dir"])
+    return {
+        "ok": True,
+        "tool": tool,
+        "prompt": arguments["prompt"],
+        "aspect_ratio": aspect,
+        "seed": seed,
+        "style": style,
+        "files": files,
+    }
+
+
+def _generate_video(arguments: dict) -> dict:
+    tool = "generate_video"
+    problem = unexpected(tool, arguments) or require_prompt(tool, arguments)
+    if problem:
+        return problem
+    if "duration_sec" not in arguments:
+        return tool_error(tool, "invalid_duration", "duration_sec 是必填项。", "duration_sec")
+    duration = arguments["duration_sec"]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+        return tool_error(tool, "invalid_duration", "duration_sec 必须是大于 0 的秒数。", "duration_sec")
+    aspect, problem = parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
+    if problem:
+        return problem
+    seed, problem = parse_seed(tool, arguments)
+    if problem:
+        return problem
+    image_ref = arguments.get("image_ref")
+    if image_ref is not None:
+        if not isinstance(image_ref, str) or not image_ref.strip():
+            return tool_error(tool, "image_not_found", "image_ref 必须是本地图片路径。", "image_ref")
+        if not os.path.isfile(image_ref):
+            return tool_error(tool, "image_not_found", "找不到参考图。", "image_ref")
+    kind = "video_i2v" if image_ref else "video"
+    config = comfy_poc.load_config()
+    workflow, fields, timeout = template_fill.load_job(config, kind)
+    if aspect not in (fields.get("aspects") or {}):
+        return tool_error(tool, "invalid_aspect_ratio", "这张视频模板没有这个画幅。", "aspect_ratio")
+    limit = template_fill.max_duration_sec(fields)
+    if float(duration) > limit:
+        return tool_error(
+            tool,
+            "duration_too_long",
+            f"duration_sec 超过模板上限 {limit:g} 秒。",
+            "duration_sec",
+        )
+    frames = template_fill.frames_for_duration(fields, float(duration))
+    template_fill.fill_common(workflow, fields, arguments["prompt"], aspect, seed, None)
+    template_fill.fill_frames(workflow, fields, frames)
+    if image_ref:
+        template_fill.assert_image_to_video(workflow, fields)
+        uploaded = comfy_client.upload(config["comfy_url"], image_ref)
+        template_fill.set_reference_name(workflow, fields, uploaded)
+        template_fill.assert_image_to_video(workflow, fields)
+        mode = "image_to_video"
+    else:
+        template_fill.assert_text_to_video(workflow, fields)
+        mode = "text_to_video"
+    problem = values_match(tool, workflow, fields, arguments["prompt"], aspect, seed, frames)
+    if problem:
+        return problem
+    files = comfy_client.run(config["comfy_url"], workflow, fields, timeout, config["output_dir"])
+    return {
+        "ok": True,
+        "tool": tool,
+        "prompt": arguments["prompt"],
+        "aspect_ratio": aspect,
+        "duration_sec": duration,
+        "frames": frames,
+        "seed": seed,
+        "image_ref": image_ref,
+        "mode": mode,
+        "files": files,
+    }
+
+
+def call_tool(name: str, arguments: dict) -> dict:
+    if name not in TOOL_NAMES:
+        return tool_error(name, "unknown_tool", "只能调用 generate_image 或 generate_video。")
+    if not isinstance(arguments, dict):
+        return tool_error(name, "invalid_parameter", "工具参数必须是对象。")
+    try:
+        with comfy_poc.talk_off():
+            if name == "generate_image":
+                return _generate_image(arguments)
+            return _generate_video(arguments)
+    except comfy_poc.ComfyFailure as exc:
+        return tool_error(name, "comfyui_error", public_comfy_message(exc))
+
+
+def self_check() -> None:
+    specs = tool_specs()
+    names = [item["name"] for item in specs]
+    if names != list(TOOL_NAMES):
+        comfy_poc.fail(f"工具列表不对：{names}")
+    published = json.dumps(specs, ensure_ascii=False)
+    for word in FORBIDDEN_IN_SCHEMA:
+        if word in published:
+            comfy_poc.fail(f"工具 schema 里出现了 {word}")
+    config = comfy_poc.load_config()
+    styles = load_styles()
+    with comfy_poc.talk_off():
+        workflow, fields, _timeout = template_fill.load_job(config, "image")
+        template_fill.fill_common(workflow, fields, "a red teapot", "1:1", 7, styles["photograph"])
+        if template_fill.read_back(workflow, fields, "positive_prompt") != "a red teapot":
+            comfy_poc.fail("文生图提示词没有原样写入。")
+        if template_fill.read_back(workflow, fields, "negative_prompt") != styles["photograph"]:
+            comfy_poc.fail("风格句没有写入负向提示词。")
+        if template_fill.read_back(workflow, fields, "seed") != 7:
+            comfy_poc.fail("seed 没有原样写入。")
+
+        text_workflow, text_fields, _timeout = template_fill.load_job(config, "video")
+        template_fill.assert_text_to_video(text_workflow, text_fields)
+        frames = template_fill.frames_for_duration(text_fields, 1)
+        if frames != 17:
+            comfy_poc.fail(f"1 秒没有对齐到 17 帧，而是 {frames}。")
+        template_fill.fill_common(text_workflow, text_fields, "camera push", "16:9", 8, None)
+        template_fill.fill_frames(text_workflow, text_fields, frames)
+        template_fill.assert_text_to_video(text_workflow, text_fields)
+
+        image_workflow, image_fields, _timeout = template_fill.load_job(config, "video_i2v")
+        template_fill.assert_image_to_video(image_workflow, image_fields)
+        template_fill.set_reference_name(image_workflow, image_fields, "uploaded.png")
+        template_fill.assert_image_to_video(image_workflow, image_fields)
+        if template_fill.read_back(image_workflow, image_fields, "reference_image") != "uploaded.png":
+            comfy_poc.fail("参考图文件名没有写入图生视频模板。")
+
+    samples = [
+        call_tool("generate_image", {"prompt": "  ", "aspect_ratio": "1:1"}),
+        call_tool("generate_image", {"prompt": "teapot", "aspect_ratio": "4:3"}),
+        call_tool("generate_image", {"prompt": "teapot", "aspect_ratio": "1:1", "style": "oil"}),
+        call_tool("generate_image", {"prompt": "teapot", "aspect_ratio": "1:1", "seed": -3}),
+        call_tool("generate_image", {"prompt": "teapot", "aspect_ratio": "1:1", "sampler": "euler"}),
+        call_tool("generate_video", {"prompt": "teapot", "duration_sec": 30, "aspect_ratio": "16:9"}),
+        call_tool("generate_video", {"prompt": "teapot", "duration_sec": 0, "aspect_ratio": "16:9"}),
+        call_tool("generate_video", {"prompt": "teapot", "duration_sec": 1, "aspect_ratio": "16:9", "image_ref": r"D:\missing-ref.png"}),
+        call_tool("KSampler", {"prompt": "teapot"}),
+    ]
+    codes = [item["error"]["code"] for item in samples]
+    expected = [
+        "missing_prompt",
+        "invalid_aspect_ratio",
+        "unknown_style",
+        "invalid_seed",
+        "unexpected_parameter",
+        "duration_too_long",
+        "invalid_duration",
+        "image_not_found",
+        "unknown_tool",
+    ]
+    if codes != expected:
+        comfy_poc.fail(f"错误码不对：{codes}")
+    for item in samples:
+        if item["ok"] or "workflow" in json.dumps(item):
+            comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="调用 generate_image 或 generate_video。")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("list", help="打印模型侧工具列表。")
+    subparsers.add_parser("check", help="校验工具列表、模板填充和非法参数。不提交 ComfyUI。")
+    call = subparsers.add_parser("call", help="用一份 JSON 参数调用工具。")
+    call.add_argument("name", choices=TOOL_NAMES)
+    call.add_argument("--json", dest="payload", help="工具参数 JSON。")
+    call.add_argument("--json-file", dest="payload_file", help="工具参数 JSON 文件。和 --json 二选一。")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    configure_stdio()
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "list":
+            print(json.dumps(tool_specs(), ensure_ascii=False, indent=2))
+            return
+        if args.command == "check":
+            self_check()
+            print("self_check ok")
+            return
+        if bool(args.payload) == bool(args.payload_file):
+            result = tool_error(args.name, "invalid_parameter", "call 需要 --json 或 --json-file 其中一个。")
+        else:
+            raw = args.payload
+            if args.payload_file:
+                with open(args.payload_file, encoding="utf-8") as handle:
+                    raw = handle.read()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                result = tool_error(args.name, "invalid_parameter", f"参数不是 JSON：{exc.msg}")
+            else:
+                result = call_tool(args.name, payload)
+    except comfy_poc.ComfyFailure as exc:
+        print(exc.message, file=sys.stderr)
+        raise SystemExit(1) from exc
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

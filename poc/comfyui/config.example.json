@@ -10,5 +10,10 @@
     "workflow": "workflows/video_api.json",
     "fields": "workflows/video.fields.json",
     "timeout_sec": 2700
+  },
+  "video_i2v": {
+    "workflow": "workflows/video_i2v_api.json",
+    "fields": "workflows/video.fields.json",
+    "timeout_sec": 2700
   }
 }
