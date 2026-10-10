@@ -199,6 +199,14 @@ class ProviderStore:
         return {"base_url": base_url, "model": model, "api_key": api_key}
 
 
+def _public_content(record: dict) -> dict:
+    return {
+        "handle": record.get("handle"),
+        "type": record.get("type"),
+        "size": record.get("size"),
+    }
+
+
 def _message(role: str, text: str, status: str, message_id: str, run_id: str | None) -> dict:
     return {
         "message_id": message_id,
@@ -208,6 +216,7 @@ def _message(role: str, text: str, status: str, message_id: str, run_id: str | N
         "status": status,
         "run_id": run_id,
         "error": None,
+        "events": [],
     }
 
 
@@ -318,6 +327,86 @@ class SessionStore:
                     break
             session["updated_at"] = _now()
             self._write(session)
+
+    def append_event(self, session_id: str, message_id: str, event: dict) -> None:
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return
+            for message in session["messages"]:
+                if message.get("message_id") == message_id:
+                    message.setdefault("events", []).append(dict(event))
+                    break
+            session["updated_at"] = _now()
+            self._write(session)
+
+    def put_content(self, session_id: str, message_id: str, text: str) -> dict:
+        """画面描述先入库。句柄是随机标识，不编码正文。同一条消息只记一次。"""
+        check_id(session_id, "会话")
+        check_id(message_id, "消息")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                raise StoreError("找不到这个会话。")
+            contents = session.setdefault("contents", [])
+            for item in contents:
+                if item.get("message_id") == message_id:
+                    return _public_content(item)
+            record = {
+                "handle": new_id("c_"),
+                "type": "text",
+                "size": len(text.encode("utf-8")),
+                "text": text,
+                "message_id": message_id,
+            }
+            contents.append(record)
+            session["updated_at"] = _now()
+            self._write(session)
+            return _public_content(record)
+
+    def add_content(self, session_id: str, text: str) -> dict:
+        """对话框提交的正文。每次都是新的随机句柄，不覆盖已有记录。"""
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                raise StoreError("找不到这个会话。")
+            record = {
+                "handle": new_id("c_"),
+                "type": "text",
+                "size": len(text.encode("utf-8")),
+                "text": text,
+                "message_id": "",
+            }
+            session.setdefault("contents", []).append(record)
+            session["updated_at"] = _now()
+            self._write(session)
+            return _public_content(record)
+
+    def content_text(self, session_id: str, handle: str) -> str | None:
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return None
+        try:
+            session = self.get(session_id)
+        except StoreError:
+            return None
+        for item in session.get("contents") or []:
+            if isinstance(item, dict) and item.get("handle") == handle:
+                text = item.get("text")
+                return text if isinstance(text, str) else None
+        return None
+
+    def local_bodies(self, session_id: str) -> list[str]:
+        try:
+            session = self.get(session_id)
+        except StoreError:
+            return []
+        bodies = []
+        for item in session.get("contents") or []:
+            text = item.get("text") if isinstance(item, dict) else None
+            if isinstance(text, str) and text:
+                bodies.append(text)
+        return bodies
 
     def message_text(self, session_id: str, message_id: str) -> str:
         try:

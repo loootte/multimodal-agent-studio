@@ -18,4 +18,6 @@
 ## 后果
 
 - 第 0、1、3 阶段的完成标准都不因这一刀而勾掉。图片和音频输入、Agent 循环、工具确认、登录仍未做。
+- [issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 沿用这个进程和这条协议。聊天页要图时调用 `poc/comfyui` 里现成的 `generate_image`，不另写 Comfy 客户端，也不把 poc 搬进 `services/`。这仍不勾掉任一阶段。
+- [issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 仍用这个进程。模型用 `accept_local_content` 收集画面描述，正文留在本机，第三方只看到工具契约和句柄。这仍不勾掉任一阶段。
 - 以后若要换框架或增加供应商专用协议，另写架构决定。适配器仍只放在 `services/gateway`。

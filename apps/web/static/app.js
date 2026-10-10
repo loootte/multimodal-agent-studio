@@ -97,6 +97,7 @@ async function openSession(sessionId) {
     state.sending = true;
     state.stopped = false;
     updateButtons();
+    resetAssistantForReplay();
     try {
       await subscribe(running.run_id);
     } catch (error) {
@@ -129,6 +130,7 @@ async function sendMessage() {
     text: "",
     status: "running",
     error: null,
+    events: [],
   });
   input.value = "";
   showNote("");
@@ -152,6 +154,7 @@ async function sendMessage() {
   try {
     await reloadSession();
     if (state.session.running && state.session.run_id && !state.stopped) {
+      resetAssistantForReplay();
       await subscribe(state.session.run_id);
       await reloadSession();
     }
@@ -189,19 +192,34 @@ function onEvent(event) {
     assistant.text = "";
     assistant.status = "running";
     assistant.error = null;
+    assistant.events = [];
     state.session.run_id = event.run_id;
     state.session.running = true;
   } else if (event.type === "message.delta") {
     if (state.stopped) return;
     assistant.text += event.text || "";
     assistant.status = "running";
+  } else if (
+    event.type === "tool_call" ||
+    event.type === "progress" ||
+    event.type === "artifact" ||
+    event.type === "error" ||
+    event.type === "content_request"
+  ) {
+    if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
+    if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
+    rememberAgentEvent(assistant, event);
+    if (event.type === "content_request") document.querySelector("#live").textContent = "请输入要留在本机的内容。";
+    if (event.type === "artifact") document.querySelector("#live").textContent = "已收到图片";
+    if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
+    if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
   } else if (event.type === "message.completed") {
     assistant.text = event.text || "";
     assistant.status = "completed";
     assistant.error = null;
     state.sending = false;
     state.session.running = false;
-    document.querySelector("#live").textContent = assistant.text;
+    if (!hasArtifact(assistant)) document.querySelector("#live").textContent = assistant.text;
   } else if (event.type === "run.failed") {
     if (!(state.stopped && (event.text || "").length < assistant.text.length)) {
       assistant.text = event.text || assistant.text;
@@ -214,6 +232,57 @@ function onEvent(event) {
   }
   renderTranscript();
   updateButtons();
+}
+
+function resetAssistantForReplay() {
+  const assistant = currentAssistant();
+  if (!assistant) return;
+  assistant.text = "";
+  assistant.events = [];
+  assistant.error = null;
+}
+
+function rememberAgentEvent(assistant, event) {
+  const events = assistant.events || (assistant.events = []);
+  if (event.type === "content_request" && events.some((item) => item.type === "content_request")) return;
+  if (event.type === "tool_call" && events.some((item) => item.type === "tool_call")) return;
+  if (event.type === "artifact" && events.some((item) => item.type === "artifact")) return;
+  if (event.type === "error" && events.some((item) => item.type === "error")) return;
+  if (event.type === "progress") {
+    const previous = events[events.length - 1];
+    if (
+      previous &&
+      previous.type === "progress" &&
+      previous.value === event.value &&
+      previous.max === event.max &&
+      previous.percent === event.percent
+    ) {
+      return;
+    }
+  }
+  events.push({
+    type: event.type,
+    tool: event.tool,
+    arguments: event.arguments,
+    value: event.value,
+    max: event.max,
+    percent: event.percent,
+    artifact_id: event.artifact_id,
+    media: event.media,
+    url: event.url,
+    width: event.width,
+    height: event.height,
+    code: event.code,
+    message: event.message,
+    draft: event.draft,
+    hint: event.hint,
+    purpose: event.purpose,
+    run_id: event.run_id,
+  });
+}
+
+function hasArtifact(message) {
+  return (message.events || []).some((item) => item.type === "artifact");
 }
 
 function currentAssistant() {
@@ -283,7 +352,7 @@ function renderTranscript() {
   if (!messages.length) {
     const empty = document.createElement("p");
     empty.className = "empty-thread";
-    empty.textContent = "写一条消息，开始和模型对话。";
+    empty.textContent = "写一条消息。要一张图时，说明要生成图片。画面描述在对话框里填写，留在本机。";
     transcript.append(empty);
     return;
   }
@@ -297,20 +366,106 @@ function renderTranscript() {
 function bubble(message) {
   const item = document.createElement("article");
   item.className = `bubble ${message.role === "user" ? "user" : "assistant"}`;
-  if (message.status === "running") item.classList.add("streaming");
+  const events = message.events || [];
+  const pendingContent = events.find((entry) => entry.type === "content_request");
+  const artifact = events.find((entry) => entry.type === "artifact");
+  const collecting = !events.some((entry) => entry.type === "tool_call" || entry.type === "error");
+  const showEntry = pendingContent && !artifact && message.status === "running" && collecting;
+  if (message.status === "running" && !showEntry) item.classList.add("streaming");
   const who = document.createElement("span");
   who.className = "who";
   who.textContent = message.role === "user" ? "你" : "助手";
   const text = document.createElement("p");
-  text.textContent = message.text || (message.status === "running" ? "" : "");
+  text.className = "body";
+  text.textContent = message.text || "";
   item.append(who, text);
-  if (message.error && message.error.message) {
+  const call = events.find((entry) => entry.type === "tool_call");
+  if (call) {
+    const line = document.createElement("p");
+    line.className = "status-line";
+    line.textContent = toolLine(call);
+    item.append(line);
+  }
+  const progress = [...events].reverse().find((entry) => entry.type === "progress");
+  if (showEntry) item.append(localEntry(message, pendingContent));
+  if (progress && !artifact) {
+    const line = document.createElement("p");
+    line.className = "status-line";
+    line.textContent = progressLine(progress);
+    item.append(line);
+  }
+  if (artifact && artifact.media === "image") {
+    const src = artifactSrc(artifact);
+    if (src) {
+      const image = document.createElement("img");
+      image.alt = "生成的图片";
+      image.src = src;
+      item.append(image);
+    }
+  }
+  const agentError = events.find((entry) => entry.type === "error");
+  const failure = agentError || message.error;
+  if (failure && failure.message && !artifact) {
     const extra = document.createElement("p");
-    extra.className = message.error.code === "cancelled" ? "status-line" : "error";
-    extra.textContent = message.error.message;
+    extra.className = failure.code === "cancelled" ? "status-line" : "error";
+    extra.textContent = failure.message;
     item.append(extra);
   }
   return item;
+}
+
+function localEntry(message, request) {
+  const form = document.createElement("form");
+  form.className = "local-entry";
+  const hint = document.createElement("p");
+  hint.className = "status-line";
+  hint.textContent = request.hint || "请输入要留在本机的内容。";
+  const area = document.createElement("textarea");
+  area.value = request.draft || "";
+  area.setAttribute("aria-label", "留在本机的内容");
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.textContent = "加入本地内容并继续";
+  form.append(hint, area, button);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitLocal(message, request, area, button);
+  });
+  return form;
+}
+
+async function submitLocal(message, request, area, button) {
+  const runId = message.run_id || request.run_id;
+  const text = area.value;
+  if (!runId || !text.trim()) {
+    showNote("请输入要留在本机的内容。");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/content`, { text });
+  } catch (error) {
+    button.disabled = false;
+    showNote(error.message || "没能加入本地内容。");
+  }
+}
+
+function toolLine(event) {
+  const args = event.arguments || {};
+  const aspect = args.aspect_ratio ? ` · ${args.aspect_ratio}` : "";
+  return `正在生成图片${aspect}`;
+}
+
+function progressLine(event) {
+  if (event.percent != null) return `进度 ${event.percent}%`;
+  if (event.max) return `进度 ${event.value}/${event.max}`;
+  return "正在生成";
+}
+
+function artifactSrc(event) {
+  const url = typeof event.url === "string" ? event.url : "";
+  if (!url.startsWith("/sessions/")) return "";
+  return url;
 }
 
 function updateButtons() {

@@ -1,6 +1,6 @@
 # 以后的目录
 
-这些目录留到对应阶段再创建，避免空的代码树被当成已经开工。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前加了 `apps/web`、`services/gateway` 和 `packages/contracts`，只为文字聊天。`services/runtime`、`services/tools`、`packages/artifacts`、`evals` 和 `ops` 仍然不创建。
+这些目录留到对应阶段再创建，避免空的代码树被当成已经开工。每一层现在落到哪些文件，写在 [docs/architecture.md](architecture.md)。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前加了 `apps/web`、`services/gateway` 和 `packages/contracts`，先做文字聊天。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 仍用这些目录，文生图直接调用 `poc/comfyui`，不把 poc 搬进 `services/`。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 也仍用这些目录，不新建内容库。`services/runtime`、`services/tools`、`packages/artifacts`、`evals` 和 `ops` 仍然不创建。
 
 ```
 apps/web/                 Web 界面

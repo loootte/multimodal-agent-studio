@@ -6,6 +6,9 @@
 
 适配器不保存密钥，也不把密钥写进日志。调用方把当次密钥传进来。
 reasoning_content 不进入回答正文。
+传入 tools 时，把供应商的工具调用收成名字加 JSON 对象。解析失败是 invalid_tool_call。
+local_bodies 里长度不少于 8 的正文一旦出现在请求里，连接还没打开就失败。
+工具契约本身不参与这道检查，避免说明文字被当成正文。
 """
 
 from __future__ import annotations
@@ -38,18 +41,28 @@ def stream_chat(
     messages: list[dict],
     timeout_sec: float,
     cancel,
+    tools=None,
+    local_bodies=None,
 ):
-    """逐段产出回答文字。失败时抛 GatewayError。cancel 置位后，读循环会自己停。"""
+    """逐段产出回答文字。有工具调用时，最后再产出一个 tool_call。
+
+    失败时抛 GatewayError。cancel 置位后，读循环会自己停。
+    只有工具、没有文字时，不报「模型没有返回文字」。
+    本地正文出现在载荷里时，不打开连接。
+    """
     if not api_key:
         raise GatewayError("missing_key", HUMAN["missing_key"])
     payload_messages = _messages(messages)
-    body = json.dumps(
-        {"model": model, "stream": True, "messages": payload_messages},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    payload = {"model": model, "stream": True, "messages": payload_messages}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    _reject_local_content(payload, local_bodies or [])
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     deadline = time.monotonic() + timeout_sec
     conn = _open(base_url, min(10.0, timeout_sec))
     yielded = False
+    calls = _ToolCalls()
     try:
         if cancel.is_set():
             raise GatewayError("cancelled", HUMAN["cancelled"])
@@ -71,9 +84,13 @@ def stream_chat(
         if response.status != 200:
             raw = response.read(65536)
             raise _http_error(response.status, raw, api_key)
-        for piece in _deltas(response, conn, cancel, deadline, api_key):
+        for piece in _deltas(response, conn, cancel, deadline, api_key, calls):
             yielded = True
             yield piece
+        call = calls.finish()
+        if call is not None:
+            yielded = True
+            yield call
         if cancel.is_set():
             raise GatewayError("cancelled", HUMAN["cancelled"])
         if not yielded:
@@ -119,6 +136,23 @@ def _open(base_url: str, timeout: float) -> http.client.HTTPConnection:
     raise GatewayError("provider_error", "模型基址只接受 http 或 https。")
 
 
+def _reject_local_content(payload: dict, bodies: list[str]) -> None:
+    scanned = {key: value for key, value in payload.items() if key != "tools"}
+    for secret in bodies:
+        if isinstance(secret, str) and len(secret) >= 8 and _value_has(scanned, secret):
+            raise GatewayError("local_content", HUMAN["local_content"])
+
+
+def _value_has(value, secret: str) -> bool:
+    if isinstance(value, str):
+        return secret in value
+    if isinstance(value, dict):
+        return any(_value_has(key, secret) or _value_has(item, secret) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_value_has(item, secret) for item in value)
+    return False
+
+
 def _messages(messages: list[dict]) -> list[dict]:
     prepared = []
     for message in messages:
@@ -130,7 +164,58 @@ def _messages(messages: list[dict]) -> list[dict]:
     return prepared
 
 
-def _deltas(response, conn, cancel, deadline: float, api_key: str):
+class _ToolCalls:
+    def __init__(self):
+        self._slots: dict[int, dict] = {}
+
+    def add(self, calls) -> None:
+        if not isinstance(calls, list):
+            return
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            index = call.get("index", 0)
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index > 7:
+                raise GatewayError("invalid_tool_call", HUMAN["invalid_tool_call"])
+            slot = self._slots.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if isinstance(call.get("id"), str):
+                slot["id"] = call["id"]
+            function = call.get("function") or {}
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if isinstance(name, str):
+                slot["name"] += name
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                slot["arguments"] += arguments
+            if len(slot["name"]) > 128 or len(slot["arguments"]) > 100_000:
+                raise GatewayError("invalid_tool_call", HUMAN["invalid_tool_call"])
+
+    def finish(self):
+        if not self._slots:
+            return None
+        # 一条用户消息只执行第一个工具调用。
+        slot = self._slots[sorted(self._slots)[0]]
+        name = slot["name"].strip()
+        raw = slot["arguments"].strip()
+        if not name or not raw:
+            raise GatewayError("invalid_tool_call", HUMAN["invalid_tool_call"])
+        try:
+            arguments = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GatewayError("invalid_tool_call", HUMAN["invalid_tool_call"]) from exc
+        if not isinstance(arguments, dict):
+            raise GatewayError("invalid_tool_call", HUMAN["invalid_tool_call"])
+        return {
+            "type": "tool_call",
+            "name": name,
+            "arguments": arguments,
+            "call_id": slot["id"],
+        }
+
+
+def _deltas(response, conn, cancel, deadline: float, api_key: str, calls: _ToolCalls):
     if conn.sock is not None:
         conn.sock.settimeout(0.2)
     while True:
@@ -159,10 +244,10 @@ def _deltas(response, conn, cancel, deadline: float, api_key: str):
         payload = data[5:].strip()
         if payload == "[DONE]":
             return
-        yield from _content(payload, api_key)
+        yield from _content(payload, api_key, calls)
 
 
-def _content(payload: str, api_key: str):
+def _content(payload: str, api_key: str, calls: _ToolCalls):
     try:
         event = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -176,9 +261,11 @@ def _content(payload: str, api_key: str):
     choices = event.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         return
-    delta = choices[0].get("delta") or {}
+    choice = choices[0]
+    delta = choice.get("delta") or {}
     if not isinstance(delta, dict):
         return
+    calls.add(delta.get("tool_calls"))
     content = delta.get("content")
     if isinstance(content, str):
         if content:

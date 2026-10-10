@@ -169,7 +169,32 @@ main {
 
 .bubble .status-line { margin-top: 0.45rem; color: var(--muted); }
 
-.bubble.streaming p::after { content: "▍"; }
+.bubble.streaming p.body::after { content: "▍"; }
+
+.bubble img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-top: 0.55rem;
+  border-radius: 12px;
+}
+
+.local-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.local-entry textarea {
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.55rem 0.7rem;
+  background: var(--bg);
+}
 
 .empty-thread {
   width: min(720px, 100%);

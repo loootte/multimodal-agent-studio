@@ -1,6 +1,7 @@
-"""本机文字聊天。只监听 127.0.0.1。
+"""本机聊天。只监听 127.0.0.1。
 
 页面和接口在同一个进程里。密钥留在数据目录，不进响应。
+文生图走 poc 里现成的工具。图片按 artifact_id 从本机会话里取。
 """
 
 from __future__ import annotations
@@ -22,12 +23,15 @@ if WEB_DIR not in sys.path:
     sys.path.insert(0, WEB_DIR)
 
 import chat_run
+import image_run
 import store
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})$")
 _RUN_EVENTS = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/events$")
+_RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
+_ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
@@ -162,6 +166,11 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 raise chat_run.RequestError(404, "not_found", "找不到这个会话。") from exc
             _send_json(handler, 200, app.sessions.view(session))
             return
+        matched = _RUN_CONTENT.fullmatch(path)
+        if matched and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, chat_run.submit_content(app, matched.group(1), body.get("text")))
+            return
         matched = _RUN_EVENTS.fullmatch(path)
         if matched and method == "GET":
             run = app.runs.get(matched.group(1))
@@ -171,6 +180,10 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             query = urllib.parse.parse_qs(parsed.query)
             after = _after(query.get("after", ["0"])[0])
             _send_sse(handler, run, after)
+            return
+        matched = _ARTIFACT.fullmatch(path)
+        if matched and method == "GET":
+            _send_artifact(handler, matched.group(1), matched.group(2))
             return
         _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
     except chat_run.RequestError as exc:
@@ -238,6 +251,22 @@ def _send_file(handler: BaseHTTPRequestHandler, path: str, content_type: str) ->
             "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
         )
         handler.send_header("Referrer-Policy", "no-referrer")
+    handler.end_headers()
+    handler.wfile.write(raw)
+
+
+def _send_artifact(handler: BaseHTTPRequestHandler, session_id: str, artifact_id: str) -> None:
+    path, media = image_run.open_artifact(session_id, artifact_id)
+    if not path:
+        _send_json(handler, 404, {"code": "not_found", "message": "找不到这张图片。"})
+        return
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    handler.send_response(200)
+    handler.send_header("Content-Type", media)
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     handler.wfile.write(raw)
 
