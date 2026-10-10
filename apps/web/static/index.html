@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>对话</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <strong>对话</strong>
+        <button type="button" id="new-chat">新对话</button>
+      </div>
+      <ul id="session-list"></ul>
+    </aside>
+    <main>
+      <header class="top">
+        <button type="button" class="ghost menu" id="toggle-sessions">会话</button>
+        <div class="model">
+          <p id="model-line">模型</p>
+          <p id="modality-line">接受文字</p>
+        </div>
+        <button type="button" id="open-settings">设置</button>
+      </header>
+      <div id="transcript" role="log"></div>
+      <form id="composer">
+        <p id="composer-note" class="note" hidden></p>
+        <div class="composer-row">
+          <label class="attach">
+            <span>附件</span>
+            <input id="file" type="file">
+          </label>
+          <textarea id="input" rows="2" placeholder="输入文字" aria-label="消息"></textarea>
+          <button type="submit" id="send">发送</button>
+          <button type="button" id="stop" disabled>停止</button>
+        </div>
+        <p class="kbd">Enter 发送，Shift+Enter 换行。生成时按 Esc 停止。</p>
+      </form>
+    </main>
+  </div>
+  <p id="live" class="sr-only" aria-live="polite"></p>
+  <dialog id="settings">
+    <form id="settings-form" method="post" action="#">
+      <h2>模型</h2>
+      <label>
+        API 基址
+        <input name="base_url" autocomplete="off" required spellcheck="false">
+      </label>
+      <p class="hint">兼容 OpenAI Chat Completions。可以不写 https://。不要把 /chat/completions 写进基址。默认是 https://api.x.ai/v1</p>
+      <label>
+        模型标识
+        <input name="model" autocomplete="off" required spellcheck="false">
+      </label>
+      <label>
+        API key
+        <input name="api_key" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="key-hint" class="hint"></p>
+      <p id="settings-error" class="note" hidden></p>
+      <div class="dialog-actions">
+        <button type="submit">保存</button>
+        <button type="button" id="clear-key">清除本机密钥</button>
+        <button type="button" id="close-settings">关闭</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>

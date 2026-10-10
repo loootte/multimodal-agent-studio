@@ -10,3 +10,4 @@ __pycache__/
 poc/comfyui/config.json
 poc/comfyui/output/
 poc/comfyui/artifacts/
+apps/web/data/

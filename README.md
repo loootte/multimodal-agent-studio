@@ -2,7 +2,7 @@
 
 多模态 Agent 产品的工程蓝图。这个仓库定义目标、边界、架构和路线图。
 
-产品仍按 [ROADMAP.md](ROADMAP.md) 逐段落地。界面和模型网关还没有写。[issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 另有一个本地脚本 [`poc/comfyui`](poc/comfyui/README.md)，用来向本机 ComfyUI 提交固定工作流。
+产品仍按 [ROADMAP.md](ROADMAP.md) 逐段落地。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前做了本机文字聊天，用来填写第三方大模型的 API key。用法见 [`apps/web`](apps/web/README.md)。[issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 另有一个本地脚本 [`poc/comfyui`](poc/comfyui/README.md)，用来向本机 ComfyUI 提交固定工作流。
 
 ## 要做成什么
 
@@ -12,7 +12,7 @@
 
 ## 不做什么
 
-- 不在这个阶段写服务或前端。`poc/comfyui` 是 issue #1 的提交脚本、issue #2 的两个生成工具、issue #3 的白名单模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件，不提前实现网关或界面。
+- 不在这一阶段写完整的网关、运行时或界面。`apps/web` 只实现 issue #9 的文字聊天。`poc/comfyui` 是 issue #1 的提交脚本、issue #2 的两个生成工具、issue #3 的白名单模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。
 - 不把某一家模型的 SDK 当成整个系统的中心。
 - 不默认上多 Agent 群聊。默认是一个有边界的循环，加上类型明确的工具。
 - 不把上传的媒体长期塞进提示词。媒体进工件库，提示词里只放引用。
@@ -27,7 +27,8 @@
 | [docs/interface.md](docs/interface.md) | 界面范围和首版画面 |
 | [docs/repository-layout.md](docs/repository-layout.md) | 以后写代码时的目录，现在不创建 |
 | [docs/adr/0001-bootstrap-without-code.md](docs/adr/0001-bootstrap-without-code.md) | 为什么先只提交文档 |
+| [docs/adr/0002-implementation-stack.md](docs/adr/0002-implementation-stack.md) | 文字聊天这一刀的语言和进程 |
 
 ## 状态
 
-路线图第 0 阶段：工程基线。产品代码仍按路线图分阶段写。`poc/comfyui` 包含 issue #1 的提交脚本、issue #2 的 `generate_image` / `generate_video`、issue #3 的工作流模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件，不改变阶段顺序。
+路线图第 0 阶段仍在进行。issue #9 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天，不把第 1 阶段或第 3 阶段标成完成。`poc/comfyui` 包含 issue #1 的提交脚本、issue #2 的 `generate_image` / `generate_video`、issue #3 的工作流模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。
