@@ -21,7 +21,7 @@ ops/                      运行手册和部署说明
 - `evals/` 调用对外的运行 API，不调用模型适配器的私有函数。
 - 密钥文件、本地数据库和上传的原始媒体不进 Git。
 
-文字聊天这一刀的语言和进程写在 `docs/adr/0002-implementation-stack.md`。以后若整段换成别的框架，另写架构决定。本地数据隔离写在 `docs/adr/0003-local-data-isolation.md`：第三方模型只使用工具契约，本地数据由专用工具管理，外部访问先有授权。
+文字聊天这一刀的语言和进程写在 `docs/adr/0002-implementation-stack.md`。以后若整段换成别的框架，另写架构决定。本地数据隔离写在 `docs/adr/0003-local-data-isolation.md`：第三方模型只使用工具契约，本地数据由专用工具管理，外部访问先有授权。工具放在 `poc/tools`，按内部和外部分目录并自注册。MCP 只投影同一份契约、不另起进程。规范写在 `docs/adr/0004-tool-governance.md`。
 
 ## 例外：issue #1
 

@@ -28,98 +28,12 @@ def style_names() -> set[str]:
 def image_tools() -> list[dict]:
     """发给第三方的契约。参数里没有正文、字节、路径或文件名。"""
     _ensure_poc()
-    styles = sorted(style_names())
-    properties = {
-        "content_handle": {
-            "type": "string",
-            "description": "本会话本地内容的句柄。",
-        },
-        "aspect_ratio": {
-            "type": "string",
-            "enum": ["1:1", "16:9", "9:16"],
-            "description": "画幅。",
-        },
-        "seed": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "可选。不传则由本机生成。",
-        },
-    }
-    if styles:
-        properties["style"] = {
-            "type": "string",
-            "enum": styles,
-            "description": "可选。只能是白名单里的名字。",
-        }
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "accept_local_content",
-                "description": "向用户收集一条留在本机的内容。可以是文字或文件。不要填写正文、字节、路径或文件名。",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["purpose"],
-                    "properties": {
-                        "purpose": {
-                            "type": "string",
-                            "enum": ["image_prompt", "keep"],
-                            "description": "用途。出图用 image_prompt，留在本机用 keep。其他文字会被丢掉。",
-                        },
-                        "kind": {
-                            "type": "string",
-                            "enum": ["text", "file"],
-                            "description": "text 收集文字，file 收集文件。不填则是 text。",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_local_content",
-                "description": "列出本会话的本地内容。只有句柄、种类、媒体类型、大小和用途。",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {},
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "forget_local_content",
-                "description": "丢掉本会话的一枚内容句柄。不要填写正文。",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["content_handle"],
-                    "properties": {
-                        "content_handle": {
-                            "type": "string",
-                            "description": "本会话本地内容的句柄。",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "generate_image",
-                "description": "用本机会话中的文字句柄生成一张图片。不要填写画面描述。文件句柄不能用来出图。",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["content_handle"],
-                    "properties": properties,
-                },
-            },
-        },
-    ]
+    poc_root = os.path.join(ROOT, "poc")
+    if poc_root not in sys.path:
+        sys.path.append(poc_root)
+    from tools.registry import external_contracts
+
+    return external_contracts()
 
 
 def comfy_base() -> str | None:

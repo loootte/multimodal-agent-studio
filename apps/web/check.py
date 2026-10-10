@@ -328,6 +328,7 @@ def serve(httpd: ThreadingHTTPServer) -> None:
 def self_check() -> None:
     saved = {name: os.environ.pop(name, None) for name in ("XAI_API_KEY", "LLM_API_KEY")}
     try:
+        _mcp_projection()
         _saved_env_rules()
         _provider_input_rules()
         _recovery()
@@ -340,6 +341,17 @@ def self_check() -> None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def _mcp_projection() -> None:
+    poc_root = os.path.join(ROOT, "poc")
+    if poc_root not in sys.path:
+        sys.path.append(poc_root)
+    from tools.mcp import projection_error
+
+    message = projection_error()
+    if message:
+        fail(message)
 
 
 def _saved_env_rules() -> None:

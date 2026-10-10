@@ -85,6 +85,8 @@ python poc/comfyui/agent_tools.py call generate_image --json-file image-call.jso
 python poc/comfyui/agent_tools.py call generate_video --json-file video-call.json
 ```
 
+工具在 `poc/tools/internal/` 和 `poc/tools/external/`。符合规范的新文件放进目录即可，注册表不写名单。`agent_tools.py` 仍是命令入口。MCP 投影在 `poc/tools/mcp.py`，不监听端口。规范见 [ADR 0004](../../docs/adr/0004-tool-governance.md)。
+
 `style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
 
 [issue #7](https://github.com/loootte/multimodal-agent-studio/issues/7) 把图片和视频分成两条队列。视频同时只跑一个。图片正在跑时提交视频，不会取消那张图。视频超时只结束这一次视频，之后的图片仍可以提交。`duration_sec`、帧率和运动幅度不在白名单里就拒绝，ComfyUI 收不到这次 `/prompt`。图生视频把上一轮 `artifact_id` 的文件上传到 ComfyUI 的 `input/`，再写入 LoadImage；提示词仍写在文本节点。预览帧默认关闭。这两张 Wan 模板没有预览节点，即使把配置里的 `preview` 设为 true 也只跳过预览，不把成片判失败。网页运行时仍不调用 `generate_video`。

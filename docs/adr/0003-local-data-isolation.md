@@ -26,4 +26,5 @@
 - 现行路径写在 [docs/architecture.md](../architecture.md)，出口检查写在 [docs/model-gateway.md](../model-gateway.md)。离线检查在 `apps/web/check.py`。
 - 新工具若要读或写本地数据，参数收句柄，结果只回公开字段，并继续接受网关的同一道出口检查。
 - 本决定不实现登录、跨用户授权或远程 API。要做那些能力时，先写明谁授权、授权看哪一笔数据，再另写架构决定。
+- 工具放在 `poc/tools` 并按目录自注册。MCP 如何投影同一份契约，见 [ADR 0004](0004-tool-governance.md)。那份决定不新开 MCP 服务器，也不改变本决定的隔离。
 - issue #11、issue #12 和本决定都不把路线图任一阶段标成完成。
