@@ -98,6 +98,11 @@ def load_config() -> dict:
     return config
 
 
+def preview_enabled(config: dict, kind: str) -> bool:
+    section = config.get(kind) or {}
+    return section.get("preview") is True
+
+
 def job_paths(config: dict, kind: str) -> tuple[dict, dict, int]:
     section = config.get(kind) or {}
     workflow_path = section.get("workflow")
@@ -175,20 +180,40 @@ def apply_common(prompt: dict, fields: dict, args) -> None:
 def apply_frames(prompt: dict, fields: dict, args) -> None:
     if "frames" not in fields:
         fail("视频字段对照里没有 frames。")
-    step = int(fields.get("frame_step") or 4)
-    limit = int(fields.get("max_frames") or 33)
-    fps = float(fields.get("fps") or 16)
+    frames = template_fill.allowed_frame_counts(fields)
+    durations = template_fill.allowed_durations(fields)
     if args.frames is not None:
-        requested = args.frames
+        if int(args.frames) not in frames:
+            shown = "、".join(str(item) for item in frames)
+            fail(f"帧数不在白名单内。允许的值：{shown}。")
+        length = int(args.frames)
+        requested = length
     elif args.seconds is not None:
-        requested = int(round(args.seconds * fps))
+        limit = template_fill.max_duration_sec(fields)
+        if float(args.seconds) > limit:
+            fail(f"时长超过模板上限 {limit:g} 秒。")
+        if not template_fill.duration_allowed(fields, float(args.seconds)):
+            shown = "、".join(f"{item:g}" for item in durations)
+            fail(f"时长不在白名单内。允许的值：{shown}。")
+        length = template_fill.frames_for_duration(fields, float(args.seconds))
+        requested = args.seconds
     else:
-        requested = 17
-    if requested < 1:
-        fail("帧数必须大于 0。")
-    length = snap_frames(requested, step, limit)
+        length = 17 if 17 in frames else frames[0]
+        requested = length
     set_inputs(prompt, fields["frames"], length)
-    note(f"帧数 {length}（请求 {requested}，上限 {limit}，步长 {step}，fps {fps:g}）")
+    fps = float(fields.get("fps") or 16)
+    note(f"帧数 {length}（请求 {requested}，白名单帧 {frames[0]}–{frames[-1]}，fps {fps:g}）")
+
+
+def reject_rate_and_motion(fields: dict, args) -> None:
+    fps_allowed = template_fill.allowed_fps(fields)
+    motion_allowed = template_fill.allowed_motion(fields)
+    if getattr(args, "fps", None) is not None and not template_fill.value_allowed(float(args.fps), fps_allowed):
+        shown = "、".join(f"{item:g}" for item in fps_allowed)
+        fail(f"帧率不在白名单内。允许的值：{shown}。")
+    if getattr(args, "motion", None) is not None and not template_fill.value_allowed(float(args.motion), motion_allowed):
+        shown = "、".join(f"{item:g}" for item in motion_allowed)
+        fail(f"运动幅度不在白名单内。允许的值：{shown}。")
 
 
 def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
@@ -276,8 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     i2i.add_argument("--image", required=True, help="本地参考图。")
     video = subparsers.add_parser("video", help="文生视频。传入 --image 时改用 video_i2v 模板。")
     add_common(video)
-    video.add_argument("--frames", type=int, default=None, help="帧数。会按字段对照里的步长对齐，并不超过上限。")
-    video.add_argument("--seconds", type=float, default=None, help="时长（秒）。同时传了 --frames 时以帧数为准。")
+    video.add_argument("--frames", type=int, default=None, help="帧数。只允许白名单里的 4n+1，不超过上限。")
+    video.add_argument("--seconds", type=float, default=None, help="时长（秒）。只允许白名单。同时传了 --frames 时以帧数为准。")
+    video.add_argument("--fps", type=float, default=None, help="帧率。只允许白名单，不传则用模板里的值。")
+    video.add_argument("--motion", type=float, default=None, help="运动幅度。只允许白名单。当前模板没有对应节点，合法值不会写入工作流。")
     video.add_argument("--image", default=None, help="本地参考图。传入则使用图生视频模板。")
     subparsers.add_parser("check", help="校验模板对照表。不连接 ComfyUI。")
     return parser
@@ -293,24 +320,40 @@ def template_kind(args) -> str:
     return "video"
 
 
-def execute_workflow(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str, on_event=None) -> list[str]:
+def execute_workflow(
+    base: str,
+    template: dict,
+    workflow: dict,
+    fields: dict,
+    timeout: int,
+    output_dir: str,
+    on_event=None,
+    kind: str = "image",
+    preview: bool = False,
+) -> list[str]:
     client = comfy_client.ComfyClient(base)
+    lane = comfy_client.lane_for(kind)
 
     def relay(event: dict) -> None:
         report_event(event, workflow)
         if on_event is not None:
             on_event(event)
 
-    try:
-        template_fill.assert_template_edit(template, workflow, fields)
-        prompt_id = client.submit(workflow)
+    def started(prompt_id: str) -> None:
         if on_event is not None:
             on_event({"type": "submitted", "prompt_id": prompt_id})
         stream = sys.stdout if _talk else sys.stderr
         print(f"prompt_id {prompt_id}", file=stream, flush=True)
         if client.queued(prompt_id):
             print(f"队列中 {prompt_id}", file=sys.stderr, flush=True)
-        entry = client.wait(prompt_id, timeout, on_event=relay)
+
+    try:
+        template_fill.assert_template_edit(template, workflow, fields)
+        if lane == "video" and template_fill.preview_choice(preview, fields) == "skipped":
+            note("预览帧已跳过：模板没有预览节点，这次仍提交成片。")
+        entry = comfy_client.run_isolated(
+            lane, client, workflow, timeout, on_event=relay, on_submitted=started,
+        )
         confirm_history_prompt(entry, workflow, fields)
         return client.save_outputs(entry, output_dir)
     finally:
@@ -356,6 +399,7 @@ def _main(argv: list[str] | None) -> dict | None:
     apply_steps(prompt, fields, args.steps)
     if args.command == "video":
         apply_frames(prompt, fields, args)
+        reject_rate_and_motion(fields, args)
     image_path = getattr(args, "image", None)
     if image_path:
         if "reference_image" not in fields:
@@ -370,7 +414,16 @@ def _main(argv: list[str] | None) -> dict | None:
     if args.print_prompt:
         print(json.dumps(prompt, ensure_ascii=False, indent=2))
         return None
-    paths = execute_workflow(config["comfy_url"], template, prompt, fields, timeout, config["output_dir"])
+    paths = execute_workflow(
+        config["comfy_url"],
+        template,
+        prompt,
+        fields,
+        timeout,
+        config["output_dir"],
+        kind=template_kind(args),
+        preview=preview_enabled(config, template_kind(args)),
+    )
     duration = None
     if args.command == "video":
         frame_count = int(template_fill.read_back(prompt, fields, "frames"))

@@ -20,7 +20,7 @@ WRITE_FIELDS = (
     "frames",
     "reference_image",
 )
-META_FIELDS = ("aspects", "max_frames", "frame_step", "fps")
+META_FIELDS = ("aspects", "max_frames", "frame_step", "fps", "fps_allowed", "motion_allowed")
 
 
 class TemplateError(Exception):
@@ -165,6 +165,11 @@ def run_check(config: dict) -> None:
                 raise TemplateError("文生视频对照表不应包含 reference_image。")
             if kind in {"video", "video_i2v"} and int(fields.get("max_frames") or 0) < 1:
                 raise TemplateError(f"{kind} 对照表没有帧数上限。")
+            if kind in {"video", "video_i2v"}:
+                if not allowed_durations(fields) or not allowed_fps(fields) or not allowed_motion(fields):
+                    raise TemplateError(f"{kind} 的时长、帧率或运动幅度白名单是空的。")
+                if preview_choice(False, fields) != "off" or preview_choice(True, fields) != "skipped":
+                    raise TemplateError("没有预览节点时，预览应默认关闭；打开后跳过，不能把视频判失败。")
             validate_fields(workflow, fields)
             filled = copy_template(workflow)
             comfy_poc.set_inputs(filled, fields["positive_prompt"], "a red ceramic teapot")
@@ -284,6 +289,88 @@ def load_job(config: dict, kind: str):
     workflow, fields, timeout = comfy_poc.job_paths(config, kind)
     validate_fields(workflow, fields)
     return copy_template(workflow), fields, timeout
+
+
+def _near(left: float, right: float) -> bool:
+    return abs(float(left) - float(right)) <= 1e-6
+
+
+def value_allowed(value: float, allowed: list[float]) -> bool:
+    return any(_near(value, item) for item in allowed)
+
+
+def allowed_frame_counts(fields: dict) -> list[int]:
+    step = int(fields.get("frame_step") or 4)
+    limit = int(fields.get("max_frames") or 33)
+    if step < 1 or limit < 1:
+        raise TemplateError("视频帧数白名单不可用。")
+    frame = 1
+    found = []
+    while frame <= limit:
+        found.append(frame)
+        frame += step
+    return found
+
+
+def allowed_durations(fields: dict) -> list[float]:
+    import comfy_poc
+
+    fps = float(fields.get("fps") or 16)
+    if fps <= 0:
+        raise TemplateError("模板的 fps 必须大于 0。")
+    frames = allowed_frame_counts(fields)
+    values = [frame / fps for frame in frames]
+    requested = int(round(fps))
+    limit = int(fields.get("max_frames") or 33)
+    if requested <= limit and not value_allowed(1.0, values):
+        snapped = comfy_poc.snap_frames(requested, int(fields.get("frame_step") or 4), limit)
+        if snapped in frames:
+            values.append(1.0)
+    return values
+
+
+def duration_allowed(fields: dict, duration_sec: float) -> bool:
+    return value_allowed(float(duration_sec), allowed_durations(fields))
+
+
+def _number_list(raw, label: str) -> list[float]:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise TemplateError(f"{label}白名单不可用。")
+    values = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or float(item) <= 0:
+            raise TemplateError(f"{label}白名单不可用。")
+        values.append(float(item))
+    return values
+
+
+def allowed_fps(fields: dict) -> list[float]:
+    raw = fields.get("fps_allowed")
+    if raw is None:
+        raw = [fields.get("fps") or 16]
+    values = _number_list(raw, "帧率")
+    current = float(fields.get("fps") or 16)
+    if not value_allowed(current, values):
+        raise TemplateError("模板帧率不在白名单内。")
+    return values
+
+
+def allowed_motion(fields: dict) -> list[float]:
+    raw = fields.get("motion_allowed")
+    if raw is None:
+        raw = [1]
+    return _number_list(raw, "运动幅度")
+
+
+def preview_choice(enabled: bool, fields: dict) -> str:
+    """预览默认关闭。当前模板没有预览节点，打开时跳过，不把成片判失败。"""
+    if not enabled:
+        return "off"
+    if not isinstance(fields, dict) or "preview" not in fields:
+        return "skipped"
+    return "skipped"
 
 
 def max_duration_sec(fields: dict) -> float:

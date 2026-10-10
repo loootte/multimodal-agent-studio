@@ -19,5 +19,7 @@
   },
   "max_frames": 33,
   "frame_step": 4,
-  "fps": 16
+  "fps": 16,
+  "fps_allowed": [16],
+  "motion_allowed": [1]
 }

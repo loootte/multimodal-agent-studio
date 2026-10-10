@@ -102,7 +102,7 @@ Agent 运行时
 
 `image_run.py` 里的契约是 `accept_local_content`、`list_local_content`、`forget_local_content` 和 `generate_image`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc` 里的工具仍然要求 `prompt`，这个参数不转发给模型。
 
-还没有放进运行时的部分：多步循环、预算、写操作前的人工确认、`generate_video`。
+还没有放进运行时的部分：多步循环、预算、写操作前的人工确认、`generate_video`。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`，不把路线图任一阶段标成完成。
 
 ### 模型网关
 

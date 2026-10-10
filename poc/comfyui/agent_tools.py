@@ -82,9 +82,23 @@ def tool_specs() -> list[dict]:
                 "required": ["prompt", "duration_sec", "aspect_ratio"],
                 "properties": {
                     "prompt": {"type": "string", "minLength": 1, "description": "画面描述。"},
-                    "duration_sec": {"type": "number", "exclusiveMinimum": 0, "description": "时长（秒）。超过模板上限会被拒绝。"},
+                    "duration_sec": {
+                        "type": "number",
+                        "enum": template_fill.allowed_durations(_video_fields()),
+                        "description": "时长（秒）。只能是白名单里的值，超出或对不齐都不会提交。",
+                    },
                     "aspect_ratio": {"type": "string", "enum": aspects, "description": "画幅，只能是白名单里的值。"},
                     "image_ref": {"type": "string", "description": "可选。上一张图的 artifact_id。传入则图生视频，不传则文生视频。"},
+                    "fps": {
+                        "type": "number",
+                        "enum": template_fill.allowed_fps(_video_fields()),
+                        "description": "可选。帧率，只能是白名单里的值。不传则用模板帧率。",
+                    },
+                    "motion": {
+                        "type": "number",
+                        "enum": template_fill.allowed_motion(_video_fields()),
+                        "description": "可选。运动幅度，只能是白名单里的值。当前模板没有对应节点，合法值不会写入工作流。",
+                    },
                 },
             },
         },
@@ -108,7 +122,7 @@ def public_comfy_message(exc: comfy_poc.ComfyFailure) -> str:
 def unexpected(tool: str, arguments: dict) -> dict | None:
     allowed = {
         "generate_image": {"prompt", "aspect_ratio", "seed", "style"},
-        "generate_video": {"prompt", "duration_sec", "aspect_ratio", "image_ref"},
+        "generate_video": {"prompt", "duration_sec", "aspect_ratio", "image_ref", "fps", "motion"},
     }[tool]
     extra = sorted(set(arguments) - allowed)
     if extra:
@@ -215,6 +229,44 @@ def _validate_image(arguments: dict) -> dict | None:
     return None
 
 
+def _video_fields() -> dict:
+    path = os.path.join(SCRIPT_DIR, "workflows", "video.fields.json")
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _shown(values: list[float]) -> str:
+    return "、".join(f"{item:g}" for item in values)
+
+
+def _optional_number(arguments: dict, key: str, allowed: list[float], code: str, label: str) -> dict | None:
+    if key not in arguments or arguments[key] is None:
+        return None
+    value = arguments[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not template_fill.value_allowed(float(value), allowed):
+        return tool_error("generate_video", code, f"{label}不在白名单内。允许的值：{_shown(allowed)}。", key)
+    return None
+
+
+def _video_policy(arguments: dict, fields: dict) -> dict | None:
+    tool = "generate_video"
+    duration = float(arguments["duration_sec"])
+    limit = template_fill.max_duration_sec(fields)
+    if duration > limit:
+        return tool_error(tool, "duration_too_long", f"duration_sec 超过模板上限 {limit:g} 秒。", "duration_sec")
+    if not template_fill.duration_allowed(fields, duration):
+        return tool_error(
+            tool,
+            "invalid_duration",
+            f"duration_sec 不在白名单内。允许的值：{_shown(template_fill.allowed_durations(fields))}。",
+            "duration_sec",
+        )
+    problem = _optional_number(arguments, "fps", template_fill.allowed_fps(fields), "invalid_fps", "帧率")
+    if problem:
+        return problem
+    return _optional_number(arguments, "motion", template_fill.allowed_motion(fields), "invalid_motion", "运动幅度")
+
+
 def _validate_video(arguments: dict) -> dict | None:
     tool = "generate_video"
     problem = unexpected(tool, arguments) or require_prompt(tool, arguments)
@@ -230,20 +282,20 @@ def _validate_video(arguments: dict) -> dict | None:
         return problem
     image_ref = arguments.get("image_ref")
     config = comfy_poc.load_config()
-    if image_ref is not None:
-        if not isinstance(image_ref, str) or not image_ref.strip():
-            return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
-        try:
-            artifacts.resolve_image_ref(config, image_ref)
-        except artifacts.ArtifactError as exc:
-            return tool_error(tool, "image_not_found", exc.message, "image_ref")
+    if image_ref is not None and (not isinstance(image_ref, str) or not image_ref.strip()):
+        return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
     kind = "video_i2v" if image_ref else "video"
     _template, fields, _timeout = template_fill.load_job(config, kind)
     if aspect not in (fields.get("aspects") or {}):
         return tool_error(tool, "invalid_aspect_ratio", "这张视频模板没有这个画幅。", "aspect_ratio")
-    limit = template_fill.max_duration_sec(fields)
-    if float(duration) > limit:
-        return tool_error(tool, "duration_too_long", f"duration_sec 超过模板上限 {limit:g} 秒。", "duration_sec")
+    problem = _video_policy(arguments, fields)
+    if problem:
+        return problem
+    if image_ref is not None:
+        try:
+            artifacts.resolve_image_ref(config, image_ref)
+        except artifacts.ArtifactError as exc:
+            return tool_error(tool, "image_not_found", exc.message, "image_ref")
     return None
 
 
@@ -261,16 +313,25 @@ def generate_image(prompt: str, aspect_ratio: str, seed: int | None = None, styl
     return call_tool("generate_image", {key: value for key, value in arguments.items() if value is not None or key in {"prompt", "aspect_ratio"}})
 
 
-def generate_video(prompt: str, duration_sec: float, aspect_ratio: str, image_ref: str | None = None) -> dict:
+def generate_video(
+    prompt: str,
+    duration_sec: float,
+    aspect_ratio: str,
+    image_ref: str | None = None,
+    fps: float | None = None,
+    motion: float | None = None,
+) -> dict:
     arguments = {
         "prompt": prompt,
         "duration_sec": duration_sec,
         "aspect_ratio": aspect_ratio,
         "image_ref": image_ref,
+        "fps": fps,
+        "motion": motion,
     }
     return call_tool(
         "generate_video",
-        {key: value for key, value in arguments.items() if value is not None or key != "image_ref"},
+        {key: value for key, value in arguments.items() if value is not None},
     )
 
 
@@ -337,27 +398,22 @@ def _generate_video(arguments: dict) -> dict:
         return problem
     image_ref = arguments.get("image_ref")
     config = comfy_poc.load_config()
-    local_image = None
-    ref_id = None
-    if image_ref is not None:
-        if not isinstance(image_ref, str) or not image_ref.strip():
-            return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
-        try:
-            local_image, ref_id = artifacts.resolve_image_ref(config, image_ref)
-        except artifacts.ArtifactError as exc:
-            return tool_error(tool, "image_not_found", exc.message, "image_ref")
+    if image_ref is not None and (not isinstance(image_ref, str) or not image_ref.strip()):
+        return tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
     kind = "video_i2v" if image_ref else "video"
     template, fields, timeout = template_fill.load_job(config, kind)
     if aspect not in (fields.get("aspects") or {}):
         return tool_error(tool, "invalid_aspect_ratio", "这张视频模板没有这个画幅。", "aspect_ratio")
-    limit = template_fill.max_duration_sec(fields)
-    if float(duration) > limit:
-        return tool_error(
-            tool,
-            "duration_too_long",
-            f"duration_sec 超过模板上限 {limit:g} 秒。",
-            "duration_sec",
-        )
+    problem = _video_policy(arguments, fields)
+    if problem:
+        return problem
+    local_image = None
+    ref_id = None
+    if image_ref is not None:
+        try:
+            local_image, ref_id = artifacts.resolve_image_ref(config, image_ref)
+        except artifacts.ArtifactError as exc:
+            return tool_error(tool, "image_not_found", exc.message, "image_ref")
     frames = template_fill.frames_for_duration(fields, float(duration))
     workflow = template_fill.copy_template(template)
     template_fill.fill_common(workflow, fields, arguments["prompt"], aspect, seed, None)
@@ -376,7 +432,15 @@ def _generate_video(arguments: dict) -> dict:
         return problem
     template_fill.assert_template_edit(template, workflow, fields)
     files = comfy_client.run(
-        config["comfy_url"], template, workflow, fields, timeout, config["output_dir"], on_event=_run_listener,
+        config["comfy_url"],
+        template,
+        workflow,
+        fields,
+        timeout,
+        config["output_dir"],
+        on_event=_run_listener,
+        kind=kind,
+        preview=comfy_poc.preview_enabled(config, kind),
     )
     records = artifacts.remember_outputs(
         config,
@@ -478,8 +542,47 @@ def self_check() -> None:
     for item in samples:
         if item["ok"] or "workflow" in json.dumps(item):
             comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
+    _check_video_whitelist()
     artifacts.self_check()
     _check_artifact_handoff()
+
+
+def _check_video_whitelist() -> None:
+    seen = {"run": 0, "upload": 0}
+
+    def fake_upload(*_args, **_kwargs):
+        seen["upload"] += 1
+        return "ref.png"
+
+    def fake_run(*_args, **_kwargs):
+        seen["run"] += 1
+        return []
+
+    original_upload = comfy_client.upload
+    original_run = comfy_client.run
+    comfy_client.upload = fake_upload
+    comfy_client.run = fake_run
+    try:
+        rejected = [
+            call_tool("generate_video", {"prompt": "teapot", "duration_sec": 1.2, "aspect_ratio": "16:9"}),
+            call_tool("generate_video", {"prompt": "teapot", "duration_sec": 1, "aspect_ratio": "16:9", "fps": 24}),
+            call_tool("generate_video", {"prompt": "teapot", "duration_sec": 1, "aspect_ratio": "16:9", "motion": 2}),
+        ]
+    finally:
+        comfy_client.upload = original_upload
+        comfy_client.run = original_run
+    codes = [item["error"]["code"] for item in rejected]
+    if codes != ["invalid_duration", "invalid_fps", "invalid_motion"]:
+        comfy_poc.fail(f"视频白名单错误码不对：{codes}")
+    if seen["run"] or seen["upload"]:
+        comfy_poc.fail("不在白名单的视频参数仍然提交了 ComfyUI。")
+    if comfy_poc.preview_enabled({"video": {}}, "video") or comfy_poc.preview_enabled({"video": {"preview": False}}, "video"):
+        comfy_poc.fail("视频预览默认应关闭。")
+    if not comfy_poc.preview_enabled({"video": {"preview": True}}, "video"):
+        comfy_poc.fail("显式打开的视频预览没有被认出来。")
+    fields = _video_fields()
+    if template_fill.preview_choice(True, fields) != "skipped":
+        comfy_poc.fail("没有预览节点时打开预览应跳过，而不是失败。")
 
 
 def _check_artifact_handoff() -> None:
@@ -516,7 +619,13 @@ def _check_artifact_handoff() -> None:
             seen["upload"] = handle.read()
         return "ref.png"
 
-    def fake_run(*_args, **_kwargs):
+    def fake_run(*args, **_kwargs):
+        workflow = args[2]
+        fields = args[3]
+        seen["load_image"] = template_fill.read_back(workflow, fields, "reference_image")
+        seen["prompt"] = template_fill.read_back(workflow, fields, "positive_prompt")
+        node_id = str(fields["reference_image"]["node"])
+        seen["class_type"] = workflow[node_id]["class_type"]
         return [rendered]
 
     original_upload = comfy_client.upload
@@ -549,6 +658,10 @@ def _check_artifact_handoff() -> None:
             comfy_poc.fail(f"artifact_id 没有交给 generate_video：{result}")
         if seen.get("upload") != png:
             comfy_poc.fail("generate_video 没有取回上一张图的文件。")
+        if seen.get("load_image") != "ref.png" or seen.get("class_type") != "LoadImage":
+            comfy_poc.fail(f"LoadImage 没有指向这次上传的文件：{seen}")
+        if seen.get("prompt") != "the camera slowly pushes in":
+            comfy_poc.fail("图生视频的提示词没有留在文本节点里。")
         if result.get("image_ref") != image["artifact_id"]:
             comfy_poc.fail("结果没有沿用上一张图的 artifact_id。")
         if "files" in result or source in json.dumps(result) or rendered in json.dumps(result):

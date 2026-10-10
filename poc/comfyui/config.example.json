@@ -16,11 +16,13 @@
   "video": {
     "workflow": "workflows/video_api.json",
     "fields": "workflows/video.fields.json",
-    "timeout_sec": 2700
+    "timeout_sec": 2700,
+    "preview": false
   },
   "video_i2v": {
     "workflow": "workflows/video_i2v_api.json",
     "fields": "workflows/video_i2v.fields.json",
-    "timeout_sec": 2700
+    "timeout_sec": 2700,
+    "preview": false
   }
 }

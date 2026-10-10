@@ -22,6 +22,35 @@ import uuid
 DEFAULT_BASE = "http://127.0.0.1:8188"
 
 
+class JobLanes:
+    """图片和视频分开排队。视频同时只跑一个，提交视频不会取消正在跑的图片。"""
+
+    def __init__(self) -> None:
+        self._video = threading.BoundedSemaphore(1)
+        self._guard = threading.Lock()
+        self._images: set[str] = set()
+        self._videos: set[str] = set()
+
+    def acquire(self, lane: str) -> None:
+        if lane == "video":
+            self._video.acquire()
+
+    def release(self, lane: str) -> None:
+        if lane == "video":
+            self._video.release()
+
+    def remember(self, lane: str, prompt_id: str) -> None:
+        with self._guard:
+            (self._videos if lane == "video" else self._images).add(prompt_id)
+
+    def forget(self, lane: str, prompt_id: str) -> None:
+        with self._guard:
+            (self._videos if lane == "video" else self._images).discard(prompt_id)
+
+
+LANES = JobLanes()
+
+
 class ComfyFailure(Exception):
     def __init__(self, message: str, payload=None, prompt_id: str | None = None):
         super().__init__(message)
@@ -278,14 +307,27 @@ class ComfyClient:
                     return True
         return False
 
-    def cancel(self, prompt_id: str) -> None:
-        """取消这一次运行。先移出等待队列，再 POST /interrupt。结果不会记为成功。"""
+    def running(self, prompt_id: str) -> bool:
+        try:
+            payload = self._request_json(self.base + "/queue")
+        except ComfyFailure:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        for item in payload.get("queue_running") or []:
+            if isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == prompt_id:
+                return True
+        return False
+
+    def cancel(self, prompt_id: str, *, interrupt: bool = True) -> None:
+        """取消这一次运行。先移出等待队列。只有这次自己正在跑时才 POST /interrupt。"""
         with self._cond:
             self._cancelled.add(prompt_id)
             self._tracked.add(prompt_id)
             self._cond.notify_all()
         self._request_json(self.base + "/queue", {"delete": [prompt_id]})
-        self._request_json(self.base + "/interrupt", {"prompt_id": prompt_id})
+        if interrupt:
+            self._request_json(self.base + "/interrupt", {"prompt_id": prompt_id})
 
     def wait(self, prompt_id: str, timeout: int, on_event=None) -> dict:
         deadline = time.monotonic() + timeout
@@ -600,10 +642,57 @@ def upload(base: str, path: str) -> str:
     return ComfyClient(base).upload_image(path)
 
 
-def run(base: str, template: dict, workflow: dict, fields: dict, timeout: int, output_dir: str, on_event=None) -> list[str]:
+def lane_for(kind: str) -> str:
+    return "video" if str(kind).startswith("video") else "image"
+
+
+def run_isolated(lane: str, client: ComfyClient, workflow: dict, timeout: int, on_event=None, on_submitted=None) -> dict:
+    """在图片或视频队列里提交并等待。视频队列同时只容纳一个任务。"""
+    if lane not in {"image", "video"}:
+        raise ComfyFailure("队列只分图片和视频。")
+    LANES.acquire(lane)
+    prompt_id = None
+    try:
+        prompt_id = client.submit(workflow)
+        LANES.remember(lane, prompt_id)
+        if on_submitted is not None:
+            on_submitted(prompt_id)
+        try:
+            return client.wait(prompt_id, timeout, on_event=on_event)
+        except ComfyFailure as exc:
+            if lane == "video" and prompt_id and "等待超时" in (exc.message or ""):
+                client.cancel(prompt_id, interrupt=client.running(prompt_id))
+            raise
+    finally:
+        if prompt_id is not None:
+            LANES.forget(lane, prompt_id)
+        LANES.release(lane)
+
+
+def run(
+    base: str,
+    template: dict,
+    workflow: dict,
+    fields: dict,
+    timeout: int,
+    output_dir: str,
+    on_event=None,
+    kind: str = "image",
+    preview: bool = False,
+) -> list[str]:
     import comfy_poc
 
-    return comfy_poc.execute_workflow(base, template, workflow, fields, timeout, output_dir, on_event=on_event)
+    return comfy_poc.execute_workflow(
+        base,
+        template,
+        workflow,
+        fields,
+        timeout,
+        output_dir,
+        on_event=on_event,
+        kind=kind,
+        preview=preview,
+    )
 
 
 def _check_fail(message: str) -> None:
@@ -985,12 +1074,256 @@ def _check_history_success_after_disconnect() -> None:
         client.close()
 
 
+def _success_entry() -> dict:
+    return {
+        "status": {"status_str": "success", "completed": True, "messages": [["execution_success", {}]]},
+        "outputs": {"7": {"images": [{"filename": "poc.png", "subfolder": "", "type": "output"}]}},
+    }
+
+
+def _check_lanes() -> None:
+    state = {
+        "lock": threading.Lock(),
+        "ids": [],
+        "interrupts": [],
+        "running": set(),
+        "pending": [],
+        "ready": {},
+    }
+    graph = {"1": {"class_type": "SaveImage", "inputs": {}}}
+
+    def connect(_url, _client_id):
+        return _FakeSocket()
+
+    def urlopen(req, timeout=120):
+        method = req.get_method()
+        url = req.full_url
+        body = {}
+        if req.data:
+            body = json.loads(req.data.decode("utf-8"))
+        with state["lock"]:
+            if method == "POST" and url.endswith("/prompt"):
+                prompt_id = f"00000000-0000-0000-0000-{len(state['ids']) + 1:012d}"
+                state["ids"].append(prompt_id)
+                if state["running"]:
+                    state["pending"].append(prompt_id)
+                else:
+                    state["running"].add(prompt_id)
+                payload = {"prompt_id": prompt_id, "number": len(state["ids"]), "node_errors": {}}
+                return _FakeResponse(json.dumps(payload).encode("utf-8"))
+            if method == "GET" and "/history/" in url:
+                prompt_id = urllib.parse.unquote(url.rstrip("/").rsplit("/", 1)[-1])
+                entry = state["ready"].get(prompt_id)
+                if entry is None:
+                    return _FakeResponse(b"{}")
+                return _FakeResponse(json.dumps({prompt_id: entry}).encode("utf-8"))
+            if method == "GET" and url.endswith("/queue"):
+                running = [[0, item] for item in state["running"]]
+                pending = [[0, item] for item in state["pending"]]
+                return _FakeResponse(json.dumps({"queue_running": running, "queue_pending": pending}).encode("utf-8"))
+            if method == "POST" and url.endswith("/queue"):
+                for item in body.get("delete") or []:
+                    state["running"].discard(item)
+                    if item in state["pending"]:
+                        state["pending"].remove(item)
+                return _FakeResponse(b"{}")
+            if method == "POST" and url.endswith("/interrupt"):
+                prompt_id = body.get("prompt_id")
+                state["interrupts"].append(prompt_id)
+                state["running"].discard(prompt_id)
+                state["ready"][prompt_id] = {
+                    "status": {
+                        "status_str": "error",
+                        "completed": False,
+                        "messages": [["execution_interrupted", {"prompt_id": prompt_id}]],
+                    },
+                    "outputs": {},
+                }
+                return _FakeResponse(b"{}")
+        raise ComfyFailure(f"校验不该访问 {method} {url}")
+
+    def new_client() -> ComfyClient:
+        return ComfyClient("http://127.0.0.1:8188", urlopen=urlopen, connect=connect)
+
+    def wait_ids(count: int, limit: float = 2) -> None:
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline and len(state["ids"]) < count:
+            time.sleep(0.02)
+        if len(state["ids"]) < count:
+            _check_fail(f"队列里只有 {len(state['ids'])} 次提交，期望至少 {count}。")
+
+    def mark_ready(prompt_id: str) -> None:
+        with state["lock"]:
+            state["ready"][prompt_id] = _success_entry()
+
+    image_box: dict = {}
+    video_box: dict = {}
+
+    def run_image() -> None:
+        current = new_client()
+        try:
+            image_box["entry"] = run_isolated("image", current, graph, 5)
+        except ComfyFailure as exc:
+            image_box["error"] = exc
+        finally:
+            current.close()
+
+    def run_video() -> None:
+        current = new_client()
+        try:
+            video_box["entry"] = run_isolated("video", current, graph, 5)
+        except ComfyFailure as exc:
+            video_box["error"] = exc
+        finally:
+            current.close()
+
+    image_thread = threading.Thread(target=run_image)
+    image_thread.start()
+    wait_ids(1)
+    image_id = state["ids"][0]
+    video_thread = threading.Thread(target=run_video)
+    video_thread.start()
+    wait_ids(2)
+    if state["interrupts"]:
+        _check_fail(f"提交视频时取消了正在跑的图片：{state['interrupts']}")
+    mark_ready(image_id)
+    image_thread.join(timeout=6)
+    if image_thread.is_alive() or image_box.get("error") or job_state(image_box.get("entry")) != "success":
+        _check_fail(f"图片没有在视频提交后完成：{image_box}")
+    if image_id in state["interrupts"]:
+        _check_fail("完成的图片被视频取消了。")
+    mark_ready(state["ids"][1])
+    video_thread.join(timeout=6)
+    if video_thread.is_alive() or video_box.get("error"):
+        _check_fail(f"图片完成后视频没有结束：{video_box}")
+
+    with state["lock"]:
+        state["ids"].clear()
+        state["interrupts"].clear()
+        state["running"].clear()
+        state["pending"].clear()
+        state["ready"].clear()
+    timed: dict = {}
+
+    def run_timeout() -> None:
+        current = new_client()
+        try:
+            run_isolated("video", current, graph, 1)
+        except ComfyFailure as exc:
+            timed["error"] = exc
+        finally:
+            current.close()
+
+    timeout_thread = threading.Thread(target=run_timeout)
+    timeout_thread.start()
+    wait_ids(1)
+    video_id = state["ids"][0]
+    timeout_thread.join(timeout=4)
+    if timeout_thread.is_alive():
+        _check_fail("视频超时没有返回。")
+    err = timed.get("error")
+    if err is None or "等待超时" not in err.message:
+        _check_fail(f"视频超时没有按超时失败：{getattr(err, 'message', err)}")
+    if state["interrupts"] != [video_id]:
+        _check_fail(f"视频超时没有只结束这一次视频：{state['interrupts']}")
+
+    image_after: dict = {}
+
+    def run_after() -> None:
+        current = new_client()
+        try:
+            image_after["entry"] = run_isolated("image", current, graph, 5)
+        except ComfyFailure as exc:
+            image_after["error"] = exc
+        finally:
+            current.close()
+
+    def mark_fresh(known: set[str]) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            fresh = [item for item in list(state["ids"]) if item not in known]
+            if fresh:
+                mark_ready(fresh[0])
+                return
+            time.sleep(0.02)
+
+    known = set(state["ids"])
+    marker = threading.Thread(target=mark_fresh, args=(known,))
+    after = threading.Thread(target=run_after)
+    marker.start()
+    after.start()
+    after.join(timeout=6)
+    marker.join(timeout=1)
+    if after.is_alive() or image_after.get("error") or job_state(image_after.get("entry")) != "success":
+        _check_fail(f"视频超时后图片没有开始：{image_after}")
+    if len(state["ids"]) < 2:
+        _check_fail("视频超时后没有新的图片提交。")
+
+    with state["lock"]:
+        state["ids"].clear()
+        state["interrupts"].clear()
+        state["running"].clear()
+        state["pending"].clear()
+        state["ready"].clear()
+    first: dict = {}
+    second: dict = {}
+    middle: dict = {}
+
+    def run_held(box: dict) -> None:
+        current = new_client()
+        try:
+            box["entry"] = run_isolated("video", current, graph, 5)
+        except ComfyFailure as exc:
+            box["error"] = exc
+        finally:
+            current.close()
+
+    def run_middle() -> None:
+        current = new_client()
+        try:
+            middle["entry"] = run_isolated("image", current, graph, 5)
+        except ComfyFailure as exc:
+            middle["error"] = exc
+        finally:
+            current.close()
+
+    first_thread = threading.Thread(target=run_held, args=(first,))
+    first_thread.start()
+    wait_ids(1)
+    second_thread = threading.Thread(target=run_held, args=(second,))
+    second_thread.start()
+    time.sleep(0.3)
+    if len(state["ids"]) != 1:
+        _check_fail(f"第二条视频没有等第一条结束：{state['ids']}")
+    known = set(state["ids"])
+    marker = threading.Thread(target=mark_fresh, args=(known,))
+    middle_thread = threading.Thread(target=run_middle)
+    marker.start()
+    middle_thread.start()
+    middle_thread.join(timeout=6)
+    if middle_thread.is_alive() or middle.get("error") or job_state(middle.get("entry")) != "success":
+        _check_fail(f"视频占用时图片队列被拖住了：{middle}")
+    if len(state["ids"]) != 2:
+        _check_fail(f"视频占用时图片没有提交：{state['ids']}")
+    mark_ready(state["ids"][0])
+    wait_ids(3, limit=4)
+    mark_ready(state["ids"][2])
+    first_thread.join(timeout=6)
+    second_thread.join(timeout=6)
+    marker.join(timeout=1)
+    if first_thread.is_alive() or second_thread.is_alive() or first.get("error") or second.get("error"):
+        _check_fail(f"视频队列没有按一次一个走完：{first.get('error')} {second.get('error')}")
+    if state["interrupts"]:
+        _check_fail(f"分开排队时不该取消别的任务：{state['interrupts']}")
+
+
 def self_check() -> None:
     _check_routing()
     _check_error_text()
     _check_submit_and_cancel()
     _check_history_fallback()
     _check_history_success_after_disconnect()
+    _check_lanes()
     print("client_check ok")
 
 

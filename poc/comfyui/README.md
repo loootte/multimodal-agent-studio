@@ -56,7 +56,7 @@ python poc/comfyui/comfy_poc.py video --prompt "a red ceramic teapot on a wooden
 
 `check` 不连接 ComfyUI。它确认对照表里的节点都在，故意写错的节点不会发出请求，自由 JSON 和白名单之外的改动也会在提交前被拒绝。
 
-可选参数：`--negative`、`--aspect`（只允许 `1:1`、`16:9`、`9:16`）、`--seed`、`--steps`。不传 `--steps` 就保留模板里的步数。视频还可以传 `--seconds`。`--frames` 和 `--seconds` 同时存在时用帧数。视频不传 `--image` 用文生视频模板；传入则用图生视频模板，只替换参考图文件名，不往图里加节点。
+可选参数：`--negative`、`--aspect`（只允许 `1:1`、`16:9`、`9:16`）、`--seed`、`--steps`。不传 `--steps` 就保留模板里的步数。视频还可以传 `--seconds`、`--fps` 和 `--motion`，都只接受白名单。`--frames` 和 `--seconds` 同时存在时用帧数。视频不传 `--image` 用文生视频模板；传入则用图生视频模板，把参考图上传到 ComfyUI 的 `input/` 后只替换 LoadImage 的文件名，不往图里加节点。
 
 `--print-prompt` 只打印替换后的工作流，不提交。这是这条脚本的调试口。Agent 工具不会打印 workflow。
 
@@ -86,6 +86,8 @@ python poc/comfyui/agent_tools.py call generate_video --json-file video-call.jso
 ```
 
 `style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
+
+[issue #7](https://github.com/loootte/multimodal-agent-studio/issues/7) 把图片和视频分成两条队列。视频同时只跑一个。图片正在跑时提交视频，不会取消那张图。视频超时只结束这一次视频，之后的图片仍可以提交。`duration_sec`、帧率和运动幅度不在白名单里就拒绝，ComfyUI 收不到这次 `/prompt`。图生视频把上一轮 `artifact_id` 的文件上传到 ComfyUI 的 `input/`，再写入 LoadImage；提示词仍写在文本节点。预览帧默认关闭。这两张 Wan 模板没有预览节点，即使把配置里的 `preview` 设为 true 也只跳过预览，不把成片判失败。网页运行时仍不调用 `generate_video`。
 
 `comfy_poc.py` 失败时把 ComfyUI 的错误原文打到标准错误，退出码非 0。客户端不把这段原文改写成另一句话。
 
@@ -166,7 +168,7 @@ Wan 2.2 I2V A14B Q4 GGUF，高噪和低噪各 2 步，一共 4 步，CFG 1，eul
 | seed | 12 和 13 KSamplerAdvanced | noise_seed | 两个采样节点用同一个种子 |
 | steps | 12 和 13 KSamplerAdvanced | steps | 模板按 4 步准备。采样区间 0–2 和 2–4 不在白名单里 |
 
-画幅：`1:1` 384×384，`16:9` 512×288，`9:16` 288×512。帧数上限 33，16 fps，最长约 2.06 秒。超过上限的请求会在对齐时被截到 33 帧。
+画幅：`1:1` 384×384，`16:9` 512×288，`9:16` 288×512。帧数上限 33，只允许 4n+1。帧率白名单是 16。1 秒对齐到 17 帧，也在时长白名单里。更长或对不齐的时长直接拒绝，不再截到 33 帧。运动幅度白名单是 1；模板里没有运动节点，合法值不写入工作流。
 
 ### 图生视频 `workflows/video_i2v_api.json`
 
