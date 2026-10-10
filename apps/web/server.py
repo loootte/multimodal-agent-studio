@@ -169,7 +169,13 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         matched = _RUN_CONTENT.fullmatch(path)
         if matched and method == "POST":
             body = _read_json(handler)
-            _send_json(handler, 200, chat_run.submit_content(app, matched.group(1), body.get("text")))
+            if body.get("file") is not None:
+                result = chat_run.submit_file(
+                    app, matched.group(1), body.get("file"), body.get("media_type"),
+                )
+            else:
+                result = chat_run.submit_content(app, matched.group(1), body.get("text"))
+            _send_json(handler, 200, result)
             return
         matched = _RUN_EVENTS.fullmatch(path)
         if matched and method == "GET":

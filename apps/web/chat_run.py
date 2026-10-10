@@ -1,19 +1,22 @@
 """一次回答。纯文字不调用 ComfyUI。
 
-要图时，第三方只调用 accept_local_content。对话框收下的正文留在本机会话，
-再注入到已有的 generate_image。模型写来的画面描述丢掉。
+本地内容由专用工具收集。正文和文件字节留在本机会话。
+出图只把文字句柄注入已有的 generate_image。文件句柄不提交。
 页面断开后仍写完这一次。停止只置位，并取消已经提交的那一次出图，
 不从这条线程关模型连接。
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 import sys
 import threading
 import time
 
 import image_run
+import store
 from packages.contracts.events import (
     EVENT_ARTIFACT,
     EVENT_CONTENT_REQUEST,
@@ -32,9 +35,12 @@ from store import StoreError, new_id
 
 SYSTEM = (
     "你是一个有帮助的助手。用用户使用的语言回答。"
-    "本地文字由 accept_local_content 收集，正文留在本机。不要复述、改写或索取正文。"
-    "接到出图任务时，先调用 accept_local_content，purpose 填 image_prompt。"
-    "用户提交后你只会收到句柄。再用这个 content_handle 调用 generate_image。"
+    "用户要留下、附上、引用，或在后续任务里使用应留在本机的内容时，调用 accept_local_content。"
+    "purpose 只能是 image_prompt 或 keep。kind 只能是 text 或 file。不要填写正文、字节、路径或文件名。"
+    "出图时 purpose 填 image_prompt，kind 填 text。"
+    "用户提交后你只会收到句柄、种类和大小。"
+    "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
+    "要用文字句柄出图时，再调用 generate_image。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
@@ -85,25 +91,29 @@ class Run:
         self._progress_key: tuple | None = None
         self._content_ready = threading.Event()
         self._content_lock = threading.Lock()
-        self._content_value: str | None = None
+        self._content_value: dict | None = None
+        self._expect_kind = "text"
         self.waiting_content = False
 
-    def begin_content_wait(self) -> None:
+    def begin_content_wait(self, kind: str = "text") -> None:
         self._content_ready.clear()
         with self._content_lock:
             self._content_value = None
+            self._expect_kind = "file" if kind == "file" else "text"
             self.waiting_content = True
 
-    def submit_content(self, text: str) -> bool:
+    def offer(self, kind: str, payload: dict) -> str:
         with self._content_lock:
             if not self.waiting_content or self.cancel.is_set():
-                return False
-            self._content_value = text
+                return "not_waiting"
+            if kind != self._expect_kind:
+                return "kind"
+            self._content_value = payload
             self.waiting_content = False
         self._content_ready.set()
-        return True
+        return "ok"
 
-    def wait_content(self, timeout: float = _CONTENT_WAIT_SEC) -> str | None:
+    def wait_content(self, timeout: float = _CONTENT_WAIT_SEC) -> dict | None:
         if self.cancel.is_set():
             with self._content_lock:
                 self.waiting_content = False
@@ -231,10 +241,35 @@ def submit_content(app, run_id: str, text) -> dict:
         raise RequestError(400, "empty", "请输入要留在本机的内容。")
     if len(text) > MAX_INPUT:
         raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
+    return _offer(app, run_id, "text", {"kind": "text", "text": text})
+
+
+def submit_file(app, run_id: str, encoded, media_type) -> dict:
+    if not isinstance(encoded, str) or not encoded.strip():
+        raise RequestError(400, "empty", "请选择要留在本机的文件。")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise RequestError(400, "invalid_json", "文件内容无法读取。") from exc
+    if not data:
+        raise RequestError(400, "empty", "请选择要留在本机的文件。")
+    if len(data) > store.MAX_FILE:
+        raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
+    payload = {"kind": "file", "data": data, "media_type": store.clean_media_type(media_type)}
+    return _offer(app, run_id, "file", payload)
+
+
+def _offer(app, run_id: str, kind: str, payload: dict) -> dict:
     run = app.runs.get(run_id)
-    if run is None or not run.submit_content(text):
+    if run is None:
         raise RequestError(409, "not_waiting", "现在没有在等待本地内容。")
-    return {"ok": True}
+    outcome = run.offer(kind, payload)
+    if outcome == "ok":
+        return {"ok": True}
+    if outcome == "kind":
+        message = "这次要留下的是文字。" if kind == "file" else "这次要留下的是文件。"
+        raise RequestError(400, "invalid_json", message)
+    raise RequestError(409, "not_waiting", "现在没有在等待本地内容。")
 
 
 def stop(app, session_id: str) -> dict:
@@ -285,7 +320,7 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
 
 
 def _generate_image_turn(app, session_id, message_id, run, provider, session, user_id, user_text) -> str:
-    messages = _model_messages(session, replace_user_id=user_id, task=_TASK_LINE)
+    messages = _turn_messages(app, session_id, session, replace_user_id=user_id, task=_TASK_LINE)
     try:
         tool_call, _text = _ask(app, session_id, message_id, run, provider, messages, True)
     except GatewayError as exc:
@@ -294,18 +329,22 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
         tool_call = None
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    if _unresolved_handle(app, session_id, tool_call):
+    block = _handle_block(app, session_id, tool_call)
+    if block == "missing":
         return _error_finish(
             app, session_id, message_id, run, "invalid_tool_call", "这个内容句柄不属于本会话。", ""
         )
+    if block == "file":
+        return _refuse_file_image(app, session_id, message_id, run, tool_call)
     return _continue_after_content(
-        app, session_id, message_id, run, provider, user_id, user_text, True, _picture_draft(user_text)
+        app, session_id, message_id, run, provider, user_id, user_text,
+        True, _picture_draft(user_text), "image_prompt", "text",
     )
 
 
 def _generate_text_turn(app, session_id, message_id, run, provider, session, user_text) -> str:
     try:
-        tool_call, text = _ask(app, session_id, message_id, run, provider, _model_messages(session), False)
+        tool_call, text = _ask(app, session_id, message_id, run, provider, _turn_messages(app, session_id, session), False)
     except GatewayError as exc:
         return _fail_status(app, session_id, message_id, run, exc)
     if tool_call is None:
@@ -313,47 +352,69 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
         return "completed"
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    return _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_call, text)
+
+
+def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_call, text) -> str:
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
     if name == "accept_local_content":
+        purpose, kind = _accept_args(tool_call)
         return _continue_after_content(
-            app, session_id, message_id, run, provider, "", user_text, False, ""
+            app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
         )
+    if name in ("list_local_content", "forget_local_content"):
+        return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
         return _run_bound(app, session_id, message_id, run, user_text, tool_call, False)
     return _finish_image(app, session_id, message_id, run, text, tool_call)
 
 
-def _continue_after_content(app, session_id, message_id, run, provider, user_id, user_text, image, draft) -> str:
+def _continue_after_content(
+    app, session_id, message_id, run, provider, user_id, user_text, image, draft, purpose, kind,
+) -> str:
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    run.begin_content_wait()
+    run.begin_content_wait(kind)
+    hint = "请选择要留在本机的文件。" if kind == "file" else "请输入要留在本机的内容。"
     _push_saved(app, session_id, message_id, run, {
         "type": EVENT_CONTENT_REQUEST,
         "message_id": message_id,
         "run_id": run.run_id,
-        "purpose": "image_prompt",
-        "hint": "请输入要留在本机的内容。",
-        "draft": draft,
+        "purpose": purpose,
+        "kind": kind,
+        "hint": hint,
+        "draft": draft if kind == "text" else "",
     })
-    submitted = run.wait_content()
+    payload = run.wait_content()
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    if not submitted:
+    if not payload:
         current = app.sessions.message_text(session_id, message_id)
         return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要留在本机的内容。", current)
     try:
-        record = app.sessions.add_content(session_id, submitted)
+        if kind == "file":
+            record = app.sessions.add_file(
+                session_id, payload.get("data") or b"", payload.get("media_type") or "", purpose,
+            )
+            submitted = ""
+        else:
+            submitted = payload.get("text") or ""
+            record = app.sessions.add_content(session_id, submitted, purpose)
     except StoreError:
         current = app.sessions.message_text(session_id, message_id)
         return _error_finish(app, session_id, message_id, run, "provider_error", HUMAN["provider_error"], current)
     handle = record.get("handle") or ""
-    print(f"content {session_id} {handle} text {record.get('size')}", file=sys.stderr)
+    stored_kind = record.get("kind") or kind
+    print(f"content {session_id} {handle} {stored_kind} {record.get('size')}", file=sys.stderr)
     session = app.sessions.get(session_id)
-    messages = _model_messages(
+    ready = _ready_line(handle) if image else _kept_line(handle, stored_kind, record.get("size") or 0)
+    messages = _turn_messages(
+        app,
+        session_id,
         session,
         replace_user_id=user_id if image else None,
         task=_TASK_LINE if image else None,
-        extra=[{"role": "user", "content": _ready_line(handle)}],
+        extra=[{"role": "user", "content": ready}],
     )
     tool_call = None
     reply = ""
@@ -365,11 +426,70 @@ def _continue_after_content(app, session_id, message_id, run, provider, user_id,
         tool_call = None
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    if image or (isinstance(tool_call, dict) and tool_call.get("name") == "generate_image"):
+    if image:
         bound = _bind_submitted(submitted, tool_call)
-        return _finish_image(app, session_id, message_id, run, "" if image else reply, bound)
+        return _finish_image(app, session_id, message_id, run, "", bound)
+    name = tool_call.get("name") if isinstance(tool_call, dict) else ""
+    if name == "generate_image":
+        if stored_kind == "file":
+            return _refuse_file_image(app, session_id, message_id, run, tool_call)
+        bound = _bind_submitted(submitted, tool_call)
+        return _finish_image(app, session_id, message_id, run, reply, bound)
+    if name in ("list_local_content", "forget_local_content"):
+        return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     _complete(app, session_id, message_id, run, reply)
     return "completed"
+
+
+def _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call) -> str:
+    line = _apply_local_tool(app, session_id, message_id, run, tool_call)
+    if line is None:
+        current = app.sessions.message_text(session_id, message_id)
+        return _error_finish(app, session_id, message_id, run, "invalid_tool_call", HUMAN["invalid_tool_call"], current)
+    if run.cancel.is_set():
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    session = app.sessions.get(session_id)
+    messages = _turn_messages(
+        app, session_id, session, extra=[{"role": "user", "content": line}],
+    )
+    try:
+        follow, reply = _ask(app, session_id, message_id, run, provider, messages, False)
+    except GatewayError as exc:
+        return _fail_status(app, session_id, message_id, run, exc)
+    if run.cancel.is_set():
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    if isinstance(follow, dict) and follow.get("name") == "generate_image":
+        return _run_bound(app, session_id, message_id, run, user_text, follow, False)
+    _complete(app, session_id, message_id, run, reply)
+    return "completed"
+
+
+def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None:
+    name = tool_call.get("name") if isinstance(tool_call, dict) else ""
+    if name == "list_local_content":
+        try:
+            items = app.sessions.list_content(session_id)
+        except StoreError:
+            items = []
+        result = {"items": items}
+        arguments = {}
+    elif name == "forget_local_content":
+        handle = _named_handle(tool_call)
+        status = app.sessions.forget_content(session_id, handle) if handle else "absent"
+        result = {"status": status}
+        if handle:
+            result["handle"] = handle
+        arguments = {"content_handle": handle} if handle else {}
+    else:
+        return None
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_TOOL_CALL,
+        "tool": name,
+        "arguments": arguments,
+        "result": result,
+        "message_id": message_id,
+    })
+    return "本地工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)
 
 
 def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) -> tuple[dict | None, str]:
@@ -556,6 +676,30 @@ def _ready_line(handle: str) -> str:
     return f"本地内容句柄 {handle} 已就绪。请调用 generate_image，content_handle 填这个句柄。不要写画面描述。"
 
 
+def _kept_line(handle: str, kind: str, size: int) -> str:
+    return f"本地内容句柄 {handle} 已就绪。种类 {kind}，大小 {size}。不要索取正文或文件字节。"
+
+
+def _accept_args(tool_call) -> tuple[str, str]:
+    purpose = "keep"
+    kind = "text"
+    raw = tool_call.get("arguments") if isinstance(tool_call, dict) else None
+    if isinstance(raw, dict):
+        if raw.get("purpose") in ("image_prompt", "keep"):
+            purpose = raw["purpose"]
+        if raw.get("kind") in ("text", "file"):
+            kind = raw["kind"]
+    return purpose, kind
+
+
+def _named_handle(tool_call) -> str:
+    raw = tool_call.get("arguments") if isinstance(tool_call, dict) else None
+    if not isinstance(raw, dict):
+        return ""
+    named = raw.get("content_handle")
+    return named.strip() if isinstance(named, str) else ""
+
+
 def _picture_draft(text: str) -> str:
     found = None
     for marker in _DRAFT_MARKERS:
@@ -566,17 +710,33 @@ def _picture_draft(text: str) -> str:
     return draft.strip().strip("\"'“”「」『』 \n\t")
 
 
-def _unresolved_handle(app, session_id: str, tool_call) -> bool:
+def _handle_block(app, session_id: str, tool_call) -> str:
     if not isinstance(tool_call, dict) or tool_call.get("name") != "generate_image":
-        return False
-    raw = tool_call.get("arguments")
-    if not isinstance(raw, dict):
-        return False
-    named = raw.get("content_handle")
-    named = named.strip() if isinstance(named, str) else ""
+        return ""
+    named = _named_handle(tool_call)
     if not named:
-        return False
-    return app.sessions.content_text(session_id, named) is None
+        return ""
+    info = app.sessions.content_info(session_id, named)
+    if info is None:
+        return "missing"
+    if info.get("kind") == "file":
+        return "file"
+    return ""
+
+
+def _refuse_file_image(app, session_id, message_id, run, tool_call) -> str:
+    handle = _named_handle(tool_call)
+    arguments = {"content_handle": handle} if handle else {}
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_TOOL_CALL,
+        "tool": "generate_image",
+        "arguments": arguments,
+        "message_id": message_id,
+    })
+    current = app.sessions.message_text(session_id, message_id)
+    return _error_finish(
+        app, session_id, message_id, run, "invalid_tool_call", "文件内容不能用来生成图片。", current,
+    )
 
 
 def _bind_submitted(submitted: str, tool_call) -> dict:
@@ -601,6 +761,8 @@ def _bind_submitted(submitted: str, tool_call) -> dict:
 
 
 def _run_bound(app, session_id: str, message_id: str, run: Run, user_text: str, tool_call, allow_current: bool) -> str:
+    if _handle_block(app, session_id, tool_call) == "file":
+        return _refuse_file_image(app, session_id, message_id, run, tool_call)
     bound = _bind_image(app, session_id, user_text, tool_call, allow_current)
     if bound is None:
         return _error_finish(
@@ -659,7 +821,17 @@ def _seed_from_text(text: str) -> int | None:
     return int(match.group(1))
 
 
-def _model_messages(session: dict, replace_user_id: str | None = None, task: str | None = None, extra: list | None = None) -> list[dict]:
+def _turn_messages(app, session_id: str, session: dict, **kwargs) -> list[dict]:
+    return _model_messages(session, extra_bodies=app.sessions.secret_pairs(session_id), **kwargs)
+
+
+def _model_messages(
+    session: dict,
+    replace_user_id: str | None = None,
+    task: str | None = None,
+    extra: list | None = None,
+    extra_bodies: list | None = None,
+) -> list[dict]:
     handles = {}
     bodies = []
     for item in session.get("contents") or []:
@@ -669,6 +841,9 @@ def _model_messages(session: dict, replace_user_id: str | None = None, task: str
         text = item.get("text")
         if item.get("message_id") and isinstance(handle, str):
             handles[item["message_id"]] = handle
+        if isinstance(text, str) and len(text) >= 8 and isinstance(handle, str):
+            bodies.append((text, handle))
+    for text, handle in extra_bodies or []:
         if isinstance(text, str) and len(text) >= 8 and isinstance(handle, str):
             bodies.append((text, handle))
     bodies.sort(key=lambda pair: len(pair[0]), reverse=True)

@@ -186,14 +186,18 @@ main {
   margin-top: 0.55rem;
 }
 
-.local-entry textarea {
+.local-entry textarea,
+.local-entry input[type="file"] {
   width: 100%;
-  min-height: 6rem;
-  resize: vertical;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 0.55rem 0.7rem;
   background: var(--bg);
+}
+
+.local-entry textarea {
+  min-height: 6rem;
+  resize: vertical;
 }
 
 .empty-thread {

@@ -43,7 +43,7 @@ document.querySelector("#settings-form").addEventListener("submit", saveSettings
 document.querySelector("#clear-key").addEventListener("click", clearKey);
 document.querySelector("#file").addEventListener("change", (event) => {
   if (event.target.files && event.target.files.length) {
-    showNote("这一版只接受文字。图片、音频、视频和文件还不能发送。");
+    showNote("这条消息不能带附件。要留文件时，先说明留在本机，再在对话框里选择。");
     event.target.value = "";
   }
 });
@@ -209,7 +209,9 @@ function onEvent(event) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
     if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
     rememberAgentEvent(assistant, event);
-    if (event.type === "content_request") document.querySelector("#live").textContent = "请输入要留在本机的内容。";
+    if (event.type === "content_request") {
+      document.querySelector("#live").textContent = event.hint || "请输入要留在本机的内容。";
+    }
     if (event.type === "artifact") document.querySelector("#live").textContent = "已收到图片";
     if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
     if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
@@ -277,6 +279,7 @@ function rememberAgentEvent(assistant, event) {
     draft: event.draft,
     hint: event.hint,
     purpose: event.purpose,
+    kind: event.kind,
     run_id: event.run_id,
   });
 }
@@ -352,7 +355,7 @@ function renderTranscript() {
   if (!messages.length) {
     const empty = document.createElement("p");
     empty.className = "empty-thread";
-    empty.textContent = "写一条消息。要一张图时，说明要生成图片。画面描述在对话框里填写，留在本机。";
+    empty.textContent = "写一条消息。要留下本机内容时直接说。文字或文件在对话框里提交，不会发给模型。";
     transcript.append(empty);
     return;
   }
@@ -420,12 +423,23 @@ function localEntry(message, request) {
   const hint = document.createElement("p");
   hint.className = "status-line";
   hint.textContent = request.hint || "请输入要留在本机的内容。";
-  const area = document.createElement("textarea");
-  area.value = request.draft || "";
-  area.setAttribute("aria-label", "留在本机的内容");
   const button = document.createElement("button");
   button.type = "submit";
   button.textContent = "加入本地内容并继续";
+  if (request.kind === "file") {
+    const file = document.createElement("input");
+    file.type = "file";
+    file.setAttribute("aria-label", "留在本机的文件");
+    form.append(hint, file, button);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitLocalFile(message, request, file, button);
+    });
+    return form;
+  }
+  const area = document.createElement("textarea");
+  area.value = request.draft || "";
+  area.setAttribute("aria-label", "留在本机的内容");
   form.append(hint, area, button);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -450,10 +464,43 @@ async function submitLocal(message, request, area, button) {
   }
 }
 
+async function submitLocalFile(message, request, file, button) {
+  const runId = message.run_id || request.run_id;
+  const chosen = file.files && file.files[0];
+  if (!runId || !chosen) {
+    showNote("请选择要留在本机的文件。");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const encoded = await encodeFile(chosen);
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/content`, {
+      file: encoded,
+      media_type: chosen.type || "application/octet-stream",
+    });
+  } catch (error) {
+    button.disabled = false;
+    showNote(error.message || "没能加入本地内容。");
+  }
+}
+
+async function encodeFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const step = 0x8000;
+  for (let index = 0; index < bytes.length; index += step) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + step));
+  }
+  return btoa(binary);
+}
+
 function toolLine(event) {
+  if (event.tool === "list_local_content") return "正在查看本机内容";
+  if (event.tool === "forget_local_content") return "正在移除本机内容";
   const args = event.arguments || {};
   const aspect = args.aspect_ratio ? ` · ${args.aspect_ratio}` : "";
-  return `正在生成图片${aspect}`;
+  if (event.tool === "generate_image") return `正在生成图片${aspect}`;
+  return "正在调用本机工具";
 }
 
 function progressLine(event) {

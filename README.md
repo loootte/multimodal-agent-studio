@@ -12,7 +12,7 @@
 
 ## 不做什么
 
-- 不在这一阶段写完整的网关、运行时或界面。`apps/web` 是 issue #9 的文字聊天，加上 issue #10 的文生图。出图仍调用 `poc/comfyui` 里现成的 `generate_image`，不另写一套 Comfy 客户端。issue #11 让模型调用 `accept_local_content` 收集画面描述，正文留在本机，第三方只看到工具契约和句柄。`poc/comfyui` 是 issue #1 的提交脚本、issue #2 的两个生成工具、issue #3 的白名单模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。
+- 不在这一阶段写完整的网关、运行时或界面。`apps/web` 是 issue #9 的文字聊天，加上 issue #10 的文生图。出图仍调用 `poc/comfyui` 里现成的 `generate_image`，不另写一套 Comfy 客户端。issue #11 让模型调用 `accept_local_content` 收集画面描述，正文留在本机，第三方只看到工具契约和句柄。issue #12 让同一套工具按语义收集文字或上传文件，并列出、删除本会话内容。文件句柄不送进 ComfyUI。这些都不计入路线图任一阶段的完成。`poc/comfyui` 是 issue #1 的提交脚本、issue #2 的两个生成工具、issue #3 的白名单模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。
 - 不把某一家模型的 SDK 当成整个系统的中心。
 - 不默认上多 Agent 群聊。默认是一个有边界的循环，加上类型明确的工具。
 - 不把上传的媒体长期塞进提示词。媒体进工件库，提示词里只放引用。
@@ -22,7 +22,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [ROADMAP.md](ROADMAP.md) | 分阶段路线图和每阶段的完成标准 |
-| [docs/architecture.md](docs/architecture.md) | 运行时分层、请求怎么走，以及每层现在对应的代码文件 |
+| [docs/architecture.md](docs/architecture.md) | 运行时分层、出图和本地内容怎么走，以及每层现在对应的代码文件 |
 | [docs/model-gateway.md](docs/model-gateway.md) | 多模态模型网关要遵守的契约 |
 | [docs/interface.md](docs/interface.md) | 界面范围和首版画面 |
 | [docs/repository-layout.md](docs/repository-layout.md) | 以后写代码时的目录，现在不创建 |

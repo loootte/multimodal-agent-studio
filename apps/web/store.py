@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -16,6 +17,9 @@ import uuid
 from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 
 _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
+_MEDIA = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
+_PURPOSES = ("image_prompt", "keep")
+MAX_FILE = 262144
 
 
 class StoreError(Exception):
@@ -199,12 +203,72 @@ class ProviderStore:
         return {"base_url": base_url, "model": model, "api_key": api_key}
 
 
+def clean_purpose(value) -> str:
+    if value in _PURPOSES:
+        return value
+    return "keep"
+
+
+def clean_media_type(value) -> str:
+    if not isinstance(value, str):
+        return "application/octet-stream"
+    media = value.split(";", 1)[0].strip().lower()
+    if not _MEDIA.fullmatch(media):
+        return "application/octet-stream"
+    return media
+
+
+def _kind_of(record: dict) -> str:
+    kind = record.get("kind") or record.get("type")
+    return kind if kind in ("text", "file") else "text"
+
+
 def _public_content(record: dict) -> dict:
+    kind = _kind_of(record)
+    media = record.get("media_type")
+    if not isinstance(media, str) or not media:
+        media = "text/plain" if kind == "text" else "application/octet-stream"
+    purpose = record.get("purpose")
+    if purpose not in _PURPOSES:
+        purpose = "image_prompt" if record.get("message_id") else "keep"
     return {
         "handle": record.get("handle"),
-        "type": record.get("type"),
+        "type": kind,
+        "kind": kind,
+        "media_type": media,
         "size": record.get("size"),
+        "purpose": purpose,
     }
+
+
+def _file_secrets(data: bytes) -> list[str]:
+    found = []
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = ""
+    if text:
+        found.append(text)
+    encoded = base64.b64encode(data).decode("ascii")
+    if encoded and encoded not in found:
+        found.append(encoded)
+    return found
+
+
+def _scrub_text(text: str, secrets: list[str]) -> str:
+    if any(len(secret) >= 8 and secret in text for secret in secrets):
+        return "这条本地内容已经丢掉。"
+    return text
+
+
+def _scrub_value(value, secrets: list[str]):
+    if isinstance(value, str):
+        return _scrub_text(value, secrets)
+    if isinstance(value, dict):
+        return {key: _scrub_value(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_value(item, secrets) for item in value]
+    return value
 
 
 def _message(role: str, text: str, status: str, message_id: str, run_id: str | None) -> dict:
@@ -355,7 +419,10 @@ class SessionStore:
             record = {
                 "handle": new_id("c_"),
                 "type": "text",
+                "kind": "text",
+                "media_type": "text/plain",
                 "size": len(text.encode("utf-8")),
+                "purpose": "image_prompt",
                 "text": text,
                 "message_id": message_id,
             }
@@ -364,7 +431,7 @@ class SessionStore:
             self._write(session)
             return _public_content(record)
 
-    def add_content(self, session_id: str, text: str) -> dict:
+    def add_content(self, session_id: str, text: str, purpose: str = "keep") -> dict:
         """对话框提交的正文。每次都是新的随机句柄，不覆盖已有记录。"""
         check_id(session_id, "会话")
         with self._lock:
@@ -374,7 +441,10 @@ class SessionStore:
             record = {
                 "handle": new_id("c_"),
                 "type": "text",
+                "kind": "text",
+                "media_type": "text/plain",
                 "size": len(text.encode("utf-8")),
+                "purpose": clean_purpose(purpose),
                 "text": text,
                 "message_id": "",
             }
@@ -383,7 +453,150 @@ class SessionStore:
             self._write(session)
             return _public_content(record)
 
+    def add_file(self, session_id: str, data: bytes, media_type: str, purpose: str = "keep") -> dict:
+        """文件字节写在本会话目录。记录里没有路径、原始文件名和字节。"""
+        check_id(session_id, "会话")
+        if not isinstance(data, bytes) or not data:
+            raise StoreError("空文件。")
+        if len(data) > MAX_FILE:
+            raise StoreError("太大。")
+        handle = new_id("c_")
+        directory = os.path.join(self.root, session_id, "files")
+        os.makedirs(directory, exist_ok=True)
+        target = os.path.join(directory, handle)
+        temporary = target + ".part"
+        try:
+            with open(temporary, "wb") as raw:
+                raw.write(data)
+            os.replace(temporary, target)
+        except OSError as exc:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise StoreError("没能留下这个文件。") from exc
+        record = {
+            "handle": handle,
+            "type": "file",
+            "kind": "file",
+            "media_type": clean_media_type(media_type),
+            "size": len(data),
+            "purpose": clean_purpose(purpose),
+            "message_id": "",
+        }
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+                raise StoreError("找不到这个会话。")
+            session.setdefault("contents", []).append(record)
+            session["updated_at"] = _now()
+            self._write(session)
+        return _public_content(record)
+
+    def list_content(self, session_id: str) -> list[dict]:
+        session = self.get(session_id)
+        items = []
+        for item in session.get("contents") or []:
+            if isinstance(item, dict) and isinstance(item.get("handle"), str):
+                items.append(_public_content(item))
+        return items
+
+    def forget_content(self, session_id: str, handle: str) -> str:
+        """丢掉本会话的一枚句柄。别的会话调用时像没有这枚句柄。"""
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return "absent"
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return "absent"
+        secrets = []
+        kind = ""
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return "absent"
+            found = None
+            kept = []
+            for item in session.get("contents") or []:
+                if isinstance(item, dict) and item.get("handle") == handle:
+                    found = item
+                    continue
+                kept.append(item)
+            if found is None:
+                return "absent"
+            kind = _kind_of(found)
+            if kind == "text":
+                text = found.get("text")
+                if isinstance(text, str) and text:
+                    secrets.append(text)
+            else:
+                data = self._read_file(session_id, handle)
+                if data:
+                    secrets.extend(_file_secrets(data))
+            for message in session.get("messages") or []:
+                if isinstance(message.get("text"), str):
+                    message["text"] = _scrub_text(message["text"], secrets)
+                if isinstance(message.get("events"), list):
+                    message["events"] = _scrub_value(message["events"], secrets)
+            session["contents"] = kept
+            session["updated_at"] = _now()
+            self._write(session)
+        if kind == "file":
+            try:
+                os.remove(self._file_path(session_id, handle))
+            except OSError:
+                pass
+        return "forgotten"
+
+    def content_info(self, session_id: str, handle: str) -> dict | None:
+        item = self._find_content(session_id, handle)
+        if item is None:
+            return None
+        return _public_content(item)
+
     def content_text(self, session_id: str, handle: str) -> str | None:
+        item = self._find_content(session_id, handle)
+        if item is None or _kind_of(item) != "text":
+            return None
+        text = item.get("text")
+        return text if isinstance(text, str) else None
+
+    def content_bytes(self, session_id: str, handle: str) -> bytes | None:
+        item = self._find_content(session_id, handle)
+        if item is None or _kind_of(item) != "file":
+            return None
+        return self._read_file(session_id, handle)
+
+    def secret_pairs(self, session_id: str) -> list[tuple[str, str]]:
+        try:
+            session = self.get(session_id)
+        except StoreError:
+            return []
+        pairs = []
+        for item in session.get("contents") or []:
+            if not isinstance(item, dict):
+                continue
+            handle = item.get("handle")
+            if not isinstance(handle, str):
+                continue
+            if _kind_of(item) == "file":
+                data = self._read_file(session_id, handle)
+                if data:
+                    pairs.extend((secret, handle) for secret in _file_secrets(data))
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                pairs.append((text, handle))
+        return pairs
+
+    def local_bodies(self, session_id: str) -> list[str]:
+        return [text for text, _handle in self.secret_pairs(session_id)]
+
+    def _find_content(self, session_id: str, handle: str) -> dict | None:
         if not isinstance(handle, str) or not _ID.fullmatch(handle):
             return None
         try:
@@ -392,21 +605,22 @@ class SessionStore:
             return None
         for item in session.get("contents") or []:
             if isinstance(item, dict) and item.get("handle") == handle:
-                text = item.get("text")
-                return text if isinstance(text, str) else None
+                return item
         return None
 
-    def local_bodies(self, session_id: str) -> list[str]:
+    def _file_path(self, session_id: str, handle: str) -> str:
+        return os.path.join(self.root, session_id, "files", handle)
+
+    def _read_file(self, session_id: str, handle: str) -> bytes | None:
+        if not isinstance(session_id, str) or not _ID.fullmatch(session_id):
+            return None
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return None
         try:
-            session = self.get(session_id)
-        except StoreError:
-            return []
-        bodies = []
-        for item in session.get("contents") or []:
-            text = item.get("text") if isinstance(item, dict) else None
-            if isinstance(text, str) and text:
-                bodies.append(text)
-        return bodies
+            with open(self._file_path(session_id, handle), "rb") as raw:
+                return raw.read()
+        except OSError:
+            return None
 
     def message_text(self, session_id: str, message_id: str) -> str:
         try:

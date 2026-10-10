@@ -2,6 +2,7 @@
 
 文字回答是 run.started、若干 message.delta，然后 message.completed 或 run.failed。
 文生图写在同一条助手消息上：content_request，用户提交后再是 tool_call、若干 progress，然后 artifact 或 error。
+content_request 也可以收集留在本机的文字或文件。文件不提交给出图。
 这条消息再以 message.completed 或 run.failed 结束，流才算读完。content_request 不是结束。
 missing_key 表示还没配置 API key。
 local_content 表示请求体里出现了本地正文，这次没有发给模型。

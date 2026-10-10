@@ -131,6 +131,59 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "keep":
+            if "本地工具结果" in self._last_user():
+                self._piece(_delta(content="已记下。"))
+                self._done()
+                return
+            if not self._ready():
+                self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "text"})
+                return
+            self._emit_tool("list_local_content", {})
+            return
+        if mode == "forget":
+            if "本地工具结果" in self._last_user():
+                self._piece(_delta(content="已忘掉。"))
+                self._done()
+                return
+            if not self._ready():
+                self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "text"})
+                return
+            self._emit_tool("forget_local_content", {
+                "content_handle": _content_handle(self._last_user()) or ("c_" + "00" * 16),
+            })
+            return
+        if mode == "keepfile":
+            if "本地工具结果" in self._last_user():
+                self._piece(_delta(content="已保存文件。"))
+                self._done()
+                return
+            if not self._ready():
+                self._emit_tool("accept_local_content", {"purpose": "note-free", "kind": "file"})
+                return
+            self._emit_tool("list_local_content", {})
+            return
+        if mode == "forgetfile":
+            if "本地工具结果" in self._last_user():
+                self._piece(_delta(content="已丢掉文件。"))
+                self._done()
+                return
+            if not self._ready():
+                self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
+                return
+            self._emit_tool("forget_local_content", {
+                "content_handle": _content_handle(self._last_user()) or ("c_" + "00" * 16),
+            })
+            return
+        if mode == "fileimage":
+            if not self._ready():
+                self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
+                return
+            self._emit_tool("generate_image", {
+                "content_handle": _content_handle(self._last_user()) or ("c_" + "00" * 16),
+                "prompt": "不该用的文件描述",
+            })
+            return
         self._piece(b"")
 
     def _last_user(self) -> str:
@@ -482,6 +535,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "content_request" not in script or "加入本地内容并继续" not in script:
         fail("页面没有本地内容输入")
+    if 'kind === "file"' not in script:
+        fail("页面没有文件形式的本地内容输入")
     status, body = request("POST", base + "/api/sessions", {})
     session_id = json.loads(body)["session_id"]
     before = len(provider.requests)
@@ -1001,6 +1056,12 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _image_stop(base, session_id, provider, comfy.box)
         _image_disconnect(base, session_id, provider, comfy.box)
         _egress_blocks(provider)
+        _local_keep(base, provider, comfy.box)
+        _local_forget(base, provider, directory)
+        _local_file(base, provider, comfy.box, directory)
+        _local_forget_file(base, provider, comfy.box, directory)
+        _local_file_image(base, provider, comfy.box)
+        _egress_file(provider)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -1246,14 +1307,18 @@ def _assert_bound(directory: str, session_id: str, body: dict, prompt: str, expe
             generate = function
         if function.get("name") == "accept_local_content":
             accept = function
-    if accept is None or generate is None:
+    if not {"accept_local_content", "list_local_content", "forget_local_content", "generate_image"}.issubset(names):
         fail(f"工具契约缺少本地内容工具：{names}")
     props = (generate.get("parameters") or {}).get("properties") or {}
     if "prompt" in props or "content_handle" not in props:
         fail(f"工具契约仍要模型填写正文：{sorted(props)}")
-    accept_props = (accept.get("parameters") or {}).get("properties") or {}
-    if any(name in accept_props for name in ("prompt", "text", "body", "content")):
-        fail("接受本地内容的工具带了正文参数")
+    blocked = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
+    for tool in tools:
+        function = tool.get("function") or {}
+        tool_props = (function.get("parameters") or {}).get("properties") or {}
+        leaked = blocked.intersection(tool_props)
+        if leaked:
+            fail(f"工具契约带了正文或文件参数：{function.get('name')} {sorted(leaked)}")
     path = os.path.join(directory, "sessions", session_id + ".json")
     with open(path, encoding="utf-8") as handle:
         saved = json.load(handle)
@@ -1408,6 +1473,258 @@ def _image_disconnect(base: str, session_id: str, provider, box: ComfyState) -> 
     message = stored["messages"][-1]
     if [event.get("type") for event in message.get("events") or []] != ["content_request", "tool_call", "progress", "artifact"]:
         fail("断开后刷新，成片不在原来的消息上")
+
+
+def _fresh_session(base: str) -> str:
+    status, body = request("POST", base + "/api/sessions", {})
+    if status != 200:
+        fail("没能开一个新会话")
+    return json.loads(body)["session_id"]
+
+
+def _provider_blob(item: dict) -> str:
+    return json.dumps(item.get("body"), ensure_ascii=False)
+
+
+def _local_keep(base: str, provider, box: ComfyState) -> None:
+    import chat_run
+
+    provider.mode = "keep"
+    session_id = _fresh_session(base)
+    instruction = "请把一段话留在本机，稍后我再使用。"
+    secret = "语义留下的本机正文甲"
+    if chat_run._image_request(instruction):
+        fail("语义唤起被当成了出图关键词")
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, instruction, timeout=12, content=secret)
+    if not any(event.get("type") == "content_request" and event.get("kind") != "file" for event in events):
+        fail("语义唤起没有出现本地文字输入")
+    if _assistant_text(events) != "已记下。":
+        fail("列出本地内容后没有写完回答")
+    if len(box.prompts) != before:
+        fail("只留下文字时调用了 ComfyUI")
+    new_requests = provider.requests[sent:]
+    if len(new_requests) != 3:
+        fail("语义唤起的供应商请求次数不对")
+    for item in new_requests:
+        if secret in _provider_blob(item):
+            fail("提交的文字进入了第三方请求")
+    listed = json.dumps(
+        [event for event in events if event.get("tool") == "list_local_content"],
+        ensure_ascii=False,
+    )
+    handle = _content_handle(listed)
+    if not handle or secret in listed:
+        fail("list_local_content 没有只返回句柄")
+    if secret in json.dumps(events, ensure_ascii=False):
+        fail("提交的文字出现在事件里")
+    visible = request("GET", base + f"/api/sessions/{session_id}")[1]
+    if secret in visible:
+        fail("会话接口带回了本地正文")
+
+
+def _local_forget(base: str, provider, directory: str) -> None:
+    provider.mode = "forget"
+    session_id = _fresh_session(base)
+    secret = "忘掉之后不该再读到的正文"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "请把一句说明留在本机，用完就丢掉。", timeout=12, content=secret)
+    if _assistant_text(events) != "已忘掉。":
+        fail("丢掉本地内容后没有写完回答")
+    for item in provider.requests[sent:]:
+        if secret in _provider_blob(item):
+            fail("丢掉之前把正文发给了模型")
+    if secret in json.dumps(events, ensure_ascii=False):
+        fail("丢掉的正文出现在事件里")
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    if any(item.get("text") == secret for item in _saved_contents(directory, session_id)):
+        fail("forget_local_content 之后还能读到正文")
+    if sessions.content_text(session_id, _content_handle(json.dumps(events, ensure_ascii=False)) or "c_" + "00" * 16) is not None:
+        fail("忘掉的句柄还能读到正文")
+
+
+def _local_file(base: str, provider, box: ComfyState, directory: str) -> None:
+    provider.mode = "keepfile"
+    session_id = _fresh_session(base)
+    data = "文件字节密文-甲乙丙".encode("utf-8")
+    filename = "secret-name.txt"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak_file(base, session_id, "我要上传一份资料留在本机。", data, "text/plain", filename)
+    if _assistant_text(events) != "已保存文件。":
+        fail("上传文件后没有写完回答")
+    if len(box.prompts) != before:
+        fail("上传文件时调用了 ComfyUI")
+    blob = json.dumps(events, ensure_ascii=False)
+    if data.decode("utf-8") in blob or filename in blob or base64.b64encode(data).decode("ascii") in blob:
+        fail("文件字节或原始文件名出现在事件里")
+    for item in provider.requests[sent:]:
+        raw = _provider_blob(item)
+        if data.decode("utf-8") in raw or filename in raw or base64.b64encode(data).decode("ascii") in raw:
+            fail("文件字节或原始文件名进入了第三方请求")
+    saved = _saved_contents(directory, session_id)
+    matches = [item for item in saved if item.get("kind") == "file" or item.get("type") == "file"]
+    if len(matches) != 1:
+        fail("上传的文件没有落成本地内容")
+    record = matches[0]
+    handle = record.get("handle") or ""
+    if record.get("purpose") != "keep" or "note-free" in json.dumps(record, ensure_ascii=False):
+        fail("自由填写的用途没有被丢掉")
+    if filename in json.dumps(record, ensure_ascii=False) or "text" in record:
+        fail("文件记录里留下了文件名或字节")
+    digest = hashlib.sha256(data).hexdigest()
+    if handle[2:] == digest[:32]:
+        fail("文件句柄使用了字节的哈希")
+    disk = os.path.join(directory, "sessions", session_id + ".json")
+    raw_session = open(disk, encoding="utf-8").read()
+    if data.decode("utf-8") in raw_session or filename in raw_session:
+        fail("会话记录里留下了文件字节或原始文件名")
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    if sessions.content_bytes(session_id, handle) != data:
+        fail("本会话读不到刚留下的文件")
+    listed = [item.get("handle") for item in sessions.list_content(session_id)]
+    if handle not in listed:
+        fail("list_local_content 看不到这个文件句柄")
+    other = sessions.create()["session_id"]
+    if handle in [item.get("handle") for item in sessions.list_content(other)]:
+        fail("别的会话列出了这个文件")
+    if sessions.content_bytes(other, handle) is not None or sessions.content_text(other, handle) is not None:
+        fail("别的会话读到了这个文件")
+    if sessions.forget_content(other, handle) != "absent":
+        fail("别的会话丢掉了这个文件")
+    if sessions.content_bytes(session_id, handle) != data:
+        fail("别的会话把这个文件删掉了")
+    path = os.path.join(directory, "sessions", session_id, "files", handle)
+    if not os.path.isfile(path):
+        fail("文件字节不在本会话目录")
+
+
+def _local_forget_file(base: str, provider, box: ComfyState, directory: str) -> None:
+    provider.mode = "forgetfile"
+    session_id = _fresh_session(base)
+    data = b"forget-file-secret-xyz"
+    before = len(box.prompts)
+    events = _speak_file(base, session_id, "请收下文件再从本机会话丢掉。", data, "application/octet-stream", "gone.bin")
+    if _assistant_text(events) != "已丢掉文件。":
+        fail("丢掉文件后没有写完回答")
+    if len(box.prompts) != before:
+        fail("丢掉文件时调用了 ComfyUI")
+    handle = _content_handle(json.dumps(events, ensure_ascii=False))
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    if not handle or sessions.content_bytes(session_id, handle) is not None:
+        fail("forget_local_content 之后还能读到文件字节")
+    if any(item.get("handle") == handle for item in sessions.list_content(session_id)):
+        fail("忘掉的文件句柄还在列表里")
+    if handle and os.path.exists(os.path.join(directory, "sessions", session_id, "files", handle)):
+        fail("忘掉的文件还在本会话目录")
+    raw = open(os.path.join(directory, "sessions", session_id + ".json"), encoding="utf-8").read()
+    if data.decode("ascii") in raw:
+        fail("忘掉之后会话记录里还有文件字节")
+
+
+def _local_file_image(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "fileimage"
+    session_id = _fresh_session(base)
+    data = "不能拿去出图的文件字节".encode("utf-8")
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak_file(base, session_id, "请收下一份文件留在本机。", data, "application/octet-stream", "picture.bin")
+    if len(box.prompts) != before:
+        fail("文件句柄仍然提交了 ComfyUI")
+    kinds = [event.get("type") for event in events]
+    if "artifact" in kinds or events[-1].get("type") != "run.failed":
+        fail("文件句柄出图没有失败")
+    blob = json.dumps(events, ensure_ascii=False)
+    if "文件内容不能用来生成图片。" not in blob or "不该用的文件描述" in blob:
+        fail("文件句柄出图的结果不对")
+    for item in provider.requests[sent:]:
+        raw = _provider_blob(item)
+        if data.decode("utf-8") in raw or base64.b64encode(data).decode("ascii") in raw:
+            fail("文件字节进入了出图前的供应商请求")
+
+
+def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):
+    def on_event(event):
+        if event.get("type") != "content_request":
+            return
+        if event.get("kind") != "file":
+            fail("文件收集没有标明种类")
+        status, body = request("POST", base + f"/api/runs/{event.get('run_id')}/content", {
+            "file": base64.b64encode(data).decode("ascii"),
+            "media_type": media_type,
+            "filename": filename,
+        })
+        if status != 200:
+            fail(f"提交本地文件失败：{status} {body}")
+
+    status, raw, events = read_sse(
+        site_port(base),
+        f"/api/sessions/{session_id}/messages",
+        {"text": text},
+        on_event=on_event,
+        timeout=12,
+    )
+    if status != 200 or not events or events[-1].get("type") not in TERMINAL:
+        fail("发送文件收集没有收到结束事件")
+    return events
+
+
+def _saved_contents(directory: str, session_id: str) -> list:
+    path = os.path.join(directory, "sessions", session_id + ".json")
+    with open(path, encoding="utf-8") as handle:
+        saved = json.load(handle)
+    return saved.get("contents") or []
+
+
+def _egress_file(provider) -> None:
+    import chat_run
+
+    directory = tempfile.mkdtemp(prefix="chat-file-egress-")
+    try:
+        sessions = store.SessionStore(os.path.join(directory, "sessions"))
+        session_id = sessions.create()["session_id"]
+        data = b"file-bytes-secret-xyz"
+        sessions.add_file(session_id, data, "text/plain", "keep")
+        bodies = sessions.local_bodies(session_id)
+        encoded = base64.b64encode(data).decode("ascii")
+        if data.decode("ascii") not in bodies or encoded not in bodies:
+            fail("文件字节没有进入出口检查")
+        session = sessions.get(session_id)
+        session["messages"] = [{
+            "role": "user",
+            "message_id": "m_" + "12" * 16,
+            "text": "附上 " + data.decode("ascii") + " " + encoded,
+            "status": "completed",
+        }]
+        messages = chat_run._model_messages(session, extra_bodies=sessions.secret_pairs(session_id))
+        history = json.dumps(messages, ensure_ascii=False)
+        if data.decode("ascii") in history or encoded in history:
+            fail("文件字节进入了发给模型的历史")
+        upstream = f"http://127.0.0.1:{provider.server_address[1]}/v1"
+        for secret in (data.decode("ascii"), encoded):
+            before = len(provider.requests)
+            gen = openai_chat.stream_chat(
+                base_url=upstream,
+                api_key=SECRET,
+                model="demo-model",
+                messages=[{"role": "user", "content": secret}],
+                timeout_sec=2,
+                cancel=threading.Event(),
+                local_bodies=bodies,
+            )
+            try:
+                next(gen)
+                fail("含文件字节的请求被发给了模型")
+            except openai_chat.GatewayError as exc:
+                if exc.code != "local_content":
+                    fail(f"文件出口检查的错误码不对：{exc.code}")
+            finally:
+                gen.close()
+            if len(provider.requests) != before:
+                fail("文件出口检查失败后仍然把字节发给了供应商")
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def request_bytes(method: str, url: str, timeout: float = 5):
