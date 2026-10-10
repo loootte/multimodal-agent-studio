@@ -21,4 +21,5 @@
 - [issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 沿用这个进程和这条协议。聊天页要图时调用 `poc/comfyui` 里现成的 `generate_image`，不另写 Comfy 客户端，也不把 poc 搬进 `services/`。这仍不勾掉任一阶段。
 - [issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 仍用这个进程。模型用 `accept_local_content` 收集画面描述，正文留在本机，第三方只看到工具契约和句柄。这仍不勾掉任一阶段。
 - [issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 仍用这个进程。语义唤起可以收集文字或上传文件，列出和删除只作用于本会话。文件句柄不提交 ComfyUI。这仍不勾掉任一阶段。
+- 本地数据隔离见 [ADR 0003](0003-local-data-isolation.md)。第三方模型只使用工具契约，本地数据由专用工具管理，外部访问没有授权就拒绝。这仍不勾掉任一阶段。
 - 以后若要换框架或增加供应商专用协议，另写架构决定。适配器仍只放在 `services/gateway`。

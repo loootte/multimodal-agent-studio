@@ -28,6 +28,7 @@
 | [docs/repository-layout.md](docs/repository-layout.md) | 以后写代码时的目录，现在不创建 |
 | [docs/adr/0001-bootstrap-without-code.md](docs/adr/0001-bootstrap-without-code.md) | 为什么先只提交文档 |
 | [docs/adr/0002-implementation-stack.md](docs/adr/0002-implementation-stack.md) | 文字聊天这一刀的语言和进程 |
+| [docs/adr/0003-local-data-isolation.md](docs/adr/0003-local-data-isolation.md) | 本地数据隔离：第三方只见工具契约 |
 
 ## 状态
 
