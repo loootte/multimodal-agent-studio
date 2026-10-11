@@ -11,22 +11,15 @@ import json
 import os
 import random
 import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import uuid
+
+import artifacts
+import comfy_client
+import template_fill
+from comfy_client import ComfyFailure
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASPECTS = ("1:1", "16:9", "9:16")
 _talk = True
-
-
-class ComfyFailure(Exception):
-    def __init__(self, message: str, payload=None):
-        super().__init__(message)
-        self.message = message
-        self.payload = payload
 
 
 class talk_off:
@@ -103,6 +96,11 @@ def load_config() -> dict:
         fail("配置里没有 output_dir，也没有环境变量 COMFY_OUTPUT_DIR。")
     config["output_dir"] = resolve_path(base, output_dir)
     return config
+
+
+def preview_enabled(config: dict, kind: str) -> bool:
+    section = config.get(kind) or {}
+    return section.get("preview") is True
 
 
 def job_paths(config: dict, kind: str) -> tuple[dict, dict, int]:
@@ -182,301 +180,87 @@ def apply_common(prompt: dict, fields: dict, args) -> None:
 def apply_frames(prompt: dict, fields: dict, args) -> None:
     if "frames" not in fields:
         fail("视频字段对照里没有 frames。")
-    step = int(fields.get("frame_step") or 4)
-    limit = int(fields.get("max_frames") or 33)
-    fps = float(fields.get("fps") or 16)
+    frames = template_fill.allowed_frame_counts(fields)
+    durations = template_fill.allowed_durations(fields)
     if args.frames is not None:
-        requested = args.frames
+        if int(args.frames) not in frames:
+            shown = "、".join(str(item) for item in frames)
+            fail(f"帧数不在白名单内。允许的值：{shown}。")
+        length = int(args.frames)
+        requested = length
     elif args.seconds is not None:
-        requested = int(round(args.seconds * fps))
+        limit = template_fill.max_duration_sec(fields)
+        if float(args.seconds) > limit:
+            fail(f"时长超过模板上限 {limit:g} 秒。")
+        if not template_fill.duration_allowed(fields, float(args.seconds)):
+            shown = "、".join(f"{item:g}" for item in durations)
+            fail(f"时长不在白名单内。允许的值：{shown}。")
+        length = template_fill.frames_for_duration(fields, float(args.seconds))
+        requested = args.seconds
     else:
-        requested = 17
-    if requested < 1:
-        fail("帧数必须大于 0。")
-    length = snap_frames(requested, step, limit)
+        length = 17 if 17 in frames else frames[0]
+        requested = length
     set_inputs(prompt, fields["frames"], length)
-    note(f"帧数 {length}（请求 {requested}，上限 {limit}，步长 {step}，fps {fps:g}）")
+    fps = float(fields.get("fps") or 16)
+    note(f"帧数 {length}（请求 {requested}，白名单帧 {frames[0]}–{frames[-1]}，fps {fps:g}）")
 
 
-def apply_reference(prompt: dict, fields: dict, uploaded_name: str | None) -> None:
-    if not uploaded_name:
+def reject_rate_and_motion(fields: dict, args) -> None:
+    fps_allowed = template_fill.allowed_fps(fields)
+    motion_allowed = template_fill.allowed_motion(fields)
+    if getattr(args, "fps", None) is not None and not template_fill.value_allowed(float(args.fps), fps_allowed):
+        shown = "、".join(f"{item:g}" for item in fps_allowed)
+        fail(f"帧率不在白名单内。允许的值：{shown}。")
+    if getattr(args, "motion", None) is not None and not template_fill.value_allowed(float(args.motion), motion_allowed):
+        shown = "、".join(f"{item:g}" for item in motion_allowed)
+        fail(f"运动幅度不在白名单内。允许的值：{shown}。")
+
+
+def apply_steps(prompt: dict, fields: dict, steps: int | None) -> None:
+    if steps is None:
         return
-    spec = fields.get("reference_image")
-    if not isinstance(spec, dict):
-        fail("视频字段对照里没有 reference_image，不能提交参考图。")
-    node_id = str(spec["node"])
-    prompt[node_id] = {
-        "class_type": spec.get("class_type") or "LoadImage",
-        "inputs": {spec["input"]: uploaded_name},
-    }
-    link = spec.get("link_to") or {}
-    set_inputs(
-        prompt,
-        {"node": link["node"], "input": link["input"]},
-        [node_id, int(link.get("output") or 0)],
-    )
-    note(f"参考图写入节点 {node_id} 的 {spec['input']}：{uploaded_name}")
-
-
-def request_json(url: str, payload: dict | None = None, timeout: int = 120):
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = raw
-        fail(f"ComfyUI HTTP {exc.code} {url}", parsed)
-    except urllib.error.URLError as exc:
-        fail(f"连不上 ComfyUI：{url} ({exc.reason})")
-    if not body:
-        return {}
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        fail(f"ComfyUI 返回的不是 JSON：{url}", body[:2000])
+    if steps < 1:
+        fail("steps 必须大于 0。")
+    if "steps" not in fields:
+        fail("这张模板的对照表没有 steps。")
+    set_inputs(prompt, fields["steps"], int(steps))
+    note(f"步数 {int(steps)}")
 
 
 def upload_image(base: str, path: str) -> str:
-    if not os.path.isfile(path):
-        fail(f"参考图不存在：{path}")
-    filename = os.path.basename(path)
-    ext = os.path.splitext(filename)[1].lower()
-    mime = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-    }.get(ext, "application/octet-stream")
-    boundary = "----ComfyPoc" + uuid.uuid4().hex
-    with open(path, "rb") as handle:
-        file_bytes = handle.read()
+    return comfy_client.ComfyClient(base).upload_image(path)
 
-    def field(name: str, value: str) -> bytes:
-        return (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n"
-        ).encode("utf-8")
 
-    file_head = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
-        f"Content-Type: {mime}\r\n\r\n"
-    ).encode("utf-8")
-    body = b"".join(
-        [
-            field("overwrite", "true"),
-            field("type", "input"),
-            file_head,
-            file_bytes,
-            f"\r\n--{boundary}--\r\n".encode("utf-8"),
-        ]
-    )
-    req = urllib.request.Request(
-        base + "/upload/image",
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
+def submit_prompt(base: str, prompt: dict, client_id: str, template: dict, fields: dict) -> str:
+    template_fill.assert_template_edit(template, prompt, fields)
+    client = comfy_client.ComfyClient(base, client_id=client_id)
     try:
-        with urllib.request.urlopen(req, timeout=120) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        fail(f"上传参考图失败，HTTP {exc.code}", raw)
-    except urllib.error.URLError as exc:
-        fail(f"上传参考图失败：{exc.reason}")
-    name = payload.get("name")
-    if not name:
-        fail("上传参考图后 ComfyUI 没有返回文件名。", payload)
-    subfolder = payload.get("subfolder") or ""
-    if subfolder:
-        return subfolder.replace("\\", "/") + "/" + name
-    return name
+        return client.submit(prompt)
+    finally:
+        client.close()
 
 
-def submit_prompt(base: str, prompt: dict, client_id: str) -> str:
-    result = request_json(base + "/prompt", {"prompt": prompt, "client_id": client_id})
-    node_errors = result.get("node_errors") or {}
-    if node_errors or not result.get("prompt_id"):
-        fail("ComfyUI 拒绝了这张工作流。", result)
-    return result["prompt_id"]
-
-
-def history_entry(base: str, prompt_id: str):
-    payload = request_json(f"{base}/history/{urllib.parse.quote(prompt_id)}")
-    if not isinstance(payload, dict):
-        return None
-    entry = payload.get(prompt_id)
-    if isinstance(entry, dict):
-        return entry
-    return None
-
-
-def status_of(entry: dict) -> tuple[str, bool]:
-    status = entry.get("status") or {}
-    return str(status.get("status_str") or ""), bool(status.get("completed"))
-
-
-def output_files(entry: dict) -> list[dict]:
-    found = []
-    outputs = entry.get("outputs") or {}
-    if not isinstance(outputs, dict):
-        return found
-    for node_out in outputs.values():
-        if not isinstance(node_out, dict):
-            continue
-        for key in ("images", "gifs", "videos", "audio"):
-            items = node_out.get(key) or []
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if isinstance(item, dict) and item.get("filename"):
-                    found.append(item)
-    return found
-
-
-def download_file(base: str, item: dict, output_dir: str) -> str:
-    filename = item["filename"]
-    subfolder = item.get("subfolder") or ""
-    folder_type = item.get("type") or "output"
-    query = urllib.parse.urlencode(
-        {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    )
-    url = f"{base}/view?{query}"
-    relative = os.path.join(subfolder, filename) if subfolder else filename
-    destination = os.path.join(output_dir, relative)
-    os.makedirs(os.path.dirname(destination) or output_dir, exist_ok=True)
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        fail(f"下载输出失败，HTTP {exc.code} {filename}", raw)
-    except urllib.error.URLError as exc:
-        fail(f"下载输出失败：{filename} ({exc.reason})")
-    if not data:
-        fail(f"下载到的文件是空的：{filename}")
-    with open(destination, "wb") as handle:
-        handle.write(data)
-    return os.path.abspath(destination)
-
-
-def ws_url(base: str, client_id: str) -> str:
-    parsed = urllib.parse.urlparse(base)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    return urllib.parse.urlunparse(
-        (scheme, parsed.netloc, "/ws", "", urllib.parse.urlencode({"clientId": client_id}), "")
-    )
-
-
-def handle_ws_message(raw, prompt_id: str, prompt: dict) -> str | None:
-    if isinstance(raw, bytes):
-        return None
-    try:
-        message = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    kind = message.get("type")
-    data = message.get("data") or {}
-    if not isinstance(data, dict):
-        return None
-    message_prompt = data.get("prompt_id")
-    if message_prompt and message_prompt != prompt_id:
-        return None
-    if kind == "executing":
-        node = data.get("node")
+def report_event(event: dict, workflow: dict) -> None:
+    kind = event.get("type")
+    if kind == "progress":
+        value = event.get("value")
+        maximum = event.get("max") or 0
+        percent = event.get("percent")
+        node = event.get("node")
+        if maximum:
+            if _talk:
+                prefix = f"节点 {node} " if node else ""
+                print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
+            elif percent is not None:
+                print(f"进度 {percent}%", file=sys.stderr, flush=True)
+    elif kind == "executing" and _talk:
+        node = event.get("node")
         if node is None:
             note("执行结束，正在取结果")
         else:
-            class_type = (prompt.get(str(node)) or {}).get("class_type") or ""
+            class_type = (workflow.get(str(node)) or {}).get("class_type") or ""
             label = f"{node}（{class_type}）" if class_type else str(node)
             note(f"执行节点 {label}")
-    elif kind == "progress":
-        value = data.get("value")
-        maximum = data.get("max") or 0
-        node = data.get("node")
-        if maximum:
-            percent = int(round(100 * float(value) / float(maximum)))
-            prefix = f"节点 {node} " if node else ""
-            if _talk:
-                print(f"进度 {prefix}{value}/{maximum} {percent}%", flush=True)
-            else:
-                print(f"进度 {percent}%", file=sys.stderr, flush=True)
-    elif kind == "execution_error":
-        fail("ComfyUI 执行失败。", data)
-    elif kind == "execution_success":
-        return "success"
-    return None
-
-
-def wait_for_result(base: str, prompt: dict, prompt_id: str, client_id: str, timeout: int) -> dict:
-    ws = None
-    try:
-        from websocket import (  # type: ignore
-            WebSocketConnectionClosedException,
-            WebSocketTimeoutException,
-            create_connection,
-        )
-
-        ws = create_connection(
-            ws_url(base, client_id),
-            timeout=10,
-            header=[f"Origin: {base}"],
-        )
-        ws.settimeout(1)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        print(f"WebSocket 连不上，改为轮询 /history：{exc}", file=sys.stderr, flush=True)
-        ws = None
-        WebSocketTimeoutException = ()  # type: ignore
-        WebSocketConnectionClosedException = ()  # type: ignore
-
-    deadline = time.time() + timeout
-    last_poll = 0.0
-    entry = None
-    try:
-        while time.time() < deadline:
-            if ws is not None:
-                try:
-                    signal = handle_ws_message(ws.recv(), prompt_id, prompt)
-                    if signal == "success":
-                        last_poll = 0.0
-                except WebSocketTimeoutException:
-                    pass
-                except WebSocketConnectionClosedException:
-                    print("WebSocket 已断开，改为轮询 /history", file=sys.stderr, flush=True)
-                    ws = None
-            now = time.time()
-            if now - last_poll >= 2:
-                last_poll = now
-                entry = history_entry(base, prompt_id)
-                if entry:
-                    status_str, completed = status_of(entry)
-                    if status_str == "error":
-                        fail("ComfyUI 执行失败。", entry.get("status"))
-                    if status_str == "success" or (completed and output_files(entry)):
-                        if output_files(entry):
-                            return entry
-            if ws is None:
-                time.sleep(1)
-    finally:
-        if ws is not None:
-            ws.close()
-    fail(
-        f"等待超时（{timeout} 秒）。视频和图片使用各自的超时，这次没有拿到输出。",
-        (entry or {}).get("status"),
-    )
 
 
 def confirm_history_prompt(entry: dict, prompt: dict, fields: dict) -> None:
@@ -507,70 +291,155 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--negative", default=None, help="负向提示词。不传则保留模板里的默认值。")
         command.add_argument("--aspect", default="1:1", choices=ASPECTS, help="画幅。只允许这三项。")
         command.add_argument("--seed", type=int, default=None, help="随机种子。不传则本次随机生成。")
+        command.add_argument("--steps", type=int, default=None, help="采样步数。不传则保留模板里的值。")
         command.add_argument("--print-prompt", action="store_true", help="只打印替换后的工作流，不提交。")
 
     image = subparsers.add_parser("image", help="文生图。")
     add_common(image)
-    video = subparsers.add_parser("video", help="文生视频。传入 --image 时改为图生视频。")
+    i2i = subparsers.add_parser("i2i", help="图生图。使用 image_i2i 模板和本地参考图。")
+    add_common(i2i)
+    i2i.add_argument("--image", required=True, help="本地参考图。")
+    video = subparsers.add_parser("video", help="文生视频。传入 --image 时改用 video_i2v 模板。")
     add_common(video)
-    video.add_argument("--frames", type=int, default=None, help="帧数。会按字段对照里的步长对齐，并不超过上限。")
-    video.add_argument("--seconds", type=float, default=None, help="时长（秒）。同时传了 --frames 时以帧数为准。")
-    video.add_argument("--image", default=None, help="本地参考图。不传则不连接 LoadImage。")
+    video.add_argument("--frames", type=int, default=None, help="帧数。只允许白名单里的 4n+1，不超过上限。")
+    video.add_argument("--seconds", type=float, default=None, help="时长（秒）。只允许白名单。同时传了 --frames 时以帧数为准。")
+    video.add_argument("--fps", type=float, default=None, help="帧率。只允许白名单，不传则用模板里的值。")
+    video.add_argument("--motion", type=float, default=None, help="运动幅度。只允许白名单。当前模板没有对应节点，合法值不会写入工作流。")
+    video.add_argument("--image", default=None, help="本地参考图。传入则使用图生视频模板。")
+    subparsers.add_parser("check", help="校验模板对照表。不连接 ComfyUI。")
     return parser
 
 
-def execute_workflow(base: str, workflow: dict, fields: dict, timeout: int, output_dir: str) -> list[str]:
-    client_id = str(uuid.uuid4())
-    prompt_id = submit_prompt(base, workflow, client_id)
-    stream = sys.stdout if _talk else sys.stderr
-    print(f"prompt_id {prompt_id}", file=stream, flush=True)
-    entry = wait_for_result(base, workflow, prompt_id, client_id, timeout)
-    confirm_history_prompt(entry, workflow, fields)
-    os.makedirs(output_dir, exist_ok=True)
-    unique = []
-    seen = set()
-    for item in output_files(entry):
-        key = (item.get("filename"), item.get("subfolder"), item.get("type"))
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    chosen = [item for item in unique if item.get("type") in (None, "output")]
-    if not chosen:
-        chosen = [item for item in unique if item.get("type") == "temp"]
-    saved = [download_file(base, item, output_dir) for item in chosen]
-    if not saved:
-        fail("执行成功，但历史记录里没有可下载的文件。", entry.get("outputs"))
-    return saved
+def template_kind(args) -> str:
+    if args.command == "image":
+        return "image"
+    if args.command == "i2i":
+        return "image_i2i"
+    if args.image:
+        return "video_i2v"
+    return "video"
+
+
+def execute_workflow(
+    base: str,
+    template: dict,
+    workflow: dict,
+    fields: dict,
+    timeout: int,
+    output_dir: str,
+    on_event=None,
+    kind: str = "image",
+    preview: bool = False,
+) -> list[str]:
+    client = comfy_client.ComfyClient(base)
+    lane = comfy_client.lane_for(kind)
+
+    def relay(event: dict) -> None:
+        report_event(event, workflow)
+        if on_event is not None:
+            on_event(event)
+
+    def started(prompt_id: str) -> None:
+        if on_event is not None:
+            on_event({"type": "submitted", "prompt_id": prompt_id})
+        stream = sys.stdout if _talk else sys.stderr
+        print(f"prompt_id {prompt_id}", file=stream, flush=True)
+        if client.queued(prompt_id):
+            print(f"队列中 {prompt_id}", file=sys.stderr, flush=True)
+
+    try:
+        template_fill.assert_template_edit(template, workflow, fields)
+        if lane == "video" and template_fill.preview_choice(preview, fields) == "skipped":
+            note("预览帧已跳过：模板没有预览节点，这次仍提交成片。")
+        entry = comfy_client.run_isolated(
+            lane, client, workflow, timeout, on_event=relay, on_submitted=started,
+        )
+        confirm_history_prompt(entry, workflow, fields)
+        return client.save_outputs(entry, output_dir)
+    finally:
+        client.close()
 
 
 def main(argv: list[str] | None = None) -> None:
     configure_stdio()
+    saved = None
     try:
-        args = build_parser().parse_args(argv)
-        config = load_config()
-        prompt, fields, timeout = job_paths(config, args.command)
-        apply_common(prompt, fields, args)
-        uploaded = None
-        if args.command == "video":
-            apply_frames(prompt, fields, args)
-            if args.image:
-                if args.print_prompt:
-                    uploaded = os.path.basename(args.image)
-                else:
-                    uploaded = upload_image(config["comfy_url"], args.image)
-            apply_reference(prompt, fields, uploaded)
-        if args.print_prompt:
-            print(json.dumps(prompt, ensure_ascii=False, indent=2))
-            return
-        saved = execute_workflow(config["comfy_url"], prompt, fields, timeout, config["output_dir"])
+        saved = _main(argv)
+    except template_fill.TemplateError as exc:
+        _exit_failure(exc.message, exc.payload)
+    except artifacts.ArtifactError as exc:
+        _exit_failure(exc.message, None)
     except ComfyFailure as exc:
-        print(exc.message, file=sys.stderr)
-        if exc.payload is not None:
-            print(json.dumps(exc.payload, ensure_ascii=False, indent=2), file=sys.stderr)
-        raise SystemExit(1) from exc
-    for path in saved:
+        _exit_failure(exc.message, exc.payload)
+    for path in (saved or {}).get("paths") or []:
         print(f"输出 {path}", flush=True)
+    for record in (saved or {}).get("records") or []:
+        print(f"artifact_id {record['artifact_id']}", flush=True)
+        print(f"url {record['url']}", flush=True)
+
+
+def _exit_failure(message: str, payload) -> None:
+    print(message, file=sys.stderr)
+    if payload is not None:
+        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _main(argv: list[str] | None) -> dict | None:
+    args = build_parser().parse_args(argv)
+    config = load_config()
+    if args.command == "check":
+        template_fill.run_check(config)
+        print("template_check ok")
+        return None
+    template, fields, timeout = job_paths(config, template_kind(args))
+    template_fill.validate_fields(template, fields)
+    prompt = template_fill.copy_template(template)
+    apply_common(prompt, fields, args)
+    apply_steps(prompt, fields, args.steps)
+    if args.command == "video":
+        apply_frames(prompt, fields, args)
+        reject_rate_and_motion(fields, args)
+    image_path = getattr(args, "image", None)
+    if image_path:
+        if "reference_image" not in fields:
+            raise template_fill.TemplateError("这张模板的对照表没有 reference_image，不能提交参考图。")
+        uploaded = os.path.basename(image_path) if args.print_prompt else upload_image(config["comfy_url"], image_path)
+        template_fill.set_reference_name(prompt, fields, uploaded)
+        spec = fields["reference_image"]
+        note(f"参考图写入节点 {spec['node']} 的 {spec['input']}：{uploaded}")
+    elif "reference_image" in fields:
+        raise template_fill.TemplateError("这张模板需要参考图，未提交。")
+    template_fill.assert_template_edit(template, prompt, fields)
+    if args.print_prompt:
+        print(json.dumps(prompt, ensure_ascii=False, indent=2))
+        return None
+    paths = execute_workflow(
+        config["comfy_url"],
+        template,
+        prompt,
+        fields,
+        timeout,
+        config["output_dir"],
+        kind=template_kind(args),
+        preview=preview_enabled(config, template_kind(args)),
+    )
+    duration = None
+    if args.command == "video":
+        frame_count = int(template_fill.read_back(prompt, fields, "frames"))
+        duration = frame_count / float(fields.get("fps") or 16)
+    records = artifacts.remember_outputs(
+        config,
+        paths,
+        kind=template_kind(args),
+        user_prompt=args.prompt,
+        workflow_prompt=template_fill.read_back(prompt, fields, "positive_prompt"),
+        seed=int(template_fill.read_back(prompt, fields, "seed")),
+        width=int(template_fill.read_back(prompt, fields, "width")),
+        height=int(template_fill.read_back(prompt, fields, "height")),
+        duration_sec=duration,
+    )
+    return {"paths": paths, "records": records}
 
 
 if __name__ == "__main__":

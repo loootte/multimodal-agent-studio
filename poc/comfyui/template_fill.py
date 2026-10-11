@@ -1,43 +1,402 @@
-"""把工具参数填进模板副本。
+"""复制模板，并只按对照表里的白名单字段写入。
 
-这里只改字段对照里的白名单。不新建节点，也不接受调用方传来的 workflow。
-#3 会把模板库和「拒绝自由 JSON」放在这一层；#2 的工具只调用这里。
+提交前核对两件事：对照表指向的节点必须已经在模板里；
+准备提交的图必须仍是这份模板，只允许白名单输入发生变化。
+模型拼出来的自由 JSON 不能进入 POST /prompt。
+#2 的工具也只调用这一层，不在工具函数里拼节点。
 """
 
 from __future__ import annotations
 
 import copy
-from types import SimpleNamespace
 
-import comfy_poc
+WRITE_FIELDS = (
+    "positive_prompt",
+    "negative_prompt",
+    "width",
+    "height",
+    "seed",
+    "steps",
+    "frames",
+    "reference_image",
+)
+META_FIELDS = ("aspects", "max_frames", "frame_step", "fps", "fps_allowed", "motion_allowed")
+
+
+class TemplateError(Exception):
+    def __init__(self, message: str, payload=None):
+        super().__init__(message)
+        self.message = message
+        self.payload = payload
+
+
+def targets(spec) -> list[dict]:
+    if isinstance(spec, list):
+        return spec
+    if isinstance(spec, dict):
+        return [spec]
+    raise TemplateError("对照表的字段格式不对。")
+
+
+def copy_template(workflow: dict) -> dict:
+    return copy.deepcopy(workflow)
+
+
+def validate_fields(workflow: dict, fields: dict) -> None:
+    if not isinstance(workflow, dict) or not workflow:
+        raise TemplateError("模板不是工作流对象，未提交。")
+    if not isinstance(fields, dict):
+        raise TemplateError("字段对照不是对象，未提交。")
+    unknown = sorted(set(fields) - set(WRITE_FIELDS) - set(META_FIELDS))
+    if unknown:
+        raise TemplateError(f"对照表里有白名单之外的字段：{', '.join(unknown)}。未提交。")
+    for name in ("positive_prompt", "width", "height", "seed"):
+        if name not in fields:
+            raise TemplateError(f"对照表缺少字段 {name}，未提交。")
+    for name, spec in fields.items():
+        if name in META_FIELDS:
+            continue
+        if name == "reference_image":
+            _check_reference(workflow, spec)
+            continue
+        for target in targets(spec):
+            _check_target(workflow, name, target)
+
+
+def slots(fields: dict) -> set[tuple[str, str]]:
+    found = set()
+    for name, spec in fields.items():
+        if name in META_FIELDS:
+            continue
+        if name == "reference_image":
+            found.add((str(spec["node"]), spec["input"]))
+            continue
+        for target in targets(spec):
+            found.add((str(target["node"]), target["input"]))
+    return found
+
+
+def set_reference_name(workflow: dict, fields: dict, uploaded_name: str) -> None:
+    spec = fields.get("reference_image")
+    if not isinstance(spec, dict):
+        raise TemplateError("这张模板的对照表没有 reference_image，不能提交参考图。")
+    node_id = str(spec["node"])
+    field = spec["input"]
+    node = workflow.get(node_id)
+    if node is None or field not in (node.get("inputs") or {}):
+        raise TemplateError(f"对照表字段 reference_image 的节点 {node_id} 不在模板里，未提交。")
+    node["inputs"][field] = uploaded_name
+
+
+def assert_template_edit(template: dict, filled: dict, fields: dict) -> None:
+    if not isinstance(filled, dict):
+        raise TemplateError("拒绝提交非模板 JSON。")
+    if set(template) != set(filled):
+        raise TemplateError("拒绝提交非模板 JSON：节点集合不一致。")
+    allowed = slots(fields)
+    for node_id, original in template.items():
+        current = filled.get(node_id)
+        if not isinstance(current, dict):
+            raise TemplateError(f"拒绝提交非模板 JSON：节点 {node_id} 不是对象。")
+        if current.get("class_type") != original.get("class_type"):
+            raise TemplateError(f"拒绝提交非模板 JSON：节点 {node_id} 的类型被改了。")
+        original_inputs = original.get("inputs") or {}
+        current_inputs = current.get("inputs") or {}
+        if set(original_inputs) != set(current_inputs):
+            raise TemplateError(f"拒绝提交非模板 JSON：节点 {node_id} 的输入集合被改了。")
+        for key, value in original_inputs.items():
+            if (str(node_id), key) in allowed:
+                continue
+            if current_inputs.get(key) != value:
+                raise TemplateError(f"拒绝提交非模板 JSON：节点 {node_id} 的输入 {key} 不在白名单里。")
+
+
+def run_check(config: dict) -> None:
+    import urllib.request
+
+    import comfy_poc
+
+    calls = {"count": 0}
+    original = urllib.request.urlopen
+
+    def trap(*_args, **_kwargs):
+        calls["count"] += 1
+        raise RuntimeError("校验不该访问 ComfyUI")
+
+    urllib.request.urlopen = trap
+    try:
+        shapes = {
+            "image": {"positive_prompt", "negative_prompt", "width", "height", "seed", "steps"},
+            "image_i2i": {
+                "positive_prompt",
+                "negative_prompt",
+                "width",
+                "height",
+                "seed",
+                "steps",
+                "reference_image",
+            },
+            "video": {
+                "positive_prompt",
+                "negative_prompt",
+                "width",
+                "height",
+                "seed",
+                "steps",
+                "frames",
+            },
+            "video_i2v": {
+                "positive_prompt",
+                "negative_prompt",
+                "width",
+                "height",
+                "seed",
+                "steps",
+                "frames",
+                "reference_image",
+            },
+        }
+        for kind, required in shapes.items():
+            workflow, fields, _timeout = comfy_poc.job_paths(config, kind)
+            missing = sorted(required - set(fields))
+            if missing:
+                raise TemplateError(f"{kind} 对照表缺少 {', '.join(missing)}。")
+            if kind == "video" and "reference_image" in fields:
+                raise TemplateError("文生视频对照表不应包含 reference_image。")
+            if kind in {"video", "video_i2v"} and int(fields.get("max_frames") or 0) < 1:
+                raise TemplateError(f"{kind} 对照表没有帧数上限。")
+            if kind in {"video", "video_i2v"}:
+                if not allowed_durations(fields) or not allowed_fps(fields) or not allowed_motion(fields):
+                    raise TemplateError(f"{kind} 的时长、帧率或运动幅度白名单是空的。")
+                if preview_choice(False, fields) != "off" or preview_choice(True, fields) != "skipped":
+                    raise TemplateError("没有预览节点时，预览应默认关闭；打开后跳过，不能把视频判失败。")
+            validate_fields(workflow, fields)
+            filled = copy_template(workflow)
+            comfy_poc.set_inputs(filled, fields["positive_prompt"], "a red ceramic teapot")
+            assert_template_edit(workflow, filled, fields)
+            if filled is workflow:
+                raise TemplateError("写入前没有复制模板。")
+
+            bad = copy.deepcopy(fields)
+            seed_spec = bad["seed"]
+            if isinstance(seed_spec, list):
+                seed_spec[0]["node"] = "999"
+            else:
+                seed_spec["node"] = "999"
+            try:
+                validate_fields(workflow, bad)
+            except TemplateError as exc:
+                if "seed" not in exc.message or "999" not in exc.message:
+                    raise TemplateError(f"错误节点的提示没有写明字段：{exc.message}") from exc
+            else:
+                raise TemplateError("错误节点没有在提交前失败。")
+
+            extra = copy.deepcopy(fields)
+            extra["sampler_name"] = {"node": "1", "input": "sampler_name"}
+            try:
+                validate_fields(workflow, extra)
+            except TemplateError as exc:
+                if "白名单之外" not in exc.message:
+                    raise TemplateError(f"白名单之外的字段没有被拒绝：{exc.message}") from exc
+            else:
+                raise TemplateError("白名单之外的字段没有被拒绝。")
+
+            try:
+                assert_template_edit(workflow, {"1": {"class_type": "Note", "inputs": {}}}, fields)
+            except TemplateError as exc:
+                if "非模板" not in exc.message:
+                    raise TemplateError(f"自由 JSON 没有被拒绝：{exc.message}") from exc
+            else:
+                raise TemplateError("自由 JSON 没有被拒绝。")
+
+            dirty = _dirty_copy(workflow, fields)
+            try:
+                assert_template_edit(workflow, dirty, fields)
+            except TemplateError as exc:
+                if "非模板" not in exc.message:
+                    raise TemplateError(f"白名单之外的修改没有被拒绝：{exc.message}") from exc
+            else:
+                raise TemplateError("白名单之外的修改没有被拒绝。")
+
+            try:
+                comfy_poc.submit_prompt(config["comfy_url"], dirty, "check", workflow, fields)
+            except TemplateError:
+                pass
+            else:
+                raise TemplateError("被拒绝的图仍然进入了提交。")
+        if calls["count"]:
+            raise TemplateError("校验阶段访问了 ComfyUI。")
+    finally:
+        urllib.request.urlopen = original
+
+
+def _check_target(workflow: dict, name: str, target: dict) -> None:
+    if not isinstance(target, dict) or "node" not in target or "input" not in target:
+        raise TemplateError(f"对照表字段 {name} 格式不对，未提交。")
+    node_id = str(target["node"])
+    field = target["input"]
+    node = workflow.get(node_id)
+    if node is None:
+        raise TemplateError(f"对照表字段 {name} 的节点 {node_id} 不在模板里，未提交。")
+    inputs = node.get("inputs") or {}
+    if field not in inputs:
+        raise TemplateError(f"对照表字段 {name} 的输入 {field} 不在节点 {node_id} 上，未提交。")
+
+
+def _check_reference(workflow: dict, spec) -> None:
+    if not isinstance(spec, dict):
+        raise TemplateError("对照表字段 reference_image 格式不对，未提交。")
+    _check_target(workflow, "reference_image", spec)
+    node_id = str(spec["node"])
+    expected_class = spec.get("class_type")
+    if expected_class and workflow[node_id].get("class_type") != expected_class:
+        raise TemplateError(
+            f"对照表字段 reference_image 的节点 {node_id} 不是 {expected_class}，未提交。"
+        )
+    link = spec.get("link_to")
+    if not isinstance(link, dict):
+        return
+    target = str(link.get("node") or "")
+    key = link.get("input")
+    if target not in workflow:
+        raise TemplateError(f"对照表字段 reference_image 的节点 {target} 不在模板里，未提交。")
+    current = (workflow[target].get("inputs") or {}).get(key)
+    expected = [node_id, int(link.get("output") or 0)]
+    if current != expected:
+        raise TemplateError("对照表字段 reference_image 在模板里没有接上，未提交。")
+
+
+def _dirty_copy(workflow: dict, fields: dict) -> dict:
+    filled = copy.deepcopy(workflow)
+    allowed = slots(fields)
+    for node_id, node in filled.items():
+        inputs = node.get("inputs") or {}
+        for key, value in inputs.items():
+            if (str(node_id), key) in allowed:
+                continue
+            if isinstance(value, str):
+                inputs[key] = value + " "
+                return filled
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                inputs[key] = value + 1
+                return filled
+    raise TemplateError("没有找到白名单之外的输入可做测试。")
 
 
 def load_job(config: dict, kind: str):
+    import comfy_poc
+
     workflow, fields, timeout = comfy_poc.job_paths(config, kind)
-    return copy.deepcopy(workflow), fields, timeout
+    validate_fields(workflow, fields)
+    return copy_template(workflow), fields, timeout
+
+
+def _near(left: float, right: float) -> bool:
+    return abs(float(left) - float(right)) <= 1e-6
+
+
+def value_allowed(value: float, allowed: list[float]) -> bool:
+    return any(_near(value, item) for item in allowed)
+
+
+def allowed_frame_counts(fields: dict) -> list[int]:
+    step = int(fields.get("frame_step") or 4)
+    limit = int(fields.get("max_frames") or 33)
+    if step < 1 or limit < 1:
+        raise TemplateError("视频帧数白名单不可用。")
+    frame = 1
+    found = []
+    while frame <= limit:
+        found.append(frame)
+        frame += step
+    return found
+
+
+def allowed_durations(fields: dict) -> list[float]:
+    import comfy_poc
+
+    fps = float(fields.get("fps") or 16)
+    if fps <= 0:
+        raise TemplateError("模板的 fps 必须大于 0。")
+    frames = allowed_frame_counts(fields)
+    values = [frame / fps for frame in frames]
+    requested = int(round(fps))
+    limit = int(fields.get("max_frames") or 33)
+    if requested <= limit and not value_allowed(1.0, values):
+        snapped = comfy_poc.snap_frames(requested, int(fields.get("frame_step") or 4), limit)
+        if snapped in frames:
+            values.append(1.0)
+    return values
+
+
+def duration_allowed(fields: dict, duration_sec: float) -> bool:
+    return value_allowed(float(duration_sec), allowed_durations(fields))
+
+
+def _number_list(raw, label: str) -> list[float]:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise TemplateError(f"{label}白名单不可用。")
+    values = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or float(item) <= 0:
+            raise TemplateError(f"{label}白名单不可用。")
+        values.append(float(item))
+    return values
+
+
+def allowed_fps(fields: dict) -> list[float]:
+    raw = fields.get("fps_allowed")
+    if raw is None:
+        raw = [fields.get("fps") or 16]
+    values = _number_list(raw, "帧率")
+    current = float(fields.get("fps") or 16)
+    if not value_allowed(current, values):
+        raise TemplateError("模板帧率不在白名单内。")
+    return values
+
+
+def allowed_motion(fields: dict) -> list[float]:
+    raw = fields.get("motion_allowed")
+    if raw is None:
+        raw = [1]
+    return _number_list(raw, "运动幅度")
+
+
+def preview_choice(enabled: bool, fields: dict) -> str:
+    """预览默认关闭。当前模板没有预览节点，打开时跳过，不把成片判失败。"""
+    if not enabled:
+        return "off"
+    if not isinstance(fields, dict) or "preview" not in fields:
+        return "skipped"
+    return "skipped"
 
 
 def max_duration_sec(fields: dict) -> float:
     fps = float(fields.get("fps") or 16)
     limit = int(fields.get("max_frames") or 33)
     if fps <= 0:
-        comfy_poc.fail("模板的 fps 必须大于 0。")
+        raise TemplateError("模板的 fps 必须大于 0。")
     return limit / fps
 
 
 def frames_for_duration(fields: dict, duration_sec: float) -> int:
+    import comfy_poc
+
     fps = float(fields.get("fps") or 16)
     step = int(fields.get("frame_step") or 4)
     limit = int(fields.get("max_frames") or 33)
     requested = int(round(float(duration_sec) * fps))
     if requested > limit:
-        comfy_poc.fail(
-            f"duration_sec 超过模板上限 {max_duration_sec(fields):g} 秒。"
-        )
+        raise TemplateError(f"duration_sec 超过模板上限 {max_duration_sec(fields):g} 秒。")
     return comfy_poc.snap_frames(requested, step, limit)
 
 
 def fill_common(workflow: dict, fields: dict, prompt: str, aspect: str, seed: int, negative: str | None):
+    import comfy_poc
+    from types import SimpleNamespace
+
     comfy_poc.apply_common(
         workflow,
         fields,
@@ -47,42 +406,27 @@ def fill_common(workflow: dict, fields: dict, prompt: str, aspect: str, seed: in
 
 
 def fill_frames(workflow: dict, fields: dict, length: int) -> None:
-    comfy_poc.apply_frames(
-        workflow,
-        fields,
-        SimpleNamespace(frames=length, seconds=None),
-    )
+    import comfy_poc
+    from types import SimpleNamespace
+
+    comfy_poc.apply_frames(workflow, fields, SimpleNamespace(frames=length, seconds=None))
 
 
 def assert_text_to_video(workflow: dict, fields: dict) -> None:
-    link = (fields.get("reference_image") or {}).get("link_to") or {}
-    node_id = str(link.get("node") or "")
-    node = workflow.get(node_id) or {}
-    if link.get("input") in (node.get("inputs") or {}):
-        comfy_poc.fail("文生视频模板不应连接参考图。")
+    if "reference_image" in fields:
+        raise TemplateError("文生视频模板不应包含参考图字段。")
+    width = fields.get("width")
+    if isinstance(width, dict):
+        node = workflow.get(str(width.get("node"))) or {}
+        if "start_image" in (node.get("inputs") or {}):
+            raise TemplateError("文生视频模板不应连接参考图。")
 
 
 def assert_image_to_video(workflow: dict, fields: dict) -> None:
     spec = fields.get("reference_image")
     if not isinstance(spec, dict):
-        comfy_poc.fail("图生视频模板没有 reference_image 字段。")
-    node_id = str(spec["node"])
-    if node_id not in workflow:
-        comfy_poc.fail("图生视频模板里没有参考图节点。")
-    link = spec.get("link_to") or {}
-    if not link:
-        return
-    current = ((workflow.get(str(link["node"])) or {}).get("inputs") or {}).get(link["input"])
-    expected = [node_id, int(link.get("output") or 0)]
-    if current != expected:
-        comfy_poc.fail("图生视频模板没有接上参考图。")
-
-
-def set_reference_name(workflow: dict, fields: dict, uploaded_name: str) -> None:
-    spec = fields.get("reference_image")
-    if not isinstance(spec, dict):
-        comfy_poc.fail("图生视频模板没有 reference_image 字段。")
-    comfy_poc.set_inputs(workflow, {"node": spec["node"], "input": spec["input"]}, uploaded_name)
+        raise TemplateError("图生视频模板没有 reference_image 字段。")
+    _check_reference(workflow, spec)
 
 
 def read_back(workflow: dict, fields: dict, key: str):

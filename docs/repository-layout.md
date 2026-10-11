@@ -1,6 +1,6 @@
 # 以后的目录
 
-这些目录现在不创建，避免空的代码树被当成已经开工。第 1 阶段开始时再按这张表加进去。
+这些目录留到对应阶段再创建，避免空的代码树被当成已经开工。每一层现在落到哪些文件，写在 [docs/architecture.md](architecture.md)。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前加了 `apps/web`、`services/gateway` 和 `packages/contracts`，先做文字聊天。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 仍用这些目录，文生图直接调用 `poc/comfyui`，不把 poc 搬进 `services/`。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 也仍用这些目录，不新建内容库。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 仍用这些目录：文字和上传文件留在 `apps/web` 的会话数据里，不新建内容库，也不把文件送进 ComfyUI。`services/runtime`、`services/tools`、`packages/artifacts`、`evals` 和 `ops` 仍然不创建。
 
 ```
 apps/web/                 Web 界面
@@ -21,8 +21,8 @@ ops/                      运行手册和部署说明
 - `evals/` 调用对外的运行 API，不调用模型适配器的私有函数。
 - 密钥文件、本地数据库和上传的原始媒体不进 Git。
 
-语言和框架留到第 1 阶段的架构决定里再定。这份蓝图不绑定某一门语言。选定之后补 `docs/adr/0002-implementation-stack.md`，并说明如何满足模型契约和界面路径。
+文字聊天这一刀的语言和进程写在 `docs/adr/0002-implementation-stack.md`。以后若整段换成别的框架，另写架构决定。本地数据隔离写在 `docs/adr/0003-local-data-isolation.md`：第三方模型只使用工具契约，本地数据由专用工具管理，外部访问先有授权。工具放在 `poc/tools`，按内部和外部分目录并自注册。MCP 只投影同一份契约、不另起进程。规范写在 `docs/adr/0004-tool-governance.md`。
 
 ## 例外：issue #1
 
-`poc/comfyui/` 是一张本地脚本，用来把提示词打进固定的 ComfyUI API 工作流，并拿回图片和视频。它不是 `apps/` 或 `services/`，也不提前决定第 1 阶段的语言。换工作流 JSON 时，调用命令不变。
+`poc/comfyui/` 是一张本地脚本，用来把提示词打进固定的 ComfyUI API 工作流，并按会话把生成结果收成工件。同一次生成的工具、进度、成片和错误记在同一条助手消息里。它不是 `apps/` 或 `services/`，也不提前决定第 1 阶段的语言。换工作流 JSON 时，调用命令不变。工件文件和聊天记录在 `poc/comfyui/artifacts/`，不进 Git。
