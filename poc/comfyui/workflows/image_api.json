@@ -1,59 +1,84 @@
 {
   "1": {
-    "class_type": "CheckpointLoaderSimple",
+    "class_type": "UNETLoader",
     "inputs": {
-      "ckpt_name": "waiIllustriousSDXL_v160.safetensors"
+      "unet_name": "DasiwaKrea2TurboRaw_cutedisasterV2Turbo_fp8.safetensors",
+      "weight_dtype": "default"
     }
   },
   "2": {
-    "class_type": "CLIPTextEncode",
+    "class_type": "CLIPLoader",
     "inputs": {
-      "text": "a red ceramic teapot on a wooden table, soft window light",
-      "clip": ["1", 1]
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
     }
   },
   "3": {
-    "class_type": "CLIPTextEncode",
+    "class_type": "VAELoader",
     "inputs": {
-      "text": "blurry, low quality, watermark, text",
-      "clip": ["1", 1]
+      "vae_name": "qwen_image_vae.safetensors"
     }
   },
   "4": {
-    "class_type": "EmptyLatentImage",
+    "class_type": "CLIPTextEncode",
     "inputs": {
-      "width": 1024,
-      "height": 1024,
-      "batch_size": 1
-    }
-  },
-  "5": {
-    "class_type": "KSampler",
-    "inputs": {
-      "seed": 1,
-      "steps": 20,
-      "cfg": 6.0,
-      "sampler_name": "euler",
-      "scheduler": "normal",
-      "denoise": 1.0,
-      "model": ["1", 0],
-      "positive": ["2", 0],
-      "negative": ["3", 0],
-      "latent_image": ["4", 0]
+      "text": "a red ceramic teapot on a wooden table, soft window light",
+      "clip": ["12", 1]
     }
   },
   "6": {
-    "class_type": "VAEDecode",
+    "class_type": "EmptyLatentImage",
     "inputs": {
-      "samples": ["5", 0],
-      "vae": ["1", 2]
+      "width": 1024,
+      "height": 1280,
+      "batch_size": 1
     }
   },
   "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 196809915860554,
+      "steps": 8,
+      "cfg": 0.9,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["12", 0],
+      "positive": ["4", 0],
+      "negative": ["11", 0],
+      "latent_image": ["6", 0]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["3", 0]
+    }
+  },
+  "9": {
     "class_type": "SaveImage",
     "inputs": {
-      "images": ["6", 0],
-      "filename_prefix": "poc-image"
+      "filename_prefix": "Krea2_turbo_int8",
+      "images": ["8", 0]
+    }
+  },
+  "11": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "paizuri，pubic hair, sunny daylight, clean modern apartment, fingers only touching, mosaic, censored, extra limbs, futanari, mosaic，\nglans outside, glans visible, glans on nipple, shallow insertion, long shaft outside, empty hole, hole in right nipple, unused hole beside the shaft, silicone plug, dildo, toy, paizuri, between breasts, blowjob, oral, penis from chest, penis from pecs, futanari,glans outside, glans on lips, glans in front of mouth, shallow, tip only, not inserted",
+      "clip": ["12", 1]
+    }
+  },
+  "12": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "lora_name": "hina_krea2Turbo_lora_tqd_v4.0.safetensors",
+      "strength_model": 0.18,
+      "strength_clip": 1,
+      "model": ["1", 0],
+      "clip": ["2", 0]
     }
   }
 }

@@ -130,19 +130,19 @@ python poc/comfyui/chat.py run generate_image --json-file image-call.json
 
 ### 文生图 `workflows/image_api.json`
 
-SDXL checkpoint `waiIllustriousSDXL_v160.safetensors`。20 步，euler / normal，CFG 6。
+Krea2 Turbo。UNet `DasiwaKrea2TurboRaw_cutedisasterV2Turbo_fp8.safetensors`，CLIP `qwen3vl_4b_fp8_scaled.safetensors`（类型 `krea2`），VAE `qwen_image_vae.safetensors`。LoRA `hina_krea2Turbo_lora_tqd_v4.0.safetensors`，模型强度 0.18，CLIP 强度 1。8 步，euler / simple，CFG 0.9。
 
 | 字段 | 节点 | 输入 | 说明 |
 | --- | --- | --- | --- |
-| positive_prompt | 2 CLIPTextEncode | text | 正向提示词 |
-| negative_prompt | 3 CLIPTextEncode | text | 不传则保留模板默认句 |
-| width / height | 4 EmptyLatentImage | width, height | 由画幅决定 |
-| seed | 5 KSampler | seed | |
-| steps | 5 KSampler | steps | 不传则保留模板里的 20 |
+| positive_prompt | 4 CLIPTextEncode | text | 正向提示词 |
+| negative_prompt | 11 CLIPTextEncode | text | 不传则保留模板默认句 |
+| width / height | 6 EmptyLatentImage | width, height | 由画幅决定 |
+| seed | 7 KSampler | seed | |
+| steps | 7 KSampler | steps | 不传则保留模板里的 8 |
 
-画幅：`1:1` 1024×1024，`16:9` 1344×768，`9:16` 768×1344。
+画幅：`1:1` 1024×1024，`16:9` 1344×768，`9:16` 768×1344。模板里的空 Latent 是 1024×1280，提交时按画幅覆盖。
 
-节点 1 是模型，6 是 VAEDecode，7 是 SaveImage。这三个不在白名单里。
+不在白名单里的节点：1 UNETLoader，2 CLIPLoader，3 VAELoader，8 VAEDecode，9 SaveImage，12 LoraLoader。
 
 ### 图生图 `workflows/image_i2i_api.json`
 
