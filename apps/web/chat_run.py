@@ -27,10 +27,11 @@ from packages.contracts.events import (
     EVENT_RUN_FAILED,
     EVENT_RUN_STARTED,
     EVENT_TOOL_CALL,
+    EVENT_TOOL_REQUESTED,
     HUMAN,
     TERMINAL_EVENTS,
 )
-from services.gateway.openai_chat import GatewayError, stream_chat
+from services.gateway import GatewayError, stream as gateway_stream
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -495,27 +496,53 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
 def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) -> tuple[dict | None, str]:
     parts: list[str] = []
     tool_call = None
-    for piece in stream_chat(
-        base_url=provider["base_url"],
+    for event in gateway_stream(
+        _gateway_request(provider, messages),
         api_key=provider["api_key"],
-        model=provider["model"],
-        messages=messages,
         timeout_sec=app.timeout_sec,
         cancel=run.cancel,
-        tools=image_run.image_tools(),
         local_bodies=app.sessions.local_bodies(session_id),
+        base_url=provider["base_url"],
     ):
-        if isinstance(piece, str):
-            if hide_text:
+        kind = event.get("type")
+        if kind == EVENT_MESSAGE_DELTA:
+            piece = event.get("text") or ""
+            if hide_text or not piece:
                 continue
             parts.append(piece)
             app.sessions.update_message(
                 session_id, message_id, text="".join(parts), status="running", error=None
             )
             run.push({"type": EVENT_MESSAGE_DELTA, "text": piece})
-        elif isinstance(piece, dict) and piece.get("type") == "tool_call" and tool_call is None:
-            tool_call = piece
+        elif kind == EVENT_TOOL_REQUESTED and tool_call is None:
+            tool_call = {
+                "type": EVENT_TOOL_CALL,
+                "name": event.get("name"),
+                "arguments": event.get("arguments") or {},
+                "call_id": event.get("call_id"),
+            }
     return tool_call, "".join(parts)
+
+
+def _gateway_request(provider: dict, messages: list[dict]) -> dict:
+    system = None
+    items = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "system" and system is None and isinstance(content, str):
+            system = content
+            continue
+        items.append({
+            "role": role,
+            "parts": [{"type": "text", "text": content if isinstance(content, str) else ""}],
+        })
+    return {
+        "model": provider["model"],
+        "system": system,
+        "messages": items,
+        "tools": image_run.image_tools(),
+    }
 
 
 def _blocks(exc: GatewayError, run: Run) -> bool:

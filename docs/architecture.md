@@ -37,7 +37,7 @@ Agent 运行时
 
 1. `apps/web/static/app.js` 把用户文字 `POST` 到 `/api/sessions/{session_id}/messages`。
 2. `apps/web/server.py` 交给 `apps/web/chat_run.py`。出图时，原文先由 `apps/web/store.py` 的 `put_content` 记成本会话内容。发给模型的是一句不含画面的任务。
-3. `services/gateway/openai_chat.py` 带着 `poc/tools/external/` 里自注册的工具契约去请求供应商。`image_run.image_tools()` 负责转发。载荷里一旦出现已入库的正文、文件文本或文件字节的 base64，连接不会打开。工具契约本身不参与这道检查。
+3. `apps/web/chat_run.py` 把对话收成统一请求，交给 `services/gateway.stream`。默认适配器是 `openai_chat.py`。带着 `poc/tools/external/` 里自注册的工具契约去请求供应商。`image_run.image_tools()` 负责转发。载荷里一旦出现已入库的正文、文件文本或文件字节的 base64，连接不会打开。工具契约本身不参与这道检查。
 4. 模型调用 `accept_local_content`，`purpose` 为 `image_prompt`，`kind` 为 `text`。`chat_run.py` 发出 `content_request`。页面上的文本框收集画面描述。草稿只出现在这条本机事件里。
 5. 页面 `POST /api/runs/{run_id}/content`，正文是文字。`store.py` 的 `add_content` 用新的随机句柄留下这段文字。下一次模型请求只带句柄。
 6. `chat_run.py` 用对话框里提交的文字填 `prompt`，丢掉模型自己写的画面描述。`image_run.py` 调用 `poc/comfyui/agent_tools.py` 的 `generate_image`。一条用户消息最多一次。
@@ -110,10 +110,12 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `services/gateway/openai_chat.py` | 唯一的供应商适配器。`POST {base_url}/chat/completions`，`stream` 为 true。默认基址 `https://api.x.ai/v1`，默认模型 `grok-4.7`。把工具调用收成名字加 JSON。已入库文字、文件文本和文件字节的 base64，长度不少于 8 且出现在工具契约以外时，以 `local_content` 失败，且不打开连接 |
-| `services/gateway/__init__.py` | 标明适配器只放在这个包 |
+| `packages/contracts/request.py` | 统一请求和能力声明的形状。部件是文字或工件标识 |
+| `services/gateway/__init__.py` | `stream` 和 `describe`。按模型标识选适配器，先核对能力再打开连接 |
+| `services/gateway/registry.py` | 适配器注册表。同一条请求换模型标识就换已接入的适配器 |
+| `services/gateway/openai_chat.py` | OpenAI 兼容适配器。`POST {base_url}/chat/completions`，`stream` 为 true。默认基址 `https://api.x.ai/v1`，默认模型 `grok-4.7`。文字流式，图像按工件标识写成 data URL。音频和视频返回 `modality_unsupported`，不静默丢掉。工具调用收成名字加 JSON。错误带 `retryable`。已入库文字、文件文本和文件字节的 base64，长度不少于 8 且出现在工具契约以外时，以 `local_content` 失败，且不打开连接 |
 | `services/__init__.py` | 标明供应商协议不进其他服务目录 |
-| `packages/contracts/events.py` | 界面、运行时和网关共用的事件名、错误码和人话。`content_request` 不是结束事件 |
+| `packages/contracts/events.py` | 界面、运行时和网关共用的事件名、错误码、人话和 `retryable`。网关工具事件是 `tool.requested`。`content_request` 不是结束事件 |
 | `packages/contracts/mcp.py` | 进程内 MCP 的 `tools/list` 和 `tools/call` 形状。不监听端口 |
 | `packages/contracts/__init__.py`、`packages/__init__.py` | 标明这是共享契约，不在每一边各写一套名字 |
 | `docs/model-gateway.md` | 网关要遵守的契约。它不是运行代码 |
@@ -169,7 +171,7 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖出图隔离，也覆盖语义唤起、上传文件、跨会话、删除、文件句柄不出图，以及外部 MCP 只校验、不执行 |
+| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖统一请求、能力声明、图像输入、音频视频拒绝、换适配器、可重试错误，也覆盖出图隔离、语义唤起、上传文件、跨会话、删除、文件句柄不出图，以及外部 MCP 只校验、不执行 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
 | `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |
