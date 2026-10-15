@@ -48,6 +48,8 @@
 3. 零个或多个 `tool.requested`
 4. `message.completed` 或 `run.failed`
 
+`run.started` 带上被忽略的未知生成参数名。网页这一刀仍把 `tool.requested` 写成页面上的 `tool_call`。
+
 失败事件带稳定代码，至少区分：
 
 - `modality_unsupported`
@@ -57,6 +59,8 @@
 - `cancelled`
 - `provider_error`
 - `invalid_tool_call`
+
+`retryable` 为真的是 `rate_limited`、`timeout`，以及除 401/403 以外的 `provider_error`。其余代码不可重试。
 
 ## 适配器规则
 

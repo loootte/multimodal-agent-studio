@@ -2,7 +2,7 @@
 
 顺序固定。上一阶段的完成标准没达到，不开始下一阶段的功能。每一阶段只做列出的范围。
 
-[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。
+[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐第 1 阶段的网关。
 
 ## 0. 工程基线
 
@@ -15,7 +15,7 @@
 - 模型契约写明文字、图像、音频、视频各自怎么进、怎么出。
 - 仓库里没有产品应用源码。`poc/comfyui` 是 issue #1 的本地脚本，不算第 1 阶段的网关。
 
-状态：进行中。本仓库的文档就是这一阶段。`poc/comfyui` 不提前实现界面、网关或 Agent 工具。
+状态：已完成。交付物是章程、架构、界面范围、模型契约和目录约定。issue #9 起提前放入的 `apps/web`、`services/gateway` 和 `packages/contracts` 是后续阶段的切片，不回改这一阶段。
 
 ## 1. 模型网关
 
@@ -34,6 +34,8 @@
 - 同一条应用侧请求，换模型标识就能发给另一个已接入的适配器。
 - 不支持的模态返回稳定错误码，界面以后能直接显示。
 - 密钥只来自环境或密钥管理，不进仓库。
+
+状态：已完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐统一请求、能力声明、图像输入和错误分类。网页附件仍留给第 3 阶段。
 
 ## 2. Agent 运行时
 

@@ -27,7 +27,7 @@ sys.path.insert(0, ROOT)
 import image_run
 import server
 import store
-from services.gateway import openai_chat
+from services.gateway import describe, install_defaults, openai_chat, registry, stream
 
 SECRET = "sk-live-example-key-9876"
 TERMINAL = {"message.completed", "run.failed"}
@@ -334,6 +334,7 @@ def self_check() -> None:
         _recovery()
         _redact_unit()
         _redact_history()
+        _gateway_cases()
         _live()
     finally:
         for name, value in saved.items():
@@ -501,6 +502,276 @@ def _redact_unit() -> None:
     denied = openai_chat._http_error(401, json.dumps({"error": {"message": SECRET}}).encode(), SECRET)
     if SECRET in denied.message:
         fail("拒绝密钥的提示里出现了密钥")
+
+
+def _gateway_cases() -> None:
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
+    provider.mode = "ok"
+    provider.requests = []
+    provider.gate = threading.Event()
+    provider.started = threading.Event()
+    serve(provider)
+    try:
+        upstream = f"http://127.0.0.1:{provider.server_address[1]}/v1"
+        _gateway_text(provider, upstream)
+        _gateway_image(provider, upstream)
+        _gateway_audio_rejected(provider, upstream)
+        _gateway_video_rejected(provider, upstream)
+        _gateway_mixed_not_dropped(provider, upstream)
+        _gateway_capabilities()
+        _gateway_switch_adapter(provider, upstream)
+        _gateway_retryable()
+        _gateway_ignored_params(provider, upstream)
+        _gateway_legacy_stream_chat(provider, upstream)
+    finally:
+        install_defaults()
+        provider.shutdown()
+        provider.server_close()
+
+
+def _gateway_text(provider, upstream: str) -> None:
+    before = len(provider.requests)
+    events = _gateway_run(
+        {"model": "demo-model", "messages": [{"role": "user", "parts": [{"type": "text", "text": "你好"}]}]},
+        upstream,
+    )
+    kinds = [event.get("type") for event in events]
+    if kinds[0] != "run.started" or kinds[-1] != "message.completed" or kinds[1:-1] != ["message.delta", "message.delta"]:
+        fail("统一文字流的事件顺序不对")
+    if _gateway_text_of(events) != "你好":
+        fail("统一文字流没有把增量译回")
+    if len(provider.requests) != before + 1:
+        fail("统一文字流没有发给适配器")
+    body = provider.requests[-1]["body"]
+    if body.get("model") != "demo-model" or body.get("stream") is not True:
+        fail("统一请求没有带上模型标识")
+    content = body["messages"][-1]["content"]
+    if content != "你好":
+        fail("纯文字没有保持字符串部件")
+
+
+def _gateway_image(provider, upstream: str) -> None:
+    before = len(provider.requests)
+    artifact_id = "a_" + "ab" * 16
+    events = _gateway_run(
+        {
+            "model": "demo-model",
+            "messages": [{
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "看这张图"},
+                    {"type": "image", "artifact_id": artifact_id, "media_type": "image/png"},
+                ],
+            }],
+        },
+        upstream,
+        artifacts={artifact_id: {"data": _PNG, "media_type": "image/png"}},
+    )
+    if events[-1].get("type") != "message.completed":
+        fail("图像输入没有完成")
+    if len(provider.requests) != before + 1:
+        fail("图像输入没有发给模型")
+    content = provider.requests[-1]["body"]["messages"][-1]["content"]
+    if not isinstance(content, list) or content[0].get("text") != "看这张图":
+        fail("图像输入没有保留文字部件")
+    url = content[1].get("image_url", {}).get("url") or ""
+    marker = "data:image/png;base64,"
+    if not url.startswith(marker):
+        fail("图像输入没有写成 data URL")
+    if url[len(marker):] != base64.b64encode(_PNG).decode("ascii"):
+        fail("图像输入的字节不对")
+
+
+def _gateway_audio_rejected(provider, upstream: str) -> None:
+    _gateway_reject_part(provider, upstream, "audio", "音频")
+
+
+def _gateway_video_rejected(provider, upstream: str) -> None:
+    _gateway_reject_part(provider, upstream, "video", "视频")
+
+
+def _gateway_reject_part(provider, upstream: str, kind: str, label: str) -> None:
+    before = len(provider.requests)
+    try:
+        _gateway_run(
+            {
+                "model": "demo-model",
+                "messages": [{
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "听这段"},
+                        {"type": kind, "artifact_id": "a_" + "cd" * 16, "media_type": kind + "/mpeg", "duration_sec": 1},
+                    ],
+                }],
+            },
+            upstream,
+        )
+        fail(f"{label}被静默接受了")
+    except openai_chat.GatewayError as exc:
+        if exc.code != "modality_unsupported" or exc.retryable:
+            fail(f"{label}的错误码或可重试标记不对：{exc.code} {exc.retryable}")
+    if len(provider.requests) != before:
+        fail(f"{label}被静默丢掉后仍然发给了模型")
+
+
+def _gateway_mixed_not_dropped(provider, upstream: str) -> None:
+    before = len(provider.requests)
+    try:
+        _gateway_run(
+            {
+                "model": "demo-model",
+                "messages": [{
+                    "role": "user",
+                    "parts": [
+                        {"type": "text", "text": "只要文字"},
+                        {"type": "audio", "artifact_id": "a_" + "ef" * 16, "media_type": "audio/mpeg", "duration_sec": 2},
+                    ],
+                }],
+            },
+            upstream,
+        )
+        fail("混有音频的请求没有失败")
+    except openai_chat.GatewayError as exc:
+        if exc.code != "modality_unsupported":
+            fail(f"混有音频时错误码不对：{exc.code}")
+    if len(provider.requests) != before:
+        fail("混有音频时把文字悄悄发给了模型")
+
+
+def _gateway_capabilities() -> None:
+    caps = describe("grok-4.7")
+    if caps["model"] != "grok-4.7":
+        fail("能力声明没有带上模型标识")
+    if set(caps["input_modalities"]) != {"text", "image"}:
+        fail("能力声明的输入模态不对")
+    if "audio" in caps["input_modalities"] or "video" in caps["input_modalities"]:
+        fail("能力声明把未实现的模态写进去了")
+    if caps["output_modalities"] != ("text",) or caps["streaming"] is not True:
+        fail("能力声明的输出或流式不对")
+    if caps["context_unit"] != "tokens" or not caps["context_limit"]:
+        fail("能力声明没有上下文上限")
+    if caps["tools"] is not True:
+        fail("能力声明没有工具调用")
+
+
+def _gateway_switch_adapter(provider, upstream: str) -> None:
+    fake = _FakeAdapter()
+    registry.register("fake", fake)
+    registry.bind("echo-1", "fake")
+    before = len(provider.requests)
+    request = {
+        "model": "echo-1",
+        "messages": [{"role": "user", "parts": [{"type": "text", "text": "同一条"}]}],
+    }
+    events = _gateway_run(request, upstream)
+    if fake.seen != ["echo-1"]:
+        fail("换模型标识没有打到已接入的另一个适配器")
+    if not any(event.get("text") == "from-fake" for event in events):
+        fail("另一个适配器没有产出统一事件")
+    if len(provider.requests) != before:
+        fail("绑定了别的适配器仍然打到了 OpenAI 兼容适配器")
+    other = dict(request)
+    other["model"] = "demo-model"
+    events = _gateway_run(other, upstream)
+    if len(provider.requests) != before + 1:
+        fail("同一条请求换回原模型标识没有发给原来的适配器")
+    if _gateway_text_of(events) != "你好":
+        fail("原来的适配器没有回答")
+
+
+def _gateway_retryable() -> None:
+    timeout = openai_chat.GatewayError("timeout", "模型超时了，没有返回完整回答。")
+    if timeout.retryable is not True:
+        fail("超时没有标成可重试")
+    limited = openai_chat._http_error(429, b"{}", SECRET)
+    if limited.retryable is not True or limited.code != "rate_limited":
+        fail("限流没有标成可重试")
+    denied = openai_chat._http_error(401, b"{}", SECRET)
+    if denied.retryable is not False:
+        fail("密钥被拒仍标成可重试")
+    unsupported = openai_chat.GatewayError("modality_unsupported", "这个模型不接受这种输入。")
+    if unsupported.retryable is not False:
+        fail("不支持的模态标成了可重试")
+
+
+def _gateway_ignored_params(provider, upstream: str) -> None:
+    events = _gateway_run(
+        {
+            "model": "demo-model",
+            "messages": [{"role": "user", "parts": [{"type": "text", "text": "你好"}]}],
+            "foo": 1,
+            "made_up": True,
+            "temperature": 0.2,
+        },
+        upstream,
+    )
+    started = events[0]
+    if started.get("type") != "run.started" or set(started.get("ignored_params") or []) != {"foo", "made_up"}:
+        fail("未知生成参数没有记在 run.started")
+    body = provider.requests[-1]["body"]
+    if "foo" in body or "made_up" in body:
+        fail("未知参数被假装生效了")
+    if body.get("temperature") != 0.2:
+        fail("认识的生成参数没有写进供应商请求")
+
+
+def _gateway_legacy_stream_chat(provider, upstream: str) -> None:
+    before = len(provider.requests)
+    gen = openai_chat.stream_chat(
+        base_url=upstream,
+        api_key=SECRET,
+        model="demo-model",
+        messages=[{"role": "user", "content": "你好"}],
+        timeout_sec=2,
+        cancel=threading.Event(),
+    )
+    try:
+        piece = next(gen)
+    finally:
+        gen.close()
+    if piece != "你" or len(provider.requests) != before + 1:
+        fail("旧的 stream_chat 包装坏了")
+
+
+def _gateway_text_of(events: list[dict]) -> str:
+    return "".join(event.get("text") or "" for event in events if event.get("type") == "message.delta")
+
+
+def _gateway_run(request: dict, upstream: str, artifacts=None) -> list[dict]:
+    events = []
+    for event in stream(
+        request,
+        api_key=SECRET,
+        timeout_sec=2,
+        cancel=threading.Event(),
+        artifacts=artifacts,
+        base_url=upstream,
+    ):
+        events.append(event)
+    return events
+
+
+class _FakeAdapter:
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def capabilities(self, model: str) -> dict:
+        return {
+            "model": model,
+            "input_modalities": ("text",),
+            "output_modalities": ("text",),
+            "streaming": True,
+            "tools": False,
+            "context_limit": 1024,
+            "context_unit": "tokens",
+            "max_file_bytes": None,
+            "max_duration_sec": None,
+            "max_images": None,
+        }
+
+    def stream(self, request, **kwargs):
+        self.seen.append(request["model"])
+        yield {"type": "message.delta", "text": "from-fake"}
 
 
 def _live() -> None:
