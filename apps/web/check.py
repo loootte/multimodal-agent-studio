@@ -1141,9 +1141,21 @@ def _image_success(base: str, session_id: str, provider, box: ComfyState, workfl
         fail("不存在的图片没有返回 404")
 
 
+def _image_fields(workflow_path: str) -> dict:
+    fields_path = os.path.join(os.path.dirname(workflow_path), "image.fields.json")
+    with open(fields_path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _field_input(graph: dict, fields: dict, name: str):
+    spec = fields[name]
+    return graph[str(spec["node"])]["inputs"][spec["input"]]
+
+
 def _assert_whitelist(submitted: dict, workflow_path: str, prompt: str) -> None:
     with open(workflow_path, encoding="utf-8") as handle:
         template = json.load(handle)
+    fields = _image_fields(workflow_path)
     graph = submitted.get("prompt")
     if not isinstance(graph, dict) or set(graph) != set(template):
         fail("提交的不是白名单工作流")
@@ -1153,18 +1165,29 @@ def _assert_whitelist(submitted: dict, workflow_path: str, prompt: str) -> None:
             fail("提交时改了节点类型")
         if set((current.get("inputs") or {})) != set((original.get("inputs") or {})):
             fail("提交时改了节点的输入集合")
-    if graph["2"]["inputs"]["text"] != prompt:
+    if _field_input(graph, fields, "positive_prompt") != prompt:
         fail("提示词没有写进白名单文本节点")
-    if graph["4"]["inputs"]["width"] != 1024 or graph["4"]["inputs"]["height"] != 1024:
+    if _field_input(graph, fields, "width") != 1024 or _field_input(graph, fields, "height") != 1024:
         fail("画幅没有按模板填写")
-    if graph["5"]["inputs"]["seed"] != 7:
+    if _field_input(graph, fields, "seed") != 7:
         fail("seed 没有写进模板")
-    if graph["3"]["inputs"]["text"] != template["3"]["inputs"]["text"]:
+    neg = fields["negative_prompt"]
+    if _field_input(graph, fields, "negative_prompt") != template[str(neg["node"])]["inputs"][neg["input"]]:
         fail("没有要求的负向提示词被改了")
-    if graph["5"]["inputs"]["steps"] != template["5"]["inputs"]["steps"]:
+    steps = fields["steps"]
+    if _field_input(graph, fields, "steps") != template[str(steps["node"])]["inputs"][steps["input"]]:
         fail("步数被改了")
-    if graph["1"]["inputs"] != template["1"]["inputs"]:
-        fail("白名单之外的节点被改了")
+    writable = {
+        (str(fields[name]["node"]), fields[name]["input"])
+        for name in ("positive_prompt", "width", "height", "seed")
+    }
+    for node_id, original in template.items():
+        current_inputs = graph[node_id].get("inputs") or {}
+        for key, value in (original.get("inputs") or {}).items():
+            if (str(node_id), key) in writable:
+                continue
+            if current_inputs.get(key) != value:
+                fail("白名单之外的节点被改了")
 
 
 def _image_uncensored(base: str, session_id: str, provider, box: ComfyState, workflow_path: str, directory: str) -> None:
@@ -1355,12 +1378,14 @@ def _assert_bound(directory: str, session_id: str, body: dict, prompt: str, expe
 def _assert_user_prompt(submitted: dict, workflow_path: str, prompt: str, width: int) -> None:
     with open(workflow_path, encoding="utf-8") as handle:
         template = json.load(handle)
+    fields = _image_fields(workflow_path)
     graph = submitted.get("prompt")
     if not isinstance(graph, dict) or set(graph) != set(template):
         fail("审查后的提交不是白名单工作流")
-    if graph["2"]["inputs"]["text"] != prompt:
-        fail(f"提交的提示词不是用户原文：{graph['2']['inputs']['text']}")
-    if graph["4"]["inputs"]["width"] != width:
+    written = _field_input(graph, fields, "positive_prompt")
+    if written != prompt:
+        fail(f"提交的提示词不是用户原文：{written}")
+    if _field_input(graph, fields, "width") != width:
         fail("画幅没有按这次调用填写")
     for node_id, original in template.items():
         current = graph[node_id]
