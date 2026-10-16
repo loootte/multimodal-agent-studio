@@ -17,6 +17,7 @@ class Tool:
         description: str,
         parameters: dict,
         order: int = 1000,
+        mutating: bool = False,
         validate=None,
         call=None,
     ):
@@ -24,6 +25,7 @@ class Tool:
         self.description = description
         self.parameters = parameters
         self.order = order
+        self.mutating = bool(mutating)
         self.validate = validate
         self.call = call
 

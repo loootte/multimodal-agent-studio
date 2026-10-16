@@ -39,6 +39,12 @@ document.querySelector("#toggle-sessions").addEventListener("click", () => {
 });
 document.querySelector("#open-settings").addEventListener("click", openSettings);
 document.querySelector("#close-settings").addEventListener("click", () => settings.close());
+document.querySelector("#toggle-runtime").addEventListener("click", () => {
+  document.querySelector(".app").classList.toggle("runtime-collapsed");
+});
+document.querySelector("#close-runtime").addEventListener("click", () => {
+  document.querySelector(".app").classList.add("runtime-collapsed");
+});
 document.querySelector("#settings-form").addEventListener("submit", saveSettings);
 document.querySelector("#clear-key").addEventListener("click", clearKey);
 document.querySelector("#file").addEventListener("change", (event) => {
@@ -66,6 +72,9 @@ async function boot() {
     }
   } catch (error) {
     showNote("连不上本机聊天服务。");
+  }
+  if (window.matchMedia("(max-width: 960px)").matches) {
+    document.querySelector(".app").classList.add("runtime-collapsed");
   }
   input.focus();
 }
@@ -131,6 +140,7 @@ async function sendMessage() {
     status: "running",
     error: null,
     events: [],
+    runtime: [],
   });
   input.value = "";
   showNote("");
@@ -193,8 +203,11 @@ function onEvent(event) {
     assistant.status = "running";
     assistant.error = null;
     assistant.events = [];
+    assistant.runtime = [];
     state.session.run_id = event.run_id;
     state.session.running = true;
+  } else if (event.type === "runtime.step") {
+    rememberRuntime(assistant, event);
   } else if (event.type === "message.delta") {
     if (state.stopped) return;
     assistant.text += event.text || "";
@@ -233,6 +246,7 @@ function onEvent(event) {
     document.querySelector("#live").textContent = event.message || "";
   }
   renderTranscript();
+  renderRuntime();
   updateButtons();
 }
 
@@ -241,6 +255,7 @@ function resetAssistantForReplay() {
   if (!assistant) return;
   assistant.text = "";
   assistant.events = [];
+  assistant.runtime = [];
   assistant.error = null;
 }
 
@@ -305,7 +320,90 @@ function render() {
   renderSessions();
   renderChrome();
   renderTranscript();
+  renderRuntime();
   updateButtons();
+}
+
+function rememberRuntime(assistant, event) {
+  const steps = assistant.runtime || (assistant.runtime = []);
+  if (event.kind === "model" && event.step) {
+    const found = steps.find((item) => item.kind === "model" && item.step === event.step);
+    if (found) {
+      Object.assign(found, event);
+      return;
+    }
+  }
+  if (event.kind === "tool" && event.name) {
+    const pending = [...steps].reverse().find((item) => item.kind === "tool" && item.name === event.name && item.ms == null);
+    if (pending && event.ms != null) {
+      Object.assign(pending, event);
+      return;
+    }
+  }
+  steps.push({
+    type: event.type,
+    kind: event.kind,
+    name: event.name,
+    ms: event.ms,
+    step: event.step,
+    ok: event.ok,
+    label: event.label,
+  });
+}
+
+function renderRuntime() {
+  const log = document.querySelector("#runtime-log");
+  const status = document.querySelector("#runtime-status");
+  const assistant = currentAssistant();
+  const steps = (assistant && assistant.runtime) || [];
+  log.replaceChildren();
+  if (!steps.length) {
+    status.textContent = state.sending ? "正在询问模型…" : "发送后会列出这一次的模型和工具步骤。";
+    return;
+  }
+  status.textContent = runtimeStatus(steps, state.sending);
+  for (const step of steps) {
+    if (step.kind === "status") continue;
+    const item = document.createElement("li");
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = runtimeKind(step);
+    const body = document.createElement("span");
+    body.textContent = runtimeLine(step);
+    item.append(kind, body);
+    log.append(item);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function runtimeKind(step) {
+  if (step.kind === "model") return "模型";
+  if (step.kind === "tool") return "工具";
+  return "步骤";
+}
+
+function runtimeLine(step) {
+  if (step.kind === "model") {
+    const round = step.step ? `第 ${step.step} 步` : "模型调用";
+    const ms = step.ms != null ? ` · ${step.ms}ms` : " · 进行中";
+    return round + ms;
+  }
+  if (step.kind === "tool") {
+    const name = step.name || "工具";
+    const ms = step.ms != null ? ` · ${step.ms}ms` : " · 进行中";
+    const ok = step.ok === false ? " · 失败" : "";
+    return name + ms + ok;
+  }
+  return step.label || step.kind || "步骤";
+}
+
+function runtimeStatus(steps, sending) {
+  const last = [...steps].reverse().find((item) => item.kind !== "status") || steps[steps.length - 1];
+  if (sending) {
+    if (last && last.kind === "tool" && last.ms == null) return `正在调用 ${last.name || "工具"}…`;
+    return "正在询问模型…";
+  }
+  return `这一次 ${steps.filter((item) => item.kind === "model" || item.kind === "tool").length} 步`;
 }
 
 function renderSessions() {
@@ -497,6 +595,7 @@ async function encodeFile(file) {
 function toolLine(event) {
   if (event.tool === "list_local_content") return "正在查看本机内容";
   if (event.tool === "forget_local_content") return "正在移除本机内容";
+  if (event.tool === "lookup_demo") return "正在查询演示";
   const args = event.arguments || {};
   const aspect = args.aspect_ratio ? ` · ${args.aspect_ratio}` : "";
   if (event.tool === "generate_image") return `正在生成图片${aspect}`;

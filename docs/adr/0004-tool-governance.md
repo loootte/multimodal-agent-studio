@@ -25,8 +25,8 @@
 
 现在已经放进去的文件：
 
-- 本机：`internal/image.py` 的 `generate_image`，`internal/video.py` 的 `generate_video`。参数仍包含画面描述。
-- 外部：`external/local_content.py` 的接受、列出和删除，`external/image.py` 的 `generate_image`。出图只收内容句柄和公开字段。
+- 本机：`internal/image.py` 的 `generate_image`，`internal/video.py` 的 `generate_video`，`internal/demo.py` 的 `lookup_demo`。生成工具参数仍包含画面描述。
+- 外部：`external/local_content.py` 的接受、列出和删除，`external/image.py` 的 `generate_image`，`external/demo.py` 的 `lookup_demo`。出图只收内容句柄和公开字段。会改外部状态的工具标 `mutating`。
 
 MCP 是注册表的进程内投影，不是第二个进程，也不监听端口。消息形状在 `packages/contracts/mcp.py`。`inputSchema` 就是该工具自己声明的 `parameters`。本机投影和外部投影都在 `poc/tools/mcp.py`。
 

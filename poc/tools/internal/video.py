@@ -205,6 +205,7 @@ def tools():
         description=spec_body["description"],
         parameters=spec_body["parameters"],
         order=20,
+        mutating=True,
         validate=validate,
         call=generate,
     )]

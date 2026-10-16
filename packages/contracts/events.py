@@ -1,7 +1,9 @@
 """聊天页用到的统一事件。
 
 文字回答是 run.started、若干 message.delta，然后 message.completed 或 run.failed。
-网关的工具事件是 tool.requested。网页这一刀仍写成 tool_call。
+网关的工具事件是 tool.requested。运行时在写操作前发出 tool.confirm。网页这一刀仍写成 tool_call。
+runtime.step 是聊天页运行过程窗口用的步骤，不结束这一轮。
+budget_exceeded 表示步数、时间或 token 预算用尽。
 文生图写在同一条助手消息上：content_request，用户提交后再是 tool_call、若干 progress，然后 artifact 或 error。
 content_request 也可以收集留在本机的文字或文件。文件不提交给出图。
 这条消息再以 message.completed 或 run.failed 结束，流才算读完。content_request 不是结束。
@@ -15,6 +17,8 @@ EVENT_MESSAGE_COMPLETED = "message.completed"
 EVENT_RUN_FAILED = "run.failed"
 EVENT_CONTENT_REQUEST = "content_request"
 EVENT_TOOL_REQUESTED = "tool.requested"
+EVENT_TOOL_CONFIRM = "tool.confirm"
+EVENT_RUNTIME_STEP = "runtime.step"
 EVENT_TOOL_CALL = "tool_call"
 EVENT_PROGRESS = "progress"
 EVENT_ARTIFACT = "artifact"
@@ -32,6 +36,7 @@ ERROR_CODES = (
     "invalid_tool_call",
     "missing_key",
     "local_content",
+    "budget_exceeded",
 )
 
 HUMAN = {
@@ -44,6 +49,7 @@ HUMAN = {
     "invalid_tool_call": "模型返回了无法识别的工具调用。",
     "missing_key": "还没有配置 API key。请在设置里填写。",
     "local_content": "本地内容留在本机，没有发给模型。",
+    "budget_exceeded": "超过预算，已经停下。",
 }
 
 RETRYABLE = {
@@ -56,4 +62,5 @@ RETRYABLE = {
     "invalid_tool_call": False,
     "missing_key": False,
     "local_content": False,
+    "budget_exceeded": False,
 }

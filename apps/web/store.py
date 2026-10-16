@@ -281,6 +281,7 @@ def _message(role: str, text: str, status: str, message_id: str, run_id: str | N
         "run_id": run_id,
         "error": None,
         "events": [],
+        "runtime": [],
     }
 
 
@@ -400,6 +401,18 @@ class SessionStore:
             for message in session["messages"]:
                 if message.get("message_id") == message_id:
                     message.setdefault("events", []).append(dict(event))
+                    break
+            session["updated_at"] = _now()
+            self._write(session)
+
+    def append_runtime(self, session_id: str, message_id: str, event: dict) -> None:
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return
+            for message in session["messages"]:
+                if message.get("message_id") == message_id:
+                    message.setdefault("runtime", []).append(dict(event))
                     break
             session["updated_at"] = _now()
             self._write(session)
@@ -542,6 +555,8 @@ class SessionStore:
                     message["text"] = _scrub_text(message["text"], secrets)
                 if isinstance(message.get("events"), list):
                     message["events"] = _scrub_value(message["events"], secrets)
+                if isinstance(message.get("runtime"), list):
+                    message["runtime"] = _scrub_value(message["runtime"], secrets)
             session["contents"] = kept
             session["updated_at"] = _now()
             self._write(session)

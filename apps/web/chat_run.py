@@ -26,12 +26,15 @@ from packages.contracts.events import (
     EVENT_PROGRESS,
     EVENT_RUN_FAILED,
     EVENT_RUN_STARTED,
+    EVENT_RUNTIME_STEP,
     EVENT_TOOL_CALL,
     EVENT_TOOL_REQUESTED,
     HUMAN,
     TERMINAL_EVENTS,
 )
 from services.gateway import GatewayError, stream as gateway_stream
+from services.runtime import execute_tool, traces_for
+from services.runtime.loop import run as runtime_run
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -41,6 +44,7 @@ SYSTEM = (
     "出图时 purpose 填 image_prompt，kind 填 text。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
+    "只读演示查询调用 lookup_demo，传入 topic。"
     "要用文字句柄出图时，再调用 generate_image。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
@@ -67,6 +71,12 @@ MAX_INPUT = 32000
 MAX_MESSAGE = 16000
 MAX_TURNS = 40
 MAX_TOTAL = 100000
+_WEB_TOOLS = (
+    "accept_local_content",
+    "list_local_content",
+    "forget_local_content",
+    "generate_image",
+)
 
 
 class RequestError(Exception):
@@ -75,6 +85,9 @@ class RequestError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+
 
 
 class Run:
@@ -344,16 +357,93 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
 
 
 def _generate_text_turn(app, session_id, message_id, run, provider, session, user_text) -> str:
+    request = _gateway_request(provider, _turn_messages(app, session_id, session))
+    spoken: list[str] = []
+    seen = 0
+    claimed: dict = {}
+
+    def take(name, arguments):
+        if name not in _WEB_TOOLS:
+            return False
+        claimed["name"] = name
+        claimed["arguments"] = arguments
+        claimed["spoken"] = "".join(spoken)
+        return True
+
+    def flush_traces() -> None:
+        nonlocal seen
+        items = traces_for(run.run_id)
+        for entry in items[seen:]:
+            seen += 1
+            _emit_runtime(app, session_id, message_id, run, entry, persist=True)
+
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "status", "label": "正在询问模型"},
+        persist=False,
+    )
     try:
-        tool_call, text = _ask(app, session_id, message_id, run, provider, _turn_messages(app, session_id, session), False)
+        for event in runtime_run(
+            request,
+            api_key=provider["api_key"],
+            cancel=run.cancel,
+            timeout_sec=app.timeout_sec,
+            take=take,
+            run_id=run.run_id,
+            local_bodies=app.sessions.local_bodies(session_id),
+            base_url=provider["base_url"],
+        ):
+            flush_traces()
+            kind = event.get("type")
+            if kind == EVENT_RUN_STARTED:
+                continue
+            if kind == EVENT_MESSAGE_DELTA:
+                piece = event.get("text") or ""
+                if not piece:
+                    continue
+                spoken.append(piece)
+                app.sessions.update_message(
+                    session_id, message_id, text="".join(spoken), status="running", error=None,
+                )
+                run.push({"type": EVENT_MESSAGE_DELTA, "text": piece})
+            elif kind == EVENT_TOOL_REQUESTED:
+                name = event.get("name") or ""
+                _emit_runtime(
+                    app, session_id, message_id, run,
+                    {"kind": "tool", "name": name, "label": "调用 " + name},
+                    persist=False,
+                )
+                if name == "lookup_demo":
+                    _push_saved(app, session_id, message_id, run, {
+                        "type": EVENT_TOOL_CALL,
+                        "tool": name,
+                        "arguments": event.get("arguments") if isinstance(event.get("arguments"), dict) else {},
+                        "message_id": message_id,
+                    })
+            elif kind == EVENT_MESSAGE_COMPLETED:
+                flush_traces()
+                _complete(app, session_id, message_id, run, event.get("text") or "".join(spoken))
+                return "completed"
+            elif kind == EVENT_RUN_FAILED:
+                flush_traces()
+                code = str(event.get("code") or "provider_error")
+                message = str(event.get("message") or HUMAN.get(code) or HUMAN["provider_error"])
+                _fail(app, session_id, message_id, run, GatewayError(code, message), "".join(spoken))
+                return "cancelled" if code == "cancelled" else "failed"
+        flush_traces()
+        if claimed:
+            tool_call = {
+                "type": EVENT_TOOL_CALL,
+                "name": claimed.get("name"),
+                "arguments": claimed.get("arguments") if isinstance(claimed.get("arguments"), dict) else {},
+            }
+            return _dispatch_tool(
+                app, session_id, message_id, run, provider, user_text, tool_call, claimed.get("spoken") or "",
+            )
+        _complete(app, session_id, message_id, run, "".join(spoken))
+        return "completed"
     except GatewayError as exc:
         return _fail_status(app, session_id, message_id, run, exc)
-    if tool_call is None:
-        _complete(app, session_id, message_id, run, text)
-        return "completed"
-    if run.cancel.is_set():
-        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    return _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_call, text)
 
 
 def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_call, text) -> str:
@@ -363,7 +453,7 @@ def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_c
         return _continue_after_content(
             app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
         )
-    if name in ("list_local_content", "forget_local_content"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
         return _run_bound(app, session_id, message_id, run, user_text, tool_call, False)
@@ -375,6 +465,11 @@ def _continue_after_content(
 ) -> str:
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "tool", "name": "accept_local_content", "ms": 0, "ok": True},
+        persist=True,
+    )
     run.begin_content_wait(kind)
     hint = "请选择要留在本机的文件。" if kind == "file" else "请输入要留在本机的内容。"
     _push_saved(app, session_id, message_id, run, {
@@ -436,7 +531,7 @@ def _continue_after_content(
             return _refuse_file_image(app, session_id, message_id, run, tool_call)
         bound = _bind_submitted(submitted, tool_call)
         return _finish_image(app, session_id, message_id, run, reply, bound)
-    if name in ("list_local_content", "forget_local_content"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     _complete(app, session_id, message_id, run, reply)
     return "completed"
@@ -481,8 +576,16 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         if handle:
             result["handle"] = handle
         arguments = {"content_handle": handle} if handle else {}
+    elif name == "lookup_demo":
+        arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        result = execute_tool(name, arguments)
     else:
         return None
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "tool", "name": name, "ms": 0, "ok": True},
+        persist=True,
+    )
     _push_saved(app, session_id, message_id, run, {
         "type": EVENT_TOOL_CALL,
         "tool": name,
@@ -496,6 +599,12 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
 def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) -> tuple[dict | None, str]:
     parts: list[str] = []
     tool_call = None
+    started = time.monotonic()
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "status", "label": "正在询问模型"},
+        persist=False,
+    )
     for event in gateway_stream(
         _gateway_request(provider, messages),
         api_key=provider["api_key"],
@@ -521,6 +630,18 @@ def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) 
                 "arguments": event.get("arguments") or {},
                 "call_id": event.get("call_id"),
             }
+    elapsed = int((time.monotonic() - started) * 1000)
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "model", "name": provider.get("model") or "", "ms": elapsed},
+        persist=True,
+    )
+    if tool_call:
+        _emit_runtime(
+            app, session_id, message_id, run,
+            {"kind": "tool", "name": tool_call.get("name") or "", "label": "调用 " + (tool_call.get("name") or "")},
+            persist=False,
+        )
     return tool_call, "".join(parts)
 
 
@@ -620,7 +741,18 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
         progress["message_id"] = message_id
         _push_saved(app, session_id, message_id, run, progress)
 
+    started = time.monotonic()
     result = image_run.generate(session_id, arguments, on_event)
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {
+            "kind": "tool",
+            "name": "generate_image",
+            "ms": int((time.monotonic() - started) * 1000),
+            "ok": bool(isinstance(result, dict) and result.get("ok")),
+        },
+        persist=True,
+    )
     if run.cancel.is_set():
         return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
     if not isinstance(result, dict) or not result.get("ok"):
@@ -665,6 +797,26 @@ def _error_finish(app, session_id: str, message_id: str, run: Run, code: str, me
 
 def _push_saved(app, session_id: str, message_id: str, run: Run, event: dict) -> None:
     app.sessions.append_event(session_id, message_id, event)
+    run.push(event)
+
+
+def _emit_runtime(app, session_id: str, message_id: str, run: Run, entry: dict, *, persist: bool) -> None:
+    kind = entry.get("kind") or entry.get("type") or "status"
+    if kind not in ("model", "tool", "status"):
+        kind = "status"
+    event = {
+        "type": EVENT_RUNTIME_STEP,
+        "run_id": run.run_id,
+        "message_id": message_id,
+        "kind": kind,
+        "name": entry.get("name") or entry.get("model") or "",
+        "ms": entry.get("ms"),
+        "step": entry.get("step"),
+        "ok": entry.get("ok"),
+        "label": entry.get("label") or "",
+    }
+    if persist:
+        app.sessions.append_runtime(session_id, message_id, event)
     run.push(event)
 
 
