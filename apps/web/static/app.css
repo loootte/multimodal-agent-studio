@@ -50,9 +50,15 @@ button.primary, #send, #settings-form button[type="submit"] {
 
 .app {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 260px 1fr 300px;
   min-height: 100vh;
 }
+
+.app.runtime-collapsed {
+  grid-template-columns: 260px 1fr;
+}
+
+.app.runtime-collapsed .runtime { display: none; }
 
 .sidebar {
   background: #ebe4d8;
@@ -63,7 +69,7 @@ button.primary, #send, #settings-form button[type="submit"] {
   gap: 0.8rem;
 }
 
-.sidebar-head, .top, .composer-row, .dialog-actions {
+.sidebar-head, .top, .composer-row, .dialog-actions, .runtime-head {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -104,9 +110,55 @@ button.primary, #send, #settings-form button[type="submit"] {
   white-space: nowrap;
 }
 
-.session .time, .kbd, .hint, #modality-line, .empty {
+.session .time, .kbd, .hint, #modality-line, .empty, .runtime-status {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.runtime {
+  background: #ebe4d8;
+  border-left: 1px solid var(--line);
+  padding: 1rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+  min-height: 100vh;
+}
+
+.runtime-head { justify-content: space-between; }
+
+.runtime-head strong {
+  font-family: Palatino, "Palatino Linotype", "Songti SC", serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+#runtime-status { margin: 0; }
+
+#runtime-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+}
+
+#runtime-log li {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.88rem;
+  box-shadow: var(--shadow);
+}
+
+#runtime-log .kind {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.12rem;
 }
 
 main {
@@ -281,8 +333,21 @@ dialog input {
   border: 0;
 }
 
+@media (max-width: 960px) {
+  .app, .app.runtime-collapsed { grid-template-columns: 260px 1fr; }
+  .runtime {
+    display: none;
+    position: fixed;
+    z-index: 3;
+    inset: 0 0 0 auto;
+    width: min(320px, 90vw);
+    box-shadow: var(--shadow);
+  }
+  .app:not(.runtime-collapsed) .runtime { display: flex; }
+}
+
 @media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; }
+  .app, .app.runtime-collapsed { grid-template-columns: 1fr; }
   .menu { display: inline-flex; }
   .sidebar {
     display: none;

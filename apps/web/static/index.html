@@ -22,6 +22,7 @@
           <p id="model-line">模型</p>
           <p id="modality-line">接受文字</p>
         </div>
+        <button type="button" class="ghost" id="toggle-runtime">过程</button>
         <button type="button" id="open-settings">设置</button>
       </header>
       <div id="transcript" role="log"></div>
@@ -39,6 +40,14 @@
         <p class="kbd">Enter 发送，Shift+Enter 换行。生成时按 Esc 停止。</p>
       </form>
     </main>
+    <aside class="runtime" id="runtime">
+      <div class="runtime-head">
+        <strong>运行过程</strong>
+        <button type="button" class="ghost" id="close-runtime">收起</button>
+      </div>
+      <p id="runtime-status" class="runtime-status">发送后会列出这一次的模型和工具步骤。</p>
+      <ol id="runtime-log"></ol>
+    </aside>
   </div>
   <p id="live" class="sr-only" aria-live="polite"></p>
   <dialog id="settings">

@@ -37,6 +37,7 @@ def run(
     confirm=None,
     execute=None,
     mutating=None,
+    take=None,
     artifacts=None,
     local_bodies=None,
     base_url=None,
@@ -141,12 +142,13 @@ def run(
             confirm,
             execute,
             mutating,
+            take,
         )
         if stopped:
             return
 
 
-def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mutating):
+def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mutating, take=None):
     name = tool_call.get("name") or ""
     arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
     yield {
@@ -156,6 +158,8 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         "arguments": arguments,
         "call_id": tool_call.get("call_id"),
     }
+    if callable(take) and take(name, arguments):
+        return True
     problem = validate_arguments(name, arguments)
     if problem:
         result = problem

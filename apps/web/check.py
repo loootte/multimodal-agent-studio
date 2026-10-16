@@ -184,6 +184,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "prompt": "不该用的文件描述",
             })
             return
+        if mode == "demo":
+            user = self._last_user()
+            if "工具结果" in user or "studio-demo" in user:
+                self._piece(_delta(content="演示完成"))
+                self._done()
+                return
+            self._emit_tool("lookup_demo", {"topic": "runtime"})
+            return
         self._piece(b"")
 
     def _last_user(self) -> str:
@@ -1026,11 +1034,15 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     status, page = request("GET", base + "/")
     if status != 200 or "发送" not in page or "停止" not in page:
         fail("聊天页没有发送和停止")
+    if "运行过程" not in page or 'id="runtime-log"' not in page:
+        fail("聊天页没有运行过程窗口")
     if 'method="dialog"' in page or "settings-error" not in page:
         fail("设置保存失败时对话框会自己关掉")
     status, script = request("GET", base + "/static/app.js")
     if status != 200 or "message.delta" not in script or "tool_call" not in script or "Enter" not in script:
         fail("页面脚本没有接上流式事件")
+    if "runtime.step" not in script or "renderRuntime" not in script:
+        fail("页面脚本没有接上运行过程")
     if "innerHTML" in script or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "content_request" not in script or "加入本地内容并继续" not in script:
@@ -1059,9 +1071,27 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     events = _speak(base, session_id, "第一句")
     if _assistant_text(events) != "你好":
         fail("流式增量没有拼成同一条回答")
+    if not any(event.get("type") == "runtime.step" for event in events):
+        fail("文字回答没有把运行过程推到页面")
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     if stored["messages"][-1]["text"] != "你好" or stored["messages"][-1]["status"] != "completed":
         fail("刷新后回答不在")
+    if not any(item.get("kind") == "model" for item in stored["messages"][-1].get("runtime") or []):
+        fail("刷新后运行过程不在")
+    provider.mode = "demo"
+    demo_events = _speak(base, session_id, "查一下演示")
+    if _assistant_text(demo_events) != "演示完成":
+        fail("只读演示没有在工具返回后给出回答")
+    demo_steps = [
+        event.get("kind")
+        for event in demo_events
+        if event.get("type") == "runtime.step" and event.get("kind") in ("model", "tool") and event.get("ms") is not None
+    ]
+    if demo_steps != ["model", "tool", "model"]:
+        fail(f"运行过程没有列出模型到工具再到回答：{demo_steps}")
+    if not any(event.get("name") == "lookup_demo" for event in demo_events if event.get("type") == "runtime.step"):
+        fail("运行过程没有写出 lookup_demo")
+    provider.mode = "ok"
     call = provider.requests[-1]
     if call["path"] != "/v1/chat/completions" or call["auth"] != f"Bearer {SECRET}":
         fail("没有按 Chat Completions 带上密钥")
