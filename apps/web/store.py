@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -14,13 +15,18 @@ import time
 import urllib.parse
 import uuid
 
+from packages.artifacts import ArtifactError, ArtifactStore
 from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 
 _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
 _MEDIA = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
+_REF = re.compile(r"(?:[ac]_[0-9a-f]{32}|art_[0-9a-f]{32})")
 _PURPOSES = ("image_prompt", "keep")
 MAX_FILE = 262144
 MAX_ATTACHMENT = 8 * 1024 * 1024
+MEMORY_KEEP = 6
+MEMORY_LINE = 80
+MEMORY_TOTAL = 800
 
 
 class StoreError(Exception):
@@ -360,6 +366,72 @@ def _public_attachment(record: dict) -> dict:
     }
 
 
+def _cover_local(text: str, bodies: list[tuple[str, str]]) -> str:
+    for body, handle in bodies:
+        if body in text:
+            return f"本地内容句柄 {handle}。正文留在本机。"
+    return text
+
+
+def _build_memory(session: dict) -> dict:
+    messages = []
+    for message in session.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get("status") == "running":
+            continue
+        if message.get("role") not in ("user", "assistant"):
+            continue
+        messages.append(message)
+    if len(messages) <= MEMORY_KEEP:
+        return {"summary": "", "refs": []}
+    handles = {}
+    bodies = []
+    for item in session.get("contents") or []:
+        if not isinstance(item, dict):
+            continue
+        handle = item.get("handle")
+        text = item.get("text")
+        if item.get("message_id") and isinstance(handle, str):
+            handles[item["message_id"]] = handle
+        if isinstance(text, str) and len(text) >= 8 and isinstance(handle, str):
+            bodies.append((text, handle))
+    bodies.sort(key=lambda pair: len(pair[0]), reverse=True)
+    refs = []
+    lines = []
+    for message in messages[:-MEMORY_KEEP]:
+        text = message.get("text") or ""
+        message_id = message.get("message_id")
+        if message.get("role") == "user" and message_id in handles:
+            text = f"本地内容句柄 {handles[message_id]}"
+        else:
+            if message.get("role") == "assistant" and not str(text).strip():
+                error = message.get("error") or {}
+                text = error.get("message") or ""
+            text = _cover_local(text, bodies)
+        text = str(text).replace("\n", " ").strip()[:MEMORY_LINE]
+        if text:
+            who = "用户" if message.get("role") == "user" else "助手"
+            lines.append(f"{who}：{text}")
+        for item in message.get("attachments") or []:
+            handle = item.get("handle") if isinstance(item, dict) else None
+            if isinstance(handle, str) and handle not in refs:
+                refs.append(handle)
+        for event in message.get("events") or []:
+            if not isinstance(event, dict) or event.get("type") != "artifact":
+                continue
+            art_id = event.get("artifact_id")
+            if isinstance(art_id, str) and art_id not in refs:
+                refs.append(art_id)
+        for found in _REF.findall(text):
+            if found not in refs:
+                refs.append(found)
+    summary = "；".join(lines)
+    if len(summary) > MEMORY_TOTAL:
+        summary = summary[:MEMORY_TOTAL]
+    return {"summary": summary, "refs": refs[:40]}
+
+
 def _message(role: str, text: str, status: str, message_id: str, run_id: str | None, attachments=None) -> dict:
     items = []
     for item in attachments or []:
@@ -380,8 +452,10 @@ def _message(role: str, text: str, status: str, message_id: str, run_id: str | N
 
 
 class SessionStore:
-    def __init__(self, root: str):
+    def __init__(self, root: str, artifacts: ArtifactStore | None = None):
         self.root = root
+        parent = os.path.dirname(os.path.abspath(root))
+        self.artifacts = artifacts if artifacts is not None else ArtifactStore(os.path.join(parent, "artifacts"))
         self._lock = threading.RLock()
         os.makedirs(root, exist_ok=True)
         self._recover()
@@ -396,6 +470,7 @@ class SessionStore:
             "created_at": now,
             "updated_at": now,
             "messages": [],
+            "memory": {"summary": "", "refs": []},
         }
         with self._lock:
             self._write(session)
@@ -554,19 +629,28 @@ class SessionStore:
             return _public_content(record)
 
     def add_content(self, session_id: str, text: str, purpose: str = "keep") -> dict:
-        """对话框提交的正文。每次都是新的随机句柄，不覆盖已有记录。"""
+        """对话框提交的正文。同一会话里相同正文和用途复用句柄。"""
         check_id(session_id, "会话")
+        purpose = clean_purpose(purpose)
         with self._lock:
             session = self._load_path(self._path(session_id))
             if session is None:
                 raise StoreError("找不到这个会话。")
+            for item in session.get("contents") or []:
+                if (
+                    isinstance(item, dict)
+                    and _kind_of(item) == "text"
+                    and item.get("purpose") == purpose
+                    and item.get("text") == text
+                ):
+                    return _public_content(item)
             record = {
                 "handle": new_id("c_"),
                 "type": "text",
                 "kind": "text",
                 "media_type": "text/plain",
                 "size": len(text.encode("utf-8")),
-                "purpose": clean_purpose(purpose),
+                "purpose": purpose,
                 "text": text,
                 "message_id": "",
             }
@@ -576,91 +660,78 @@ class SessionStore:
             return _public_content(record)
 
     def add_file(self, session_id: str, data: bytes, media_type: str, purpose: str = "keep") -> dict:
-        """文件字节写在本会话目录。记录里没有路径、原始文件名和字节。"""
+        """文件字节进工件库。记录里没有路径、原始文件名和字节。同一会话相同字节复用句柄。"""
         check_id(session_id, "会话")
         if not isinstance(data, bytes) or not data:
             raise StoreError("空文件。")
         if len(data) > MAX_FILE:
             raise StoreError("太大。")
-        handle = new_id("c_")
-        directory = os.path.join(self.root, session_id, "files")
-        os.makedirs(directory, exist_ok=True)
-        target = os.path.join(directory, handle)
-        temporary = target + ".part"
-        try:
-            with open(temporary, "wb") as raw:
-                raw.write(data)
-            os.replace(temporary, target)
-        except OSError as exc:
-            try:
-                os.remove(temporary)
-            except OSError:
-                pass
-            raise StoreError("没能留下这个文件。") from exc
-        record = {
-            "handle": handle,
-            "type": "file",
-            "kind": "file",
-            "media_type": clean_media_type(media_type),
-            "size": len(data),
-            "purpose": clean_purpose(purpose),
-            "message_id": "",
-        }
+        purpose = clean_purpose(purpose)
+        media = clean_media_type(media_type)
+        digest = hashlib.sha256(data).hexdigest()
         with self._lock:
             session = self._load_path(self._path(session_id))
             if session is None:
-                try:
-                    os.remove(target)
-                except OSError:
-                    pass
                 raise StoreError("找不到这个会话。")
+            for item in session.get("contents") or []:
+                if (
+                    isinstance(item, dict)
+                    and _kind_of(item) == "file"
+                    and item.get("purpose") == purpose
+                    and item.get("checksum") == digest
+                ):
+                    return _public_content(item)
+            try:
+                self.artifacts.put(data)
+            except ArtifactError as exc:
+                raise StoreError("没能留下这个文件。") from exc
+            record = {
+                "handle": new_id("c_"),
+                "type": "file",
+                "kind": "file",
+                "media_type": media,
+                "size": len(data),
+                "purpose": purpose,
+                "checksum": digest,
+                "message_id": "",
+            }
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
             self._write(session)
-        return _public_content(record)
+            return _public_content(record)
 
     def add_attachment(self, session_id: str, data: bytes, media_type: str, name: str = "") -> dict:
-        """对话附件。句柄是 a_ 加随机十六进制。不进本地内容库，也不进出口检查。"""
+        """对话附件。字节进工件库。同一会话相同字节复用句柄。"""
         check_id(session_id, "会话")
         if not isinstance(data, bytes) or not data:
             raise StoreError("空文件。")
         if len(data) > MAX_ATTACHMENT:
             raise StoreError("太大。")
         media = clean_media_type(media_type)
-        handle = new_id("a_")
-        directory = os.path.join(self.root, session_id, "files")
-        os.makedirs(directory, exist_ok=True)
-        target = os.path.join(directory, handle)
-        temporary = target + ".part"
-        try:
-            with open(temporary, "wb") as raw:
-                raw.write(data)
-            os.replace(temporary, target)
-        except OSError as exc:
-            try:
-                os.remove(temporary)
-            except OSError:
-                pass
-            raise StoreError("没能留下这个文件。") from exc
-        record = {
-            "handle": handle,
-            "kind": kind_from_media(media),
-            "media_type": media,
-            "size": len(data),
-            "name": clean_filename(name),
-        }
+        digest = hashlib.sha256(data).hexdigest()
         with self._lock:
             session = self._load_path(self._path(session_id))
             if session is None:
-                try:
-                    os.remove(target)
-                except OSError:
-                    pass
                 raise StoreError("找不到这个会话。")
+            for item in session.get("attachments") or []:
+                if isinstance(item, dict) and item.get("checksum") == digest:
+                    return _public_attachment(item)
+            try:
+                self.artifacts.put(data)
+            except ArtifactError as exc:
+                raise StoreError("没能留下这个文件。") from exc
+            record = {
+                "handle": new_id("a_"),
+                "kind": kind_from_media(media),
+                "media_type": media,
+                "size": len(data),
+                "name": clean_filename(name),
+                "checksum": digest,
+            }
             session.setdefault("attachments", []).append(record)
             session["updated_at"] = _now()
             self._write(session)
-        return _public_attachment(record)
+            return _public_attachment(record)
 
     def attachment_info(self, session_id: str, handle: str) -> dict | None:
         item = self._find_attachment(session_id, handle)
@@ -672,7 +743,7 @@ class SessionStore:
         item = self._find_attachment(session_id, handle)
         if item is None:
             return None
-        return self._read_file(session_id, handle)
+        return self._read_blob(item, session_id, handle)
 
     def _find_attachment(self, session_id: str, handle: str) -> dict | None:
         if not isinstance(handle, str) or not _ID.fullmatch(handle):
@@ -723,7 +794,7 @@ class SessionStore:
                 if isinstance(text, str) and text:
                     secrets.append(text)
             else:
-                data = self._read_file(session_id, handle)
+                data = self._read_blob(found, session_id, handle)
                 if data:
                     secrets.extend(_file_secrets(data))
             for message in session.get("messages") or []:
@@ -733,6 +804,8 @@ class SessionStore:
                     message["events"] = _scrub_value(message["events"], secrets)
                 if isinstance(message.get("runtime"), list):
                     message["runtime"] = _scrub_value(message["runtime"], secrets)
+            if isinstance(session.get("memory"), dict):
+                session["memory"] = _scrub_value(session["memory"], secrets)
             session["contents"] = kept
             session["updated_at"] = _now()
             self._write(session)
@@ -760,7 +833,107 @@ class SessionStore:
         item = self._find_content(session_id, handle)
         if item is None or _kind_of(item) != "file":
             return None
-        return self._read_file(session_id, handle)
+        return self._read_blob(item, session_id, handle)
+
+    def retrieve(self, session_id: str, query: str) -> list[dict]:
+        """本会话检索。结果只有公开字段和可打开的地址，没有正文或字节。"""
+        check_id(session_id, "会话")
+        needle = query.strip().lower() if isinstance(query, str) else ""
+        if not needle:
+            return []
+        session = self.get(session_id)
+        found = []
+        seen = set()
+
+        def take(item: dict) -> None:
+            source = item.get("source_id")
+            if not isinstance(source, str) or source in seen:
+                return
+            seen.add(source)
+            found.append(item)
+
+        for item in session.get("contents") or []:
+            if not isinstance(item, dict):
+                continue
+            public = _public_content(item)
+            hay = " ".join(
+                str(public.get(key) or "")
+                for key in ("handle", "kind", "type", "media_type", "purpose")
+            )
+            body = item.get("text") if isinstance(item.get("text"), str) else ""
+            if needle not in hay.lower() and needle not in body.lower():
+                continue
+            record = {
+                "source_id": public.get("handle"),
+                "kind": public.get("kind"),
+                "media_type": public.get("media_type"),
+                "size": public.get("size"),
+                "purpose": public.get("purpose"),
+            }
+            if public.get("kind") == "file" and isinstance(public.get("handle"), str):
+                record["url"] = f"/api/sessions/{session_id}/contents/{public['handle']}"
+            take(record)
+        for item in session.get("attachments") or []:
+            if not isinstance(item, dict):
+                continue
+            public = _public_attachment(item)
+            hay = " ".join(
+                str(public.get(key) or "")
+                for key in ("handle", "kind", "media_type", "name")
+            )
+            if needle not in hay.lower():
+                continue
+            handle = public.get("handle")
+            record = {
+                "source_id": handle,
+                "kind": public.get("kind"),
+                "media_type": public.get("media_type"),
+                "size": public.get("size"),
+                "name": public.get("name"),
+            }
+            if isinstance(handle, str):
+                record["url"] = f"/api/sessions/{session_id}/attachments/{handle}"
+            take(record)
+        for message in session.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            for event in message.get("events") or []:
+                if not isinstance(event, dict) or event.get("type") != "artifact":
+                    continue
+                art_id = event.get("artifact_id")
+                if not isinstance(art_id, str) or not art_id:
+                    continue
+                hay = " ".join(
+                    (
+                        art_id,
+                        str(event.get("media") or ""),
+                        str(event.get("media_type") or ""),
+                    )
+                )
+                if needle not in hay.lower():
+                    continue
+                url = event.get("url")
+                if not isinstance(url, str) or not url:
+                    url = f"/sessions/{session_id}/artifacts/{art_id}"
+                take({
+                    "source_id": art_id,
+                    "kind": event.get("media") or "image",
+                    "media_type": event.get("media_type") or "image/png",
+                    "url": url,
+                })
+        return found
+
+    def refresh_memory(self, session_id: str) -> dict:
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return {"summary": "", "refs": []}
+            memory = _build_memory(session)
+            session["memory"] = memory
+            session["updated_at"] = _now()
+            self._write(session)
+            return memory
 
     def secret_pairs(self, session_id: str) -> list[tuple[str, str]]:
         try:
@@ -775,7 +948,7 @@ class SessionStore:
             if not isinstance(handle, str):
                 continue
             if _kind_of(item) == "file":
-                data = self._read_file(session_id, handle)
+                data = self._read_blob(item, session_id, handle)
                 if data:
                     pairs.extend((secret, handle) for secret in _file_secrets(data))
                 continue
@@ -801,6 +974,14 @@ class SessionStore:
 
     def _file_path(self, session_id: str, handle: str) -> str:
         return os.path.join(self.root, session_id, "files", handle)
+
+    def _read_blob(self, item: dict, session_id: str, handle: str) -> bytes | None:
+        checksum = item.get("checksum")
+        if isinstance(checksum, str) and checksum:
+            data = self.artifacts.get(checksum)
+            if data is not None:
+                return data
+        return self._read_file(session_id, handle)
 
     def _read_file(self, session_id: str, handle: str) -> bytes | None:
         if not isinstance(session_id, str) or not _ID.fullmatch(session_id):

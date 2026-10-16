@@ -17,7 +17,7 @@ Agent 运行时
 工件库与会话存储
 ```
 
-下面先写目标分层，再写每一层现在落到哪些文件。`services/tools`、`packages/artifacts`、`evals` 和 `ops` 还没有建。
+下面先写目标分层，再写每一层现在落到哪些文件。`services/tools`、`evals` 和 `ops` 还没有建。
 
 ## 一次请求
 
@@ -48,14 +48,14 @@ Agent 运行时
 
 ## 现在的一次本地内容
 
-没有出图关键词、但用户要求把内容留在本机时，走这一条。专用工具仍在这一个网页进程里。不新建 MCP 服务器、数据库、`services/tools` 或 `packages/artifacts`。MCP 只作为本进程里的契约投影，见 [ADR 0004](adr/0004-tool-governance.md)。
+没有出图关键词、但用户要求把内容留在本机时，走这一条。专用工具仍在这一个网页进程里。不新建 MCP 服务器、数据库或 `services/tools`。文件字节进 `packages/artifacts`。MCP 只作为本进程里的契约投影，见 [ADR 0004](adr/0004-tool-governance.md)。
 
 1. `app.js` 把说明文字 `POST` 到 `/api/sessions/{session_id}/messages`。要留下的正文不必写在这句里。对话附件是另一条路径：先上传到本会话，发送时只带句柄。
 2. `chat_run.py` 把这句说明交给模型。模型调用 `accept_local_content`。`purpose` 只接受 `image_prompt` 或 `keep`，其他文字丢掉。`kind` 是 `text` 或 `file`，不填则是 `text`。
 3. `content_request` 带到页面。`kind` 为 `text` 时是文本框，为 `file` 时是文件选择。`app.js` 不用 `innerHTML`。提交文件时不带原始文件名。
 4. 页面 `POST /api/runs/{run_id}/content`。文字进 `chat_run.submit_content`，文件进 `chat_run.submit_file`。响应只有 `ok`，不回正文、字节、路径或句柄。
-5. `store.py` 新建随机句柄，形如 `c_` 加十六进制，不用正文或字节的哈希。文字写在会话 JSON 的 `contents`。文件字节写在 `apps/web/data/sessions/{session_id}/files/{handle}`。记录是句柄、种类、媒体类型、大小和用途。
-6. 下一次模型请求只有句柄、种类和大小。模型可以调用 `list_local_content` 或 `forget_local_content`。回到模型的结果只有句柄、种类、媒体类型、大小、用途和状态。
+5. `store.py` 新建随机句柄，形如 `c_` 加十六进制，不用正文或字节的哈希。同一会话里相同正文或相同文件字节复用已有句柄。文字写在会话 JSON 的 `contents`。文件字节写在 `packages/artifacts` 的校验和库里。记录是句柄、种类、媒体类型、大小、用途和校验和。
+6. 下一次模型请求只有句柄、种类和大小。模型可以调用 `list_local_content`、`retrieve_local` 或 `forget_local_content`。回到模型的结果只有句柄、种类、媒体类型、大小、用途、状态和可打开的地址。检索结果带来源标识，页面能点开。
 7. `forget_content` 删掉本会话的记录和文件字节，并把已经出现在本会话消息里的正文换成一句不含正文的说明。别的会话列出、读取或删除，都像没有这枚句柄。
 8. 若接着调用 `generate_image`：文字句柄按上面的出图注入。文件句柄到此结束，不调用 `image_run.generate`。
 9. `openai_chat.py` 在打开连接前检查。已入库的文字、文件的文本，以及文件字节的 base64，长度不少于 8 且出现在工具契约以外，就以 `local_content` 失败。
@@ -105,17 +105,18 @@ Agent 运行时
 | `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
 | `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
 | `poc/tools/internal/demo.py`、`poc/tools/external/demo.py` | 只读演示 `lookup_demo` |
+| `poc/tools/external/retrieve.py` | 检索本会话 `retrieve_local`。只收查询词，结果带来源标识 |
 
 现在一轮回答仍放在网页进程里：
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content` 和 `forget_local_content` 只操作本会话。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
+| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content`、`retrieve_local` 和 `forget_local_content` 只操作本会话。发给模型的是会话记忆加最近几条，不含本地正文。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
 | `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
 
-`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`forget_local_content`、`generate_image` 和 `lookup_demo`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
+`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content`、`generate_image` 和 `lookup_demo`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
 
-`generate_video` 仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`。不把第 4 阶段标成完成。
+`generate_video` 仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`。不把第 5 或第 6 阶段标成完成。
 
 ### 模型网关
 
@@ -131,6 +132,7 @@ Agent 运行时
 | `packages/contracts/events.py` | 界面、运行时和网关共用的事件名、错误码、人话和 `retryable`。网关工具事件是 `tool.requested`。`content_request` 不是结束事件 |
 | `packages/contracts/mcp.py` | 进程内 MCP 的 `tools/list` 和 `tools/call` 形状。不监听端口 |
 | `packages/contracts/__init__.py`、`packages/__init__.py` | 标明这是共享契约，不在每一边各写一套名字 |
+| `packages/artifacts/store.py` | 按校验和保存上传文件。会话记录只引用句柄 |
 | `docs/model-gateway.md` | 网关要遵守的契约。它不是运行代码 |
 
 密钥不进适配器源码。调用方把当次密钥传进来。页面提交的密钥由 `store.py` 的 `ProviderStore` 放在不进 Git 的 `apps/web/data/provider.json`。
@@ -171,22 +173,21 @@ Agent 运行时
 - 会话和运行轨迹。要能按运行标识重放界面上看到的步骤。
 - 工件。图片、音频、视频、文档。有类型、大小、校验和、保留期限。
 
-工件包 `packages/artifacts` 还没建。会话在网页数据目录，生成文件在 POC 的工件库。
-
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/store.py` | `IdentityStore` 是单用户开发登录。`ProviderStore` 存基址、模型标识和密钥。`SessionStore` 存会话、消息、事件、对话附件和本地内容句柄。会话带 `user_id`。对话附件句柄是 `a_` 加随机十六进制。本地内容句柄是 `c_` 加随机十六进制，不编码正文或字节 |
-| `apps/web/data/` | 不进 Git。`identity.json` 是本机用户，`provider.json` 是供应商设置，`sessions/*.json` 是会话，`sessions/{id}/files/` 是上传文件的字节。接口响应不返回内容正文、字节或路径 |
+| `packages/artifacts/store.py` | 按 sha256 保存上传文件的字节。同一份文件只写一次。会话记录只留句柄和校验和 |
+| `apps/web/store.py` | `IdentityStore` 是单用户开发登录。`ProviderStore` 存基址、模型标识和密钥。`SessionStore` 存会话、消息、事件、对话附件、本地内容句柄和会话记忆。会话带 `user_id`。对话附件句柄是 `a_` 加随机十六进制。本地内容句柄是 `c_` 加随机十六进制，不编码正文或字节。同一会话相同字节或相同正文复用句柄。`retrieve` 按本会话检索，结果带来源标识和可打开的地址 |
+| `apps/web/data/` | 不进 Git。`identity.json` 是本机用户，`provider.json` 是供应商设置，`sessions/*.json` 是会话，`artifacts/blobs/` 是上传文件的字节。接口响应不返回内容正文、字节或路径 |
 | `poc/comfyui/artifacts.py` | 按会话保存生成文件和记录。对外只给 `artifact_id`。读文件必须会话和标识都对 |
 | `poc/comfyui/artifacts/` | 不进 Git。下面按会话分 `files/` 和 `records/` |
 
-本地文字在会话 JSON 的 `contents` 里。上传文件的字节在该会话目录，JSON 里只留句柄、种类、媒体类型、大小和用途。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。
+本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
 
 ### 检查
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件，以及外部 MCP 只校验、不执行 |
+| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件、同一会话复用工件、检索来源标识和会话记忆，以及外部 MCP 只校验、不执行 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
 | `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |
@@ -198,7 +199,7 @@ Agent 运行时
 - 模型不可用时，运行时停止并返回原因。界面不自己改用另一个模型，除非用户选了备用策略。
 - 工件访问要带会话或租户范围。拿到标识不等于谁都能读。
 - 日志里不记密钥，不记正文、文件字节、路径或原始文件名。记句柄、种类、大小和耗时。
-- 本地内容不进供应商请求。文字在会话 JSON 里，文件字节在该会话目录里。网关在 `openai_chat.py` 打开连接之前再查一次载荷。
+- 本地内容不进供应商请求。文字在会话 JSON 里，文件字节在工件库里。网关在 `openai_chat.py` 打开连接之前再查一次载荷。
 - 隔离原则见 [ADR 0003](adr/0003-local-data-isolation.md)。第三方模型只使用工具契约。本地数据由专用工具管理。外部访问没有授权就拒绝。工具规范和进程内 MCP 见 [ADR 0004](adr/0004-tool-governance.md)。
 
 ## 以后的进程

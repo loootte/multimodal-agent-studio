@@ -163,6 +163,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("list_local_content", {})
             return
+        if mode == "retrieve":
+            if "本地工具结果" in self._last_user():
+                self._piece(_delta(content="检索完成"))
+                self._done()
+                return
+            self._emit_tool("retrieve_local", {"query": "png"})
+            return
         if mode == "forgetfile":
             if "本地工具结果" in self._last_user():
                 self._piece(_delta(content="已丢掉文件。"))
@@ -365,6 +372,7 @@ def self_check() -> None:
         _saved_env_rules()
         _provider_input_rules()
         _recovery()
+        _artifact_cases()
         _redact_unit()
         _redact_history()
         _gateway_cases()
@@ -477,6 +485,63 @@ def _recovery() -> None:
         message = reloaded["messages"][0]
         if message["status"] == "running" or "中断" not in message["error"]["message"]:
             fail("重启后仍把未完成的运行当成还在请求模型")
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _artifact_cases() -> None:
+    directory = tempfile.mkdtemp(prefix="chat-artifacts-")
+    try:
+        sessions = store.SessionStore(os.path.join(directory, "sessions"))
+        user = "u_" + "ab" * 16
+        session_id = sessions.create(user)["session_id"]
+        first = sessions.add_attachment(session_id, _PNG, "image/png", "swatch.png")
+        second = sessions.add_attachment(session_id, _PNG, "image/png", "copy.png")
+        if first["handle"] != second["handle"]:
+            fail("同一会话同一张图没有复用句柄")
+        if first["handle"][2:] == hashlib.sha256(_PNG).hexdigest()[:32]:
+            fail("附件句柄使用了字节的哈希")
+        secret = "检索不该带出的本机正文甲乙丙丁"
+        kept = sessions.add_content(session_id, secret, "keep")
+        again = sessions.add_content(session_id, secret, "keep")
+        if kept["handle"] != again["handle"]:
+            fail("同一会话同一段文字没有复用句柄")
+        other = sessions.create(user)["session_id"]
+        foreign = sessions.add_attachment(other, _PNG, "image/png", "swatch.png")
+        if foreign["handle"] == first["handle"]:
+            fail("别的会话复用了附件句柄")
+        if sessions.attachment_bytes(other, first["handle"]) is not None:
+            fail("别的会话读到了这枚附件句柄")
+        if sessions.attachment_bytes(session_id, first["handle"]) != _PNG:
+            fail("复用后读不到原图")
+        checksums = {
+            item.get("checksum")
+            for item in sessions.get(session_id).get("attachments") or []
+            if isinstance(item, dict)
+        }
+        checksums.update(
+            item.get("checksum")
+            for item in sessions.get(other).get("attachments") or []
+            if isinstance(item, dict)
+        )
+        if checksums != {hashlib.sha256(_PNG).hexdigest()}:
+            fail("同一张图在工件库里存了多份")
+        found = sessions.retrieve(session_id, "png")
+        blob = json.dumps(found, ensure_ascii=False)
+        if not any(item.get("source_id") == first["handle"] for item in found):
+            fail("检索没有带来源标识")
+        if secret in blob or any("text" in item for item in found):
+            fail("检索结果带回了正文")
+        url = next((item.get("url") for item in found if item.get("source_id") == first["handle"]), "")
+        if not isinstance(url, str) or first["handle"] not in url:
+            fail("检索结果没有可打开的地址")
+        hits = sessions.retrieve(session_id, "甲乙丙")
+        if not any(item.get("source_id") == kept["handle"] for item in hits):
+            fail("检索没有按正文找到句柄")
+        if secret in json.dumps(hits, ensure_ascii=False):
+            fail("按正文检索时带回了正文")
+        if sessions.retrieve(other, first["handle"]):
+            fail("别的会话检索到了这枚句柄")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -1081,6 +1146,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面脚本没有接上运行过程")
     if "innerHTML" in script or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
+    if "retrieve_local" not in script or "source_id" not in script:
+        fail("页面没有检索结果入口")
     if "content_request" not in script or "加入本地内容并继续" not in script:
         fail("页面没有本地内容输入")
     if "取消" not in script or "skip: true" not in script:
@@ -1165,6 +1232,9 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _reject_file_case(base, session_id, provider)
     _reject_image_text_model_case(base, session_id, provider, upstream)
     _ask_image_case(base, session_id, provider)
+    _reuse_attachment_case(base, directory)
+    _retrieve_case(base, provider, directory)
+    _memory_case(base, provider)
     _vision_prompt_case(base, provider)
     _skip_content_case(base, provider)
     _confirm_reject_case(base, provider)
@@ -1436,6 +1506,95 @@ def _ask_image_case(base: str, session_id: str, provider) -> None:
     user = stored["messages"][-2]
     if user.get("role") != "user" or not any(item.get("handle") == handle for item in user.get("attachments") or []):
         fail("图片没有留在会话消息里")
+
+
+def _reuse_attachment_case(base: str, directory: str) -> None:
+    session_id = _fresh_session(base)
+    encoded = base64.b64encode(_PNG).decode("ascii")
+    payload = {"file": encoded, "media_type": "image/png", "name": "swatch.png"}
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", payload)
+    if status != 200:
+        fail(f"复用检查没有收下附件：{status} {body}")
+    first = json.loads(body)
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", payload)
+    second = json.loads(body)
+    if first.get("handle") != second.get("handle"):
+        fail("同一会话第二次上传同一张图没有复用句柄")
+    other = _fresh_session(base)
+    status, body = request("POST", base + f"/api/sessions/{other}/attachments", payload)
+    third = json.loads(body)
+    if third.get("handle") == first.get("handle"):
+        fail("别的会话复用了附件句柄")
+    status, raw = request_bytes("GET", base + f"/api/sessions/{session_id}/attachments/{first['handle']}")
+    if status != 200 or raw != _PNG:
+        fail("复用后的附件读不到原图")
+    status, _raw = request_bytes("GET", base + f"/api/sessions/{other}/attachments/{first['handle']}")
+    if status != 404:
+        fail("别的会话用这枚句柄读到了附件")
+    saved = json.loads(open(os.path.join(directory, "sessions", session_id + ".json"), encoding="utf-8").read())
+    checksums = {item.get("checksum") for item in saved.get("attachments") or []}
+    if len(checksums) != 1:
+        fail("同一会话同一张图写了多份记录")
+
+
+def _retrieve_case(base: str, provider, directory: str) -> None:
+    provider.mode = "retrieve"
+    session_id = _fresh_session(base)
+    encoded = base64.b64encode(_PNG).decode("ascii")
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+        "file": encoded,
+        "media_type": "image/png",
+        "name": "swatch.png",
+    })
+    if status != 200:
+        fail(f"检索检查没有收下附件：{status} {body}")
+    handle = json.loads(body)["handle"]
+    secret = "检索接口不该带出的本机正文甲乙"
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    sessions.add_content(session_id, secret, "keep")
+    events = _speak(base, session_id, "帮我找一下 png")
+    if _assistant_text(events) != "检索完成":
+        fail("检索工具没有写完回答")
+    listed = [event for event in events if event.get("tool") == "retrieve_local"]
+    blob = json.dumps(listed, ensure_ascii=False)
+    if handle not in blob or "source_id" not in blob:
+        fail("检索事件没有带来源标识")
+    if secret in blob or secret in json.dumps(events, ensure_ascii=False):
+        fail("检索结果带回了本地正文")
+    items = []
+    for event in listed:
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        items.extend(result.get("items") or [])
+    url = next((item.get("url") for item in items if item.get("source_id") == handle), "")
+    if not isinstance(url, str) or not url:
+        fail("检索结果没有可打开的地址")
+    status, raw = request_bytes("GET", base + url)
+    if status != 200 or raw != _PNG:
+        fail("检索地址打不开原图")
+    visible = request("GET", base + f"/api/sessions/{session_id}")[1]
+    if secret in visible:
+        fail("会话接口带回了本地正文")
+
+
+def _memory_case(base: str, provider) -> None:
+    provider.mode = "ok"
+    session_id = _fresh_session(base)
+    oldest = "最早的一句不会整段进入近期对话的闲聊甲乙丙丁戊己庚辛"
+    _speak(base, session_id, oldest)
+    for index in range(7):
+        _speak(base, session_id, f"垫话{index}号")
+    events = _speak(base, session_id, "现在问")
+    if _assistant_text(events) != "你好":
+        fail("长会话没有回答")
+    messages = provider.requests[-1]["body"].get("messages") or []
+    dialog = [item for item in messages if item.get("role") in ("user", "assistant")]
+    if len(dialog) > 6:
+        fail("长会话仍把全部历史发给了模型")
+    system = messages[0].get("content") if messages else ""
+    if "会话记忆" not in (system or ""):
+        fail("长会话没有带上会话记忆")
+    if oldest in json.dumps(dialog, ensure_ascii=False):
+        fail("最早的整段对话仍在近期消息里")
 
 
 def _vision_prompt_case(base: str, provider) -> None:
@@ -2100,7 +2259,7 @@ def _assert_bound(directory: str, session_id: str, body: dict, prompt: str, expe
             generate = function
         if function.get("name") == "accept_local_content":
             accept = function
-    if not {"accept_local_content", "list_local_content", "forget_local_content", "generate_image"}.issubset(names):
+    if not {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "generate_image"}.issubset(names):
         fail(f"工具契约缺少本地内容工具：{names}")
     props = (generate.get("parameters") or {}).get("properties") or {}
     if "prompt" in props or "content_handle" not in props:
@@ -2392,9 +2551,14 @@ def _local_file(base: str, provider, box: ComfyState, directory: str) -> None:
         fail("别的会话丢掉了这个文件")
     if sessions.content_bytes(session_id, handle) != data:
         fail("别的会话把这个文件删掉了")
+    checksum = record.get("checksum")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        fail("文件没有记下校验和")
+    if sessions.artifacts.get(checksum) != data:
+        fail("文件字节不在工件库")
     path = os.path.join(directory, "sessions", session_id, "files", handle)
-    if not os.path.isfile(path):
-        fail("文件字节不在本会话目录")
+    if os.path.isfile(path):
+        fail("文件字节仍写在会话目录")
 
 
 def _local_forget_file(base: str, provider, box: ComfyState, directory: str) -> None:

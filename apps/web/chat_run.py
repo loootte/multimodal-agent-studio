@@ -49,6 +49,7 @@ SYSTEM = (
     "只有用户明确要求生成一张新图时，purpose 才填 image_prompt，kind 填 text。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
+    "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
     "要用文字句柄出图时，再调用 generate_image。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
@@ -86,12 +87,12 @@ _VISION_MARKERS = (
 )
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
-MAX_TURNS = 40
 MAX_TOTAL = 100000
 _WEB_TOOLS = (
     "accept_local_content",
     "list_local_content",
     "forget_local_content",
+    "retrieve_local",
     "generate_image",
 )
 
@@ -626,7 +627,7 @@ def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_c
         return _continue_after_content(
             app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
         )
-    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo", "retrieve_local"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
         return _run_bound(app, session_id, message_id, run, user_text, tool_call, False)
@@ -706,7 +707,7 @@ def _continue_after_content(
             return _refuse_file_image(app, session_id, message_id, run, tool_call)
         bound = _bind_submitted(submitted, tool_call)
         return _finish_image(app, session_id, message_id, run, reply, bound)
-    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo", "retrieve_local"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     _complete(app, session_id, message_id, run, reply)
     return "completed"
@@ -744,6 +745,15 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
             items = []
         result = {"items": items}
         arguments = {}
+    elif name == "retrieve_local":
+        raw = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        query = raw.get("query") if isinstance(raw.get("query"), str) else ""
+        try:
+            items = app.sessions.retrieve(session_id, query)
+        except StoreError:
+            items = []
+        result = {"items": items}
+        arguments = {"query": query}
     elif name == "forget_local_content":
         handle = _named_handle(tool_call)
         status = app.sessions.forget_content(session_id, handle) if handle else "absent"
@@ -869,6 +879,7 @@ def _fail_status(app, session_id, message_id, run, exc: GatewayError) -> str:
 
 def _complete(app, session_id, message_id, run, text: str) -> None:
     app.sessions.update_message(session_id, message_id, text=text, status="completed", error=None)
+    app.sessions.refresh_memory(session_id)
     run.push({
         "type": EVENT_MESSAGE_COMPLETED,
         "text": text,
@@ -887,6 +898,7 @@ def _fail(app, session_id: str, message_id: str, run: Run, error: GatewayError, 
         status=state,
         error={"code": error.code, "message": error.message, "retryable": retryable},
     )
+    app.sessions.refresh_memory(session_id)
     run.push({
         "type": EVENT_RUN_FAILED,
         "code": error.code,
@@ -970,6 +982,7 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
     }
     _push_saved(app, session_id, message_id, run, artifact)
     app.sessions.update_message(session_id, message_id, text=text, status="completed", error=None)
+    app.sessions.refresh_memory(session_id)
     run.push({
         "type": EVENT_MESSAGE_COMPLETED,
         "text": text,
@@ -1269,13 +1282,23 @@ def _model_messages(
         if attachments and message.get("role") == "user":
             packed["attachments"] = attachments
         items.append(packed)
-    if len(items) > MAX_TURNS:
-        items = items[-MAX_TURNS:]
+    keep = store.MEMORY_KEEP
+    if len(items) > keep:
+        items = items[-keep:]
     while items and sum(len(item["content"]) for item in items) > MAX_TOTAL:
         items.pop(0)
     if extra:
         items.extend(extra)
-    return [{"role": "system", "content": SYSTEM}, *items]
+    system = SYSTEM
+    memory = session.get("memory") if isinstance(session.get("memory"), dict) else {}
+    summary = memory.get("summary") if isinstance(memory.get("summary"), str) else ""
+    refs = memory.get("refs") if isinstance(memory.get("refs"), list) else []
+    if summary.strip() or refs:
+        system += " 会话记忆：" + summary.strip()
+        named = [item for item in refs if isinstance(item, str) and item]
+        if named:
+            system += " 引用：" + " ".join(named)
+    return [{"role": "system", "content": system}, *items]
 
 
 def _cover_bodies(text: str, bodies: list[tuple[str, str]]) -> str:

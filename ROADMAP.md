@@ -2,7 +2,7 @@
 
 顺序固定。上一阶段的完成标准没达到，不开始下一阶段的功能。每一阶段只做列出的范围。
 
-[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐第 1 阶段的网关。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 补齐第 2 阶段的运行时。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐第 3 阶段的网页。
+[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐第 1 阶段的网关。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 补齐第 2 阶段的运行时。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐第 3 阶段的网页。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 补齐第 4 阶段的工件库、检索和会话记忆。
 
 ## 0. 工程基线
 
@@ -69,7 +69,7 @@
 - 工具调用在回答旁边按时间出现，能看到名字、状态和失败原因。
 - 键盘能完成发送；上传失败有明确提示。
 
-状态：已完成。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20)。工件库、检索和真正的账号留给后面的阶段。
+状态：已完成。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20)。真正的账号留给第 6 阶段。
 
 ## 4. 工件、记忆和检索
 
@@ -84,6 +84,8 @@
 
 - 同一张图在同一会话里第二次被提到时，不再整文件重复上传。
 - 检索结果带来源标识，界面能点开。
+
+状态：已完成。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22)。
 
 ## 5. 评测、安全和可观测性
 
