@@ -28,15 +28,19 @@ import store
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
+_SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
+_SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
 _SESSION = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})$")
 _RUN_EVENTS = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/events$")
 _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
+_RUN_CONFIRM = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/confirm$")
 _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
+_MAX_ATTACHMENT_BODY = 12_000_000
 
 
 class App:
@@ -45,6 +49,7 @@ class App:
         self.data_dir = data_dir
         self.timeout_sec = timeout_sec
         self.provider = store.ProviderStore(os.path.join(data_dir, "provider.json"))
+        self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
         self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"))
         self.runs = chat_run.RunHub()
 
@@ -124,6 +129,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 return
             _send_file(handler, os.path.join(WEB_DIR, "static", name), _STATIC[name])
             return
+        if path == "/api/identity" and method == "GET":
+            _send_json(handler, 200, app.identity.current())
+            return
         if path == "/api/provider" and method == "GET":
             _send_json(handler, 200, app.provider.public())
             return
@@ -141,34 +149,54 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             _send_json(handler, 200, view)
             return
         if path == "/api/sessions" and method == "GET":
-            _send_json(handler, 200, {"sessions": app.sessions.list_sessions()})
+            user = app.identity.current()
+            _send_json(handler, 200, {"sessions": app.sessions.list_sessions(user["user_id"])})
             return
         if path == "/api/sessions" and method == "POST":
             _read_json(handler)
-            _send_json(handler, 200, app.sessions.create())
+            user = app.identity.current()
+            _send_json(handler, 200, app.sessions.create(user["user_id"]))
             return
         matched = _SESSION_MESSAGES.fullmatch(path)
         if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
             body = _read_json(handler)
-            run = chat_run.start(app, matched.group(1), body.get("text"), body.get("attachments"))
+            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"))
             _send_sse(handler, run, 0)
             return
         matched = _SESSION_STOP.fullmatch(path)
         if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
             _read_json(handler)
-            _send_json(handler, 200, chat_run.stop(app, matched.group(1)))
+            _send_json(handler, 200, chat_run.stop(app, session["session_id"]))
+            return
+        matched = _SESSION_ATTACHMENTS.fullmatch(path)
+        if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
+            body = _read_json(handler, _MAX_ATTACHMENT_BODY)
+            record = chat_run.add_attachment(
+                app, session["session_id"], body.get("file"), body.get("media_type"), body.get("name") or "",
+            )
+            _send_json(handler, 200, record)
+            return
+        matched = _SESSION_ATTACHMENT.fullmatch(path)
+        if matched and method == "GET":
+            session = _owned_session(app, matched.group(1))
+            info = app.sessions.attachment_info(session["session_id"], matched.group(2))
+            data = app.sessions.attachment_bytes(session["session_id"], matched.group(2))
+            if info is None or data is None:
+                _send_json(handler, 404, {"code": "not_found", "message": "找不到这个附件。"})
+                return
+            _send_bytes(handler, data, info.get("media_type") or "application/octet-stream")
             return
         matched = _SESSION.fullmatch(path)
         if matched and method == "GET":
-            try:
-                session = app.sessions.get(matched.group(1))
-            except store.StoreError as exc:
-                raise chat_run.RequestError(404, "not_found", "找不到这个会话。") from exc
+            session = _owned_session(app, matched.group(1))
             _send_json(handler, 200, app.sessions.view(session))
             return
         matched = _RUN_CONTENT.fullmatch(path)
         if matched and method == "POST":
-            body = _read_json(handler)
+            body = _read_json(handler, _MAX_ATTACHMENT_BODY)
             if body.get("file") is not None:
                 result = chat_run.submit_file(
                     app, matched.group(1), body.get("file"), body.get("media_type"),
@@ -176,6 +204,11 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             else:
                 result = chat_run.submit_content(app, matched.group(1), body.get("text"))
             _send_json(handler, 200, result)
+            return
+        matched = _RUN_CONFIRM.fullmatch(path)
+        if matched and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, chat_run.submit_confirm(app, matched.group(1), body.get("allowed")))
             return
         matched = _RUN_EVENTS.fullmatch(path)
         if matched and method == "GET":
@@ -212,7 +245,18 @@ def _after(value: str) -> int:
     return parsed if parsed > 0 else 0
 
 
-def _read_json(handler: BaseHTTPRequestHandler) -> dict:
+def _owned_session(app: App, session_id: str) -> dict:
+    try:
+        session = app.sessions.get(session_id)
+    except store.StoreError as exc:
+        raise chat_run.RequestError(404, "not_found", "找不到这个会话。") from exc
+    user = app.identity.current()
+    if not app.sessions.belongs_to(session, user["user_id"]):
+        raise chat_run.RequestError(404, "not_found", "找不到这个会话。")
+    return session
+
+
+def _read_json(handler: BaseHTTPRequestHandler, max_body: int = _MAX_BODY) -> dict:
     content_type = handler.headers.get("Content-Type", "")
     if "application/json" not in content_type:
         raise chat_run.RequestError(415, "invalid_json", "请求需要 JSON。")
@@ -220,7 +264,7 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError as exc:
         raise chat_run.RequestError(400, "invalid_json", "请求不是 JSON。") from exc
-    if length < 0 or length > _MAX_BODY:
+    if length < 0 or length > max_body:
         raise chat_run.RequestError(413, "payload_too_large", "这条请求太长了。")
     raw = handler.rfile.read(length) if length else b""
     try:
@@ -257,6 +301,16 @@ def _send_file(handler: BaseHTTPRequestHandler, path: str, content_type: str) ->
             "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
         )
         handler.send_header("Referrer-Policy", "no-referrer")
+    handler.end_headers()
+    handler.wfile.write(raw)
+
+
+def _send_bytes(handler: BaseHTTPRequestHandler, raw: bytes, content_type: str) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     handler.wfile.write(raw)
 

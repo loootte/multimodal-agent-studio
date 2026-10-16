@@ -20,6 +20,7 @@ _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
 _MEDIA = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
 _PURPOSES = ("image_prompt", "keep")
 MAX_FILE = 262144
+MAX_ATTACHMENT = 8 * 1024 * 1024
 
 
 class StoreError(Exception):
@@ -152,15 +153,28 @@ class ProviderStore:
     def public(self) -> dict:
         resolved = self.resolve()
         key = resolved["api_key"]
+        inputs = ["text"]
+        outputs = ["text"]
+        streaming = True
+        try:
+            from services.gateway import describe
+            caps = describe(resolved["model"])
+            raw_in = caps.get("input_modalities") or ("text",)
+            raw_out = caps.get("output_modalities") or ("text",)
+            inputs = [str(item) for item in raw_in]
+            outputs = [str(item) for item in raw_out]
+            streaming = bool(caps.get("streaming", True))
+        except Exception:
+            pass
         return {
             "base_url": resolved["base_url"],
             "model": resolved["model"],
             "configured": bool(key),
             "key_hint": key[-4:] if key else "",
             "key_source": resolved["key_source"],
-            "input_modalities": ["text"],
-            "output_modalities": ["text"],
-            "streaming": True,
+            "input_modalities": inputs,
+            "output_modalities": outputs,
+            "streaming": streaming,
         }
 
     def update(self, *, base_url: str, model: str, api_key: str | None, clear_key: bool) -> dict:
@@ -218,6 +232,62 @@ def clean_media_type(value) -> str:
     return media
 
 
+def kind_from_media(media: str) -> str:
+    if media.startswith("image/"):
+        return "image"
+    if media.startswith("audio/"):
+        return "audio"
+    if media.startswith("video/"):
+        return "video"
+    return "file"
+
+
+def clean_filename(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    name = os.path.basename(value.replace("\\", "/")).strip()
+    name = re.sub(r"[\x00-\x1f]", "", name)
+    return name[:128]
+
+
+class IdentityStore:
+    """单用户开发登录。会话按这个用户归属。第 6 阶段再换成真正的账号。"""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.RLock()
+
+    def current(self) -> dict:
+        with self._lock:
+            data = self._read()
+            if data is None:
+                data = {"user_id": new_id("u_"), "display_name": "本机用户"}
+                _atomic_write(self.path, data)
+            return {
+                "user_id": data["user_id"],
+                "display_name": data.get("display_name") or "本机用户",
+            }
+
+    def _read(self) -> dict | None:
+        if not os.path.exists(self.path):
+            return None
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        user_id = data.get("user_id")
+        if not isinstance(user_id, str) or not _ID.fullmatch(user_id):
+            return None
+        name = data.get("display_name")
+        return {
+            "user_id": user_id,
+            "display_name": name if isinstance(name, str) and name.strip() else "本机用户",
+        }
+
+
 def _kind_of(record: dict) -> str:
     kind = record.get("kind") or record.get("type")
     return kind if kind in ("text", "file") else "text"
@@ -271,7 +341,30 @@ def _scrub_value(value, secrets: list[str]):
     return value
 
 
-def _message(role: str, text: str, status: str, message_id: str, run_id: str | None) -> dict:
+def _public_attachment(record: dict) -> dict:
+    media = record.get("media_type")
+    if not isinstance(media, str) or not media:
+        media = "application/octet-stream"
+    kind = record.get("kind")
+    if kind not in ("image", "audio", "video", "file"):
+        kind = kind_from_media(media)
+    name = record.get("name")
+    if not isinstance(name, str):
+        name = ""
+    return {
+        "handle": record.get("handle"),
+        "kind": kind,
+        "media_type": media,
+        "size": record.get("size"),
+        "name": name,
+    }
+
+
+def _message(role: str, text: str, status: str, message_id: str, run_id: str | None, attachments=None) -> dict:
+    items = []
+    for item in attachments or []:
+        if isinstance(item, dict) and isinstance(item.get("handle"), str):
+            items.append(_public_attachment(item))
     return {
         "message_id": message_id,
         "role": role,
@@ -282,6 +375,7 @@ def _message(role: str, text: str, status: str, message_id: str, run_id: str | N
         "error": None,
         "events": [],
         "runtime": [],
+        "attachments": items,
     }
 
 
@@ -292,10 +386,12 @@ class SessionStore:
         os.makedirs(root, exist_ok=True)
         self._recover()
 
-    def create(self) -> dict:
+    def create(self, user_id: str) -> dict:
+        check_id(user_id, "用户")
         now = _now()
         session = {
             "session_id": new_id("s_"),
+            "user_id": user_id,
             "title": "新对话",
             "created_at": now,
             "updated_at": now,
@@ -305,7 +401,8 @@ class SessionStore:
             self._write(session)
         return self.view(session)
 
-    def list_sessions(self) -> list[dict]:
+    def list_sessions(self, user_id: str) -> list[dict]:
+        check_id(user_id, "用户")
         with self._lock:
             found = []
             for name in os.listdir(self.root):
@@ -313,6 +410,9 @@ class SessionStore:
                     continue
                 session = self._load_path(os.path.join(self.root, name))
                 if session is None:
+                    continue
+                owner = session.get("user_id")
+                if owner and owner != user_id:
                     continue
                 found.append(self.summary(session))
         found.sort(key=lambda item: item["updated_at"], reverse=True)
@@ -334,6 +434,7 @@ class SessionStore:
                 break
         public = {
             "session_id": session["session_id"],
+            "user_id": session.get("user_id") or "",
             "title": session["title"],
             "created_at": session["created_at"],
             "updated_at": session["updated_at"],
@@ -352,7 +453,13 @@ class SessionStore:
             "running": viewed["running"],
         }
 
-    def append_turn(self, session_id: str, user_text: str, run_id: str) -> dict:
+    def belongs_to(self, session: dict, user_id: str) -> bool:
+        owner = session.get("user_id")
+        if not owner:
+            return True
+        return owner == user_id
+
+    def append_turn(self, session_id: str, user_text: str, run_id: str, attachments=None) -> dict:
         check_id(session_id, "会话")
         check_id(run_id, "运行")
         with self._lock:
@@ -361,11 +468,13 @@ class SessionStore:
                 raise StoreError("找不到这个会话。")
             if any(message.get("status") == "running" for message in session["messages"]):
                 raise StoreError("busy")
-            user = _message("user", user_text, "completed", new_id("m_"), None)
+            user = _message("user", user_text, "completed", new_id("m_"), None, attachments)
             assistant = _message("assistant", "", "running", new_id("m_"), run_id)
             session["messages"].extend((user, assistant))
             if session.get("title") in (None, "", "新对话"):
                 title = user_text.replace("\n", " ").strip()
+                if not title and attachments:
+                    title = "图片"
                 session["title"] = title[:24] or "新对话"
             session["updated_at"] = _now()
             self._write(session)
@@ -509,6 +618,73 @@ class SessionStore:
             session["updated_at"] = _now()
             self._write(session)
         return _public_content(record)
+
+    def add_attachment(self, session_id: str, data: bytes, media_type: str, name: str = "") -> dict:
+        """对话附件。句柄是 a_ 加随机十六进制。不进本地内容库，也不进出口检查。"""
+        check_id(session_id, "会话")
+        if not isinstance(data, bytes) or not data:
+            raise StoreError("空文件。")
+        if len(data) > MAX_ATTACHMENT:
+            raise StoreError("太大。")
+        media = clean_media_type(media_type)
+        handle = new_id("a_")
+        directory = os.path.join(self.root, session_id, "files")
+        os.makedirs(directory, exist_ok=True)
+        target = os.path.join(directory, handle)
+        temporary = target + ".part"
+        try:
+            with open(temporary, "wb") as raw:
+                raw.write(data)
+            os.replace(temporary, target)
+        except OSError as exc:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise StoreError("没能留下这个文件。") from exc
+        record = {
+            "handle": handle,
+            "kind": kind_from_media(media),
+            "media_type": media,
+            "size": len(data),
+            "name": clean_filename(name),
+        }
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+                raise StoreError("找不到这个会话。")
+            session.setdefault("attachments", []).append(record)
+            session["updated_at"] = _now()
+            self._write(session)
+        return _public_attachment(record)
+
+    def attachment_info(self, session_id: str, handle: str) -> dict | None:
+        item = self._find_attachment(session_id, handle)
+        if item is None:
+            return None
+        return _public_attachment(item)
+
+    def attachment_bytes(self, session_id: str, handle: str) -> bytes | None:
+        item = self._find_attachment(session_id, handle)
+        if item is None:
+            return None
+        return self._read_file(session_id, handle)
+
+    def _find_attachment(self, session_id: str, handle: str) -> dict | None:
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return None
+        try:
+            session = self.get(session_id)
+        except StoreError:
+            return None
+        for item in session.get("attachments") or []:
+            if isinstance(item, dict) and item.get("handle") == handle:
+                return item
+        return None
 
     def list_content(self, session_id: str) -> list[dict]:
         session = self.get(session_id)

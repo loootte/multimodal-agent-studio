@@ -192,13 +192,24 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("lookup_demo", {"topic": "runtime"})
             return
+        if mode == "confirm":
+            user = self._last_user()
+            if "工具结果" in user or "需要确认" in user:
+                self._piece(_delta(content="没有出图"))
+                self._done()
+                return
+            self._emit_tool("generate_image", {
+                "content_handle": "c_" + "ab" * 16,
+                "aspect_ratio": "1:1",
+            })
+            return
         self._piece(b"")
 
     def _last_user(self) -> str:
         messages = self.server.requests[-1]["body"].get("messages") or []
         for item in reversed(messages):
             if isinstance(item, dict) and item.get("role") == "user":
-                return item.get("content") or ""
+                return _user_text(item.get("content"))
         return ""
 
     def _ready(self) -> bool:
@@ -238,6 +249,20 @@ def _tool_delta(index, call_id=None, name=None, arguments=None, finish=None) -> 
     if finish:
         choice["finish_reason"] = finish
     return f"data: {json.dumps({'choices': [choice]}, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _user_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text") or "")
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return ""
 
 
 def _content_handle(text: str) -> str:
@@ -1052,6 +1077,15 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面没有本地内容输入")
     if 'kind === "file"' not in script:
         fail("页面没有文件形式的本地内容输入")
+    if "本机用户" not in page or "/api/identity" not in script:
+        fail("页面没有单用户身份")
+    if "确认" not in script or "拒绝" not in script or "重试" not in script:
+        fail("页面没有工具确认或失败重试")
+    if "不能带附件" in script:
+        fail("页面仍然拒绝所有附件")
+    status, ident = request("GET", base + "/api/identity")
+    if status != 200 or json.loads(ident).get("display_name") != "本机用户":
+        fail("身份接口没有返回本机用户")
     status, body = request("POST", base + "/api/sessions", {})
     session_id = json.loads(body)["session_id"]
     before = len(provider.requests)
@@ -1066,6 +1100,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     view = json.loads(saved)
     if SECRET in saved or view.get("key_hint") != "9876" or view.get("configured") is not True:
         fail("保存后的设置响应带出了完整密钥")
+    if "image" not in (view.get("input_modalities") or []) or "text" not in (view.get("input_modalities") or []):
+        fail("设置没有带上模型接受的输入模态")
     status, again = request("PUT", base + "/api/provider", {"base_url": upstream, "model": "demo-model"})
     if json.loads(again).get("key_hint") != "9876":
         fail("留空密钥时把已保存的密钥清掉了")
@@ -1079,6 +1115,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     if stored["messages"][-1]["text"] != "你好" or stored["messages"][-1]["status"] != "completed":
         fail("刷新后回答不在")
+    if not str(stored.get("user_id") or "").startswith("u_"):
+        fail("会话没有归到本机用户")
     if not any(item.get("kind") == "model" for item in stored["messages"][-1].get("runtime") or []):
         fail("刷新后运行过程不在")
     provider.mode = "demo"
@@ -1115,6 +1153,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
     _reject_file_case(base, session_id, provider)
+    _ask_image_case(base, session_id, provider)
+    _confirm_reject_case(base, provider)
     _busy_case(base, session_id, provider)
     _timeout_case(base, session_id, provider, app)
     _image_cases(base, provider, directory)
@@ -1138,15 +1178,26 @@ def _post_content(base: str, run_id: str, text: str) -> None:
         fail(f"提交本地内容失败：{status} {body}")
 
 
-def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: str | None = None):
+def _post_confirm(base: str, run_id: str, allowed: bool = True) -> None:
+    status, body = request("POST", base + f"/api/runs/{run_id}/confirm", {"allowed": allowed})
+    if status != 200:
+        fail(f"提交工具确认失败：{status} {body}")
+
+
+def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: str | None = None, attachments=None):
     def on_event(event):
+        if event.get("type") == "tool.confirm":
+            _post_confirm(base, event.get("run_id") or "", True)
         if event.get("type") == "content_request":
             _post_content(base, event.get("run_id") or "", content if content is not None else text)
 
+    payload = {"text": text}
+    if attachments:
+        payload["attachments"] = attachments
     status, raw, events = read_sse(
         site_port(base),
         f"/api/sessions/{session_id}/messages",
-        {"text": text},
+        payload,
         on_event=on_event,
         timeout=timeout,
     )
@@ -1270,20 +1321,95 @@ def _reject_key_case(base: str, session_id: str, provider, directory: str) -> No
 
 def _reject_file_case(base: str, session_id: str, provider) -> None:
     before = len(provider.requests)
+    status, raw = request("POST", base + f"/api/sessions/{session_id}/messages", {"text": "  "})
+    if status != 400:
+        fail("空消息没有被拒绝")
+    encoded = base64.b64encode(b"RIFF....WAVEfmt ").decode("ascii")
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+        "file": encoded,
+        "media_type": "audio/wav",
+        "name": "clip.wav",
+    })
+    if status != 200:
+        fail(f"音频附件没有收下：{status} {body}")
+    handle = json.loads(body)["handle"]
     status, raw, events = read_sse(
         site_port(base),
         f"/api/sessions/{session_id}/messages",
-        {"text": "看这张图", "attachments": [{"type": "image"}]},
+        {"text": "听这段", "attachments": [{"handle": handle}]},
     )
     if status != 200 or events[-1].get("code") != "modality_unsupported":
-        fail("图片没有被拒绝")
+        fail("音频没有按模型能力拒绝")
+    if events[-1].get("retryable") is not False:
+        fail("不支持的模态标成了可重试")
+    if events[-1].get("message") != "这个模型不接受这种输入。":
+        fail("不支持的模态没有用人话提示")
     if len(provider.requests) != before:
         fail("不接受的附件仍然发给了模型")
     if raw and SECRET in raw:
         fail("事件流里出现了密钥")
-    status, raw = request("POST", base + f"/api/sessions/{session_id}/messages", {"text": "  "})
-    if status != 400:
-        fail("空消息没有被拒绝")
+
+
+def _ask_image_case(base: str, session_id: str, provider) -> None:
+    provider.mode = "ok"
+    before = len(provider.requests)
+    encoded = base64.b64encode(_PNG).decode("ascii")
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+        "file": encoded,
+        "media_type": "image/png",
+        "name": "swatch.png",
+    })
+    if status != 200:
+        fail(f"图片附件没有收下：{status} {body}")
+    record = json.loads(body)
+    handle = record["handle"]
+    if record.get("kind") != "image" or not handle.startswith("a_"):
+        fail("图片附件的句柄或种类不对")
+    status, raw = request_bytes("GET", base + f"/api/sessions/{session_id}/attachments/{handle}")
+    if status != 200 or raw != _PNG:
+        fail("附件预览读不到原图")
+    events = _speak(base, session_id, "看这张图", attachments=[{"handle": handle}])
+    if _assistant_text(events) != "你好":
+        fail("带图片提问没有完成这一轮")
+    if len(provider.requests) != before + 1:
+        fail("带图片提问没有发给模型")
+    blob = _provider_blob(provider.requests[-1])
+    if "image_url" not in blob or "data:image/png;base64," not in blob:
+        fail("图片没有按工件标识进入供应商请求")
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    user = stored["messages"][-2]
+    if user.get("role") != "user" or not any(item.get("handle") == handle for item in user.get("attachments") or []):
+        fail("图片没有留在会话消息里")
+
+
+def _confirm_reject_case(base: str, provider) -> None:
+    provider.mode = "confirm"
+    session_id = _fresh_session(base)
+    confirmed = []
+
+    def on_event(event):
+        if event.get("type") != "tool.confirm":
+            return
+        confirmed.append(event.get("name"))
+        _post_confirm(base, event.get("run_id") or "", False)
+
+    status, raw, events = read_sse(
+        site_port(base),
+        f"/api/sessions/{session_id}/messages",
+        {"text": "请调用写入工具"},
+        on_event=on_event,
+        timeout=8,
+    )
+    if status != 200 or not events or events[-1].get("type") not in TERMINAL:
+        fail("拒绝确认没有收到结束事件")
+    if confirmed != ["generate_image"]:
+        fail("写操作没有在页面上等待确认")
+    if _assistant_text(events) != "没有出图":
+        fail("拒绝确认后没有继续回答")
+    if not any(event.get("type") == "tool.confirm" for event in events):
+        fail("写操作没有发出确认事件")
+    if any(event.get("type") == "artifact" for event in events):
+        fail("拒绝确认后仍然出图")
 
 
 def _busy_case(base: str, session_id: str, provider) -> None:
@@ -1322,6 +1448,8 @@ def _timeout_case(base: str, session_id: str, provider, app) -> None:
     release(provider)
     if events[-1].get("code") != "timeout" or elapsed > 4:
         fail(f"超时没有在网关侧停下来：{events[-1].get('code')} {elapsed:.2f}s")
+    if events[-1].get("retryable") is not True:
+        fail("超时失败没有标成可重试")
 
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2144,7 +2272,7 @@ def _local_file(base: str, provider, box: ComfyState, directory: str) -> None:
     listed = [item.get("handle") for item in sessions.list_content(session_id)]
     if handle not in listed:
         fail("list_local_content 看不到这个文件句柄")
-    other = sessions.create()["session_id"]
+    other = sessions.create("u_" + "ab" * 16)["session_id"]
     if handle in [item.get("handle") for item in sessions.list_content(other)]:
         fail("别的会话列出了这个文件")
     if sessions.content_bytes(other, handle) is not None or sessions.content_text(other, handle) is not None:
@@ -2204,6 +2332,9 @@ def _local_file_image(base: str, provider, box: ComfyState) -> None:
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):
     def on_event(event):
+        if event.get("type") == "tool.confirm":
+            _post_confirm(base, event.get("run_id") or "", True)
+            return
         if event.get("type") != "content_request":
             return
         if event.get("kind") != "file":
@@ -2241,7 +2372,7 @@ def _egress_file(provider) -> None:
     directory = tempfile.mkdtemp(prefix="chat-file-egress-")
     try:
         sessions = store.SessionStore(os.path.join(directory, "sessions"))
-        session_id = sessions.create()["session_id"]
+        session_id = sessions.create("u_" + "cd" * 16)["session_id"]
         data = b"file-bytes-secret-xyz"
         sessions.add_file(session_id, data, "text/plain", "keep")
         bodies = sessions.local_bodies(session_id)

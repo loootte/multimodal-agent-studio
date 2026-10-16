@@ -14,6 +14,7 @@ from packages.contracts.events import (
     EVENT_TOOL_CONFIRM,
     EVENT_TOOL_REQUESTED,
     HUMAN,
+    RETRYABLE,
 )
 from packages.contracts.request import message_parts, normalize
 from services.gateway import GatewayError, describe, stream as gateway_stream
@@ -158,12 +159,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         "arguments": arguments,
         "call_id": tool_call.get("call_id"),
     }
-    if callable(take) and take(name, arguments):
-        return True
-    problem = validate_arguments(name, arguments)
-    if problem:
-        result = problem
-    elif mutating(name):
+    if mutating(name):
         yield {
             "type": EVENT_TOOL_CONFIRM,
             "run_id": run_id,
@@ -183,16 +179,17 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
                 "executed": False,
                 "error": {"code": "rejected", "message": "这个工具需要确认后才能执行。"},
             }
-        else:
-            started = time.monotonic()
-            result = execute(name, arguments)
-            trace.add(run_id, {
-                "type": "tool",
-                "run_id": run_id,
-                "name": name,
-                "ms": int((time.monotonic() - started) * 1000),
-                "ok": bool(result.get("ok")),
+            messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
+            messages.append({
+                "role": "user",
+                "parts": [{"type": "text", "text": "工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)}],
             })
+            return False
+    if callable(take) and take(name, arguments):
+        return True
+    problem = validate_arguments(name, arguments)
+    if problem:
+        result = problem
     else:
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
@@ -220,6 +217,7 @@ def _failed(run_id: str, code: str, message: str) -> dict:
         "run_id": run_id,
         "code": code,
         "message": message,
+        "retryable": bool(RETRYABLE.get(code, False)),
     }
 
 

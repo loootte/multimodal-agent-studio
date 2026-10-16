@@ -13,6 +13,7 @@
         <strong>对话</strong>
         <button type="button" id="new-chat">新对话</button>
       </div>
+      <p id="user-line" class="hint">本机用户</p>
       <ul id="session-list"></ul>
     </aside>
     <main>
@@ -28,16 +29,17 @@
       <div id="transcript" role="log"></div>
       <form id="composer">
         <p id="composer-note" class="note" hidden></p>
+        <div id="attach-list" class="attach-list" hidden></div>
         <div class="composer-row">
           <label class="attach">
             <span>附件</span>
-            <input id="file" type="file">
+            <input id="file" type="file" accept="image/*,audio/*,video/*,*/*">
           </label>
-          <textarea id="input" rows="2" placeholder="输入文字。要留下本机内容时直接说，文字或文件在对话框里提交。" aria-label="消息"></textarea>
+          <textarea id="input" rows="2" placeholder="输入文字，或附上一张图片。要留下本机内容时直接说，文字或文件在对话框里提交。" aria-label="消息"></textarea>
           <button type="submit" id="send">发送</button>
           <button type="button" id="stop" disabled>停止</button>
         </div>
-        <p class="kbd">Enter 发送，Shift+Enter 换行。生成时按 Esc 停止。</p>
+        <p class="kbd">Enter 发送，Shift+Enter 换行。等待确认时 Enter 确认。生成时按 Esc 停止。</p>
       </form>
     </main>
     <aside class="runtime" id="runtime">
