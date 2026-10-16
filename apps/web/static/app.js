@@ -373,6 +373,7 @@ function renderRuntime() {
     item.append(kind, body);
     log.append(item);
   }
+  log.scrollTop = log.scrollHeight;
 }
 
 function runtimeKind(step) {

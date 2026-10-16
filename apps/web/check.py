@@ -1039,6 +1039,9 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     if 'method="dialog"' in page or "settings-error" not in page:
         fail("设置保存失败时对话框会自己关掉")
     status, script = request("GET", base + "/static/app.js")
+    status, css = request("GET", base + "/static/app.css")
+    if status != 200 or "max-height: 100dvh" not in css or "overflow: hidden" not in css:
+        fail("运行过程没有钉在视口里，长对话会把它滚走")
     if status != 200 or "message.delta" not in script or "tool_call" not in script or "Enter" not in script:
         fail("页面脚本没有接上流式事件")
     if "runtime.step" not in script or "renderRuntime" not in script:

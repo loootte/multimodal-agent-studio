@@ -16,9 +16,10 @@
 
 * { box-sizing: border-box; }
 
-body {
+html, body {
+  height: 100%;
   margin: 0;
-  min-height: 100vh;
+  overflow: hidden;
   background: var(--bg);
   color: var(--ink);
 }
@@ -51,7 +52,9 @@ button.primary, #send, #settings-form button[type="submit"] {
 .app {
   display: grid;
   grid-template-columns: 260px 1fr 300px;
-  min-height: 100vh;
+  height: 100%;
+  max-height: 100dvh;
+  overflow: hidden;
 }
 
 .app.runtime-collapsed {
@@ -67,6 +70,9 @@ button.primary, #send, #settings-form button[type="submit"] {
   display: flex;
   flex-direction: column;
   gap: 0.8rem;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .sidebar-head, .top, .composer-row, .dialog-actions, .runtime-head {
@@ -88,6 +94,8 @@ button.primary, #send, #settings-form button[type="submit"] {
   margin: 0;
   padding: 0;
   overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .session {
@@ -123,7 +131,9 @@ button.primary, #send, #settings-form button[type="submit"] {
   flex-direction: column;
   gap: 0.55rem;
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .runtime-head { justify-content: space-between; }
@@ -142,6 +152,7 @@ button.primary, #send, #settings-form button[type="submit"] {
   padding: 0;
   overflow: auto;
   flex: 1;
+  min-height: 0;
 }
 
 #runtime-log li {
@@ -165,7 +176,9 @@ main {
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .top {
@@ -183,6 +196,7 @@ main {
 .menu { display: none; }
 
 #transcript {
+  min-height: 0;
   overflow: auto;
   padding: 1.4rem 1rem 1rem;
 }
@@ -341,6 +355,7 @@ dialog input {
     z-index: 3;
     inset: 0 0 0 auto;
     width: min(320px, 90vw);
+    height: 100dvh;
     box-shadow: var(--shadow);
   }
   .app:not(.runtime-collapsed) .runtime { display: flex; }
@@ -355,6 +370,7 @@ dialog input {
     z-index: 2;
     inset: 0 auto 0 0;
     width: min(280px, 86vw);
+    height: 100dvh;
     box-shadow: var(--shadow);
   }
   .sidebar.open { display: flex; }
