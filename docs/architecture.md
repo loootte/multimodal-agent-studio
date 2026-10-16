@@ -31,7 +31,7 @@ Agent 运行时
 6. 工具结果写回运行轨迹，再次进入循环，直到模型给出最终回答或预算用尽。
 7. 界面对着同一条运行标识渲染回答和工具时间线。
 
-文字这一刀走 `services/runtime` 的多步循环，步骤出现在聊天页右侧的运行过程窗口。出图和本地内容仍走网页切片。写操作的网页确认按钮留给第 3 阶段。
+文字这一刀走 `services/runtime` 的多步循环，步骤出现在聊天页右侧的运行过程窗口。出图和本地内容仍走网页切片。写操作先在运行时发出 `tool.confirm`，聊天页给出确认和拒绝。
 
 ## 现在的一次出图
 
@@ -50,7 +50,7 @@ Agent 运行时
 
 没有出图关键词、但用户要求把内容留在本机时，走这一条。专用工具仍在这一个网页进程里。不新建 MCP 服务器、数据库、`services/tools` 或 `packages/artifacts`。MCP 只作为本进程里的契约投影，见 [ADR 0004](adr/0004-tool-governance.md)。
 
-1. `app.js` 把说明文字 `POST` 到 `/api/sessions/{session_id}/messages`。要留下的正文不必写在这句里。聊天框上的附件仍然拒绝，不会跟这句一起发给模型。
+1. `app.js` 把说明文字 `POST` 到 `/api/sessions/{session_id}/messages`。要留下的正文不必写在这句里。对话附件是另一条路径：先上传到本会话，发送时只带句柄。
 2. `chat_run.py` 把这句说明交给模型。模型调用 `accept_local_content`。`purpose` 只接受 `image_prompt` 或 `keep`，其他文字丢掉。`kind` 是 `text` 或 `file`，不填则是 `text`。
 3. `content_request` 带到页面。`kind` 为 `text` 时是文本框，为 `file` 时是文件选择。`app.js` 不用 `innerHTML`。提交文件时不带原始文件名。
 4. 页面 `POST /api/runs/{run_id}/content`。文字进 `chat_run.submit_content`，文件进 `chat_run.submit_file`。响应只有 `ok`，不回正文、字节、路径或句柄。
@@ -70,10 +70,10 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/server.py` | 进程入口。只监听 `127.0.0.1`。静态页、会话、停止、SSE、本地内容提交、按 `artifact_id` 取图片都从这里分发 |
+| `apps/web/server.py` | 进程入口。只监听 `127.0.0.1`。静态页、身份、会话、附件、停止、SSE、本地内容提交、工具确认、按 `artifact_id` 取图片都从这里分发 |
 | `apps/web/static/index.html` | 四个区域和设置对话框：会话列表、对话、输入、运行过程 |
-| `apps/web/static/app.js` | 发送、停止、重连同一条运行、渲染事件。`content_request` 的 `kind` 为 `text` 时在气泡里放文本框，为 `file` 时放文件选择。不把原始文件名发给本机接口 |
-| `apps/web/static/app.css` | 页面布局，包括本地文字框和文件选择 |
+| `apps/web/static/app.js` | 发送、附件预览、停止、重连同一条运行、渲染事件。工具时间线显示确认和拒绝。失败且可重试时出现重试。`content_request` 的 `kind` 为 `text` 时在气泡里放文本框，为 `file` 时放文件选择 |
+| `apps/web/static/app.css` | 页面布局，包括附件、时间线和本地内容输入 |
 | `apps/web/README.md` | 这一页怎么启动、密钥放哪、离线检查怎么跑 |
 
 `server.py` 上的路径：
@@ -81,11 +81,14 @@ Agent 运行时
 | 路径 | 文件里的去向 |
 | --- | --- |
 | `GET /`、`GET /static/app.js`、`GET /static/app.css` | 直接回静态文件 |
-| `GET/PUT /api/provider` | `store.py` 的 `ProviderStore` |
-| `GET/POST /api/sessions`、`GET /api/sessions/{id}` | `store.py` 的 `SessionStore` |
-| `POST /api/sessions/{id}/messages` | `chat_run.start`，响应是 SSE |
+| `GET /api/identity` | `store.py` 的 `IdentityStore`。单用户开发登录 |
+| `GET/PUT /api/provider` | `store.py` 的 `ProviderStore`。`input_modalities` 来自网关对该模型的能力声明。OpenAI 兼容适配器对 grok 和未知模型声明图像；`deepseek-v4-pro` 这类已知纯文本模型只声明文字 |
+| `GET/POST /api/sessions`、`GET /api/sessions/{id}` | `store.py` 的 `SessionStore`。会话带 `user_id` |
+| `POST /api/sessions/{id}/messages` | `chat_run.start`，响应是 SSE。附件只带句柄 |
+| `POST /api/sessions/{id}/attachments`、`GET /api/sessions/{id}/attachments/{handle}` | 对话附件的上传和预览 |
 | `POST /api/sessions/{id}/stop` | `chat_run.stop` |
 | `POST /api/runs/{id}/content` | 文字走 `chat_run.submit_content`，文件走 `chat_run.submit_file`。响应只有 `ok`，不回正文、字节、路径或句柄 |
+| `POST /api/runs/{id}/confirm` | `chat_run.submit_confirm`。写操作的确认或拒绝 |
 | `GET /api/runs/{id}/events` | 接回同一次运行的 SSE |
 | `GET /sessions/{session}/artifacts/{artifact}` | `image_run.open_artifact` |
 
@@ -93,7 +96,7 @@ Agent 运行时
 
 拥有循环和停止条件。它是唯一可以调用工具的地方。模型文本里出现的「我已经执行了」不算执行。
 
-`services/runtime` 拥有循环、预算、校验、确认和追踪。文字回合由 `chat_run.py` 交给 `runtime.run`，步骤写成 `runtime.step`，显示在聊天页右侧窗口。出图和本地内容仍走网页切片。写操作的确认按钮留给第 3 阶段。
+`services/runtime` 拥有循环、预算、校验、确认和追踪。文字回合由 `chat_run.py` 交给 `runtime.run`，步骤写成 `runtime.step`，显示在聊天页右侧窗口。出图和本地内容仍走网页切片。写操作先确认，网页切片再接手。
 
 | 文件 | 做什么 |
 | --- | --- |
@@ -107,12 +110,12 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content` 和 `forget_local_content` 只操作本会话。同一条助手消息上排列 `content_request`、`tool_call`、`progress`、`artifact` 或 `error` |
+| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content` 和 `forget_local_content` 只操作本会话。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
 | `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
 
 `poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`forget_local_content`、`generate_image` 和 `lookup_demo`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
 
-网页确认按钮、`generate_video` 和附件仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`，不把第 3 阶段标成完成。
+`generate_video` 仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`。不把第 4 阶段标成完成。
 
 ### 模型网关
 
@@ -172,8 +175,8 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/store.py` | `ProviderStore` 存基址、模型标识和密钥。`SessionStore` 存会话、消息、事件，以及本地内容句柄。`put_content` 按消息记一次，`add_content` 每次提交都新建句柄。`add_file` 把字节写进该会话的 `files/` 目录。`list_content` 和 `forget_content` 只看本会话。句柄是 `c_` 加随机十六进制，不编码正文或字节 |
-| `apps/web/data/` | 不进 Git。`provider.json` 是供应商设置，`sessions/*.json` 是会话，`sessions/{id}/files/` 是上传文件的字节。接口响应不返回内容正文、字节、路径或原始文件名 |
+| `apps/web/store.py` | `IdentityStore` 是单用户开发登录。`ProviderStore` 存基址、模型标识和密钥。`SessionStore` 存会话、消息、事件、对话附件和本地内容句柄。会话带 `user_id`。对话附件句柄是 `a_` 加随机十六进制。本地内容句柄是 `c_` 加随机十六进制，不编码正文或字节 |
+| `apps/web/data/` | 不进 Git。`identity.json` 是本机用户，`provider.json` 是供应商设置，`sessions/*.json` 是会话，`sessions/{id}/files/` 是上传文件的字节。接口响应不返回内容正文、字节或路径 |
 | `poc/comfyui/artifacts.py` | 按会话保存生成文件和记录。对外只给 `artifact_id`。读文件必须会话和标识都对 |
 | `poc/comfyui/artifacts/` | 不进 Git。下面按会话分 `files/` 和 `records/` |
 
@@ -183,7 +186,7 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页运行过程窗口、统一请求、出图隔离、语义唤起、上传文件，以及外部 MCP 只校验、不执行 |
+| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件，以及外部 MCP 只校验、不执行 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
 | `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |

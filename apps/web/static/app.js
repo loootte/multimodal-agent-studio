@@ -1,10 +1,20 @@
 const state = {
   provider: null,
+  identity: null,
   sessions: [],
   currentId: null,
   session: null,
   sending: false,
   stopped: false,
+  pending: [],
+};
+
+const MODALITY_LABELS = {
+  text: "文字",
+  image: "图片",
+  audio: "音频",
+  video: "视频",
+  file: "文件",
 };
 
 const input = document.querySelector("#input");
@@ -28,9 +38,17 @@ input.addEventListener("keydown", (event) => {
 input.addEventListener("input", updateButtons);
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || settings.open || !state.sending) return;
+  if (event.key === "Escape" && !settings.open && state.sending) {
+    event.preventDefault();
+    stopRun();
+    return;
+  }
+  if (event.key !== "Enter" || event.shiftKey || settings.open || !state.sending) return;
+  if (event.target && event.target.closest && event.target.closest("textarea")) return;
+  const pending = waitingConfirm();
+  if (!pending) return;
   event.preventDefault();
-  stopRun();
+  submitConfirm(pending, true);
 });
 
 document.querySelector("#new-chat").addEventListener("click", () => createSession(true));
@@ -48,10 +66,9 @@ document.querySelector("#close-runtime").addEventListener("click", () => {
 document.querySelector("#settings-form").addEventListener("submit", saveSettings);
 document.querySelector("#clear-key").addEventListener("click", clearKey);
 document.querySelector("#file").addEventListener("change", (event) => {
-  if (event.target.files && event.target.files.length) {
-    showNote("这条消息不能带附件。要留文件时，先说明留在本机，再在对话框里选择。");
-    event.target.value = "";
-  }
+  const chosen = event.target.files && event.target.files[0];
+  event.target.value = "";
+  if (chosen) addPendingFile(chosen);
 });
 document.querySelector("#stop").addEventListener("click", stopRun);
 
@@ -59,6 +76,7 @@ boot();
 
 async function boot() {
   try {
+    state.identity = await api("GET", "/api/identity");
     state.provider = await api("GET", "/api/provider");
     await loadSessions();
     const saved = readSavedSession();
@@ -88,6 +106,7 @@ async function createSession(focus) {
   const created = await api("POST", "/api/sessions", {});
   state.currentId = created.session_id;
   state.session = created;
+  state.pending = [];
   rememberSession(created.session_id);
   await loadSessions();
   render();
@@ -122,8 +141,11 @@ async function openSession(sessionId) {
 
 async function sendMessage() {
   const text = input.value;
-  if (!text.trim() || state.sending) return;
+  const blocked = attachmentBlock();
+  if (state.sending || blocked) return;
+  if (!text.trim() && !state.pending.length) return;
   if (!state.currentId) await createSession(false);
+  const attachments = state.pending.slice();
   state.stopped = false;
   state.sending = true;
   state.session.messages.push({
@@ -132,6 +154,7 @@ async function sendMessage() {
     text: text.trim(),
     status: "completed",
     error: null,
+    attachments,
   });
   state.session.messages.push({
     message_id: "local-assistant",
@@ -143,13 +166,17 @@ async function sendMessage() {
     runtime: [],
   });
   input.value = "";
+  state.pending = [];
   showNote("");
   render();
   try {
     const response = await fetch(`/api/sessions/${state.currentId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({
+        text,
+        attachments: attachments.map((item) => ({ handle: item.handle })),
+      }),
     });
     if (!response.ok || !response.body) {
       const problem = await response.json().catch(() => ({}));
@@ -214,6 +241,7 @@ function onEvent(event) {
     assistant.status = "running";
   } else if (
     event.type === "tool_call" ||
+    event.type === "tool.confirm" ||
     event.type === "progress" ||
     event.type === "artifact" ||
     event.type === "error" ||
@@ -240,7 +268,7 @@ function onEvent(event) {
       assistant.text = event.text || assistant.text;
     }
     assistant.status = event.code === "cancelled" ? "cancelled" : "failed";
-    assistant.error = { code: event.code, message: event.message };
+    assistant.error = { code: event.code, message: event.message, retryable: event.retryable };
     state.sending = false;
     state.session.running = false;
     document.querySelector("#live").textContent = event.message || "";
@@ -262,7 +290,21 @@ function resetAssistantForReplay() {
 function rememberAgentEvent(assistant, event) {
   const events = assistant.events || (assistant.events = []);
   if (event.type === "content_request" && events.some((item) => item.type === "content_request")) return;
-  if (event.type === "tool_call" && events.some((item) => item.type === "tool_call")) return;
+  if (event.type === "tool_call") {
+    const open = [...events].reverse().find(
+      (item) => item.type === "tool_call" && item.tool === event.tool && (item.status === "running" || item.status === "waiting_confirm"),
+    );
+    if (open) {
+      Object.assign(open, {
+        tool: event.tool || open.tool,
+        arguments: event.arguments || open.arguments,
+        status: event.status || open.status,
+        result: event.result || open.result,
+        run_id: event.run_id || open.run_id,
+      });
+      return;
+    }
+  }
   if (event.type === "artifact" && events.some((item) => item.type === "artifact")) return;
   if (event.type === "error" && events.some((item) => item.type === "error")) return;
   if (event.type === "progress") {
@@ -279,8 +321,11 @@ function rememberAgentEvent(assistant, event) {
   }
   events.push({
     type: event.type,
-    tool: event.tool,
+    tool: event.tool || event.name,
+    name: event.name,
     arguments: event.arguments,
+    status: event.status,
+    result: event.result,
     value: event.value,
     max: event.max,
     percent: event.percent,
@@ -321,6 +366,7 @@ function render() {
   renderChrome();
   renderTranscript();
   renderRuntime();
+  renderPending();
   updateButtons();
 }
 
@@ -439,11 +485,20 @@ function renderSessions() {
 
 function renderChrome() {
   const provider = state.provider || {};
+  const identity = state.identity || {};
+  document.querySelector("#user-line").textContent = identity.display_name || "本机用户";
   document.querySelector("#model-line").textContent = provider.model || "未设置模型";
+  const accepted = modalityLine(provider);
   document.querySelector("#modality-line").textContent = provider.configured
-    ? `接受文字 · 已保存密钥 ${provider.key_hint}`
-    : "接受文字 · 还没有 API key";
+    ? `${accepted} · 已保存密钥 ${provider.key_hint}`
+    : `${accepted} · 还没有 API key`;
   document.title = state.session && state.session.title ? state.session.title : "对话";
+}
+
+function modalityLine(provider) {
+  const items = (provider && provider.input_modalities) || ["text"];
+  const labels = items.map((item) => MODALITY_LABELS[item] || item);
+  return labels.length ? `接受${labels.join("、")}` : "接受文字";
 }
 
 function renderTranscript() {
@@ -480,13 +535,11 @@ function bubble(message) {
   text.className = "body";
   text.textContent = message.text || "";
   item.append(who, text);
-  const call = events.find((entry) => entry.type === "tool_call");
-  if (call) {
-    const line = document.createElement("p");
-    line.className = "status-line";
-    line.textContent = toolLine(call);
-    item.append(line);
+  for (const attachment of message.attachments || []) {
+    item.append(attachmentView(attachment));
   }
+  const calls = events.filter((entry) => entry.type === "tool_call");
+  if (calls.length) item.append(toolTimeline(message, calls));
   const progress = [...events].reverse().find((entry) => entry.type === "progress");
   if (showEntry) item.append(localEntry(message, pendingContent));
   if (progress && !artifact) {
@@ -512,6 +565,9 @@ function bubble(message) {
     extra.textContent = failure.message;
     item.append(extra);
   }
+  if (canRetry(message, failure) && !artifact) {
+    item.append(retryRow(message));
+  }
   return item;
 }
 
@@ -521,14 +577,21 @@ function localEntry(message, request) {
   const hint = document.createElement("p");
   hint.className = "status-line";
   hint.textContent = request.hint || "请输入要留在本机的内容。";
+  const actions = document.createElement("div");
+  actions.className = "confirm-row";
   const button = document.createElement("button");
   button.type = "submit";
   button.textContent = "加入本地内容并继续";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => skipLocal(message, request, cancel, button));
+  actions.append(button, cancel);
   if (request.kind === "file") {
     const file = document.createElement("input");
     file.type = "file";
     file.setAttribute("aria-label", "留在本机的文件");
-    form.append(hint, file, button);
+    form.append(hint, file, actions);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       submitLocalFile(message, request, file, button);
@@ -538,7 +601,7 @@ function localEntry(message, request) {
   const area = document.createElement("textarea");
   area.value = request.draft || "";
   area.setAttribute("aria-label", "留在本机的内容");
-  form.append(hint, area, button);
+  form.append(hint, area, actions);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     submitLocal(message, request, area, button);
@@ -559,6 +622,23 @@ async function submitLocal(message, request, area, button) {
   } catch (error) {
     button.disabled = false;
     showNote(error.message || "没能加入本地内容。");
+  }
+}
+
+async function skipLocal(message, request, cancel, submit) {
+  const runId = message.run_id || request.run_id;
+  if (!runId) {
+    showNote("现在没有在等待本地内容。");
+    return;
+  }
+  cancel.disabled = true;
+  if (submit) submit.disabled = true;
+  try {
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/content`, { skip: true });
+  } catch (error) {
+    cancel.disabled = false;
+    if (submit) submit.disabled = false;
+    showNote(error.message || "没能取消。");
   }
 }
 
@@ -593,13 +673,220 @@ async function encodeFile(file) {
 }
 
 function toolLine(event) {
-  if (event.tool === "list_local_content") return "正在查看本机内容";
-  if (event.tool === "forget_local_content") return "正在移除本机内容";
-  if (event.tool === "lookup_demo") return "正在查询演示";
-  const args = event.arguments || {};
-  const aspect = args.aspect_ratio ? ` · ${args.aspect_ratio}` : "";
-  if (event.tool === "generate_image") return `正在生成图片${aspect}`;
-  return "正在调用本机工具";
+  const name = event.tool || event.name || "工具";
+  const status = toolStatus(event.status);
+  const brief = toolBrief(event);
+  return brief ? `${name} · ${status} · ${brief}` : `${name} · ${status}`;
+}
+
+function toolStatus(status) {
+  if (status === "waiting_confirm") return "等待确认";
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  return "运行";
+}
+
+function toolBrief(event) {
+  if (event.result && event.result.error && event.result.error.message) {
+    return String(event.result.error.message).slice(0, 40);
+  }
+  if (event.tool === "list_local_content") return "查看本机内容";
+  if (event.tool === "forget_local_content") return "移除本机内容";
+  if (event.tool === "lookup_demo") return "查询演示";
+  if (event.tool === "generate_image") return "生成图片";
+  if (event.tool === "accept_local_content") return "收集本机内容";
+  return "";
+}
+
+function toolTimeline(message, calls) {
+  const list = document.createElement("ol");
+  list.className = "timeline";
+  for (const call of calls) {
+    const item = document.createElement("li");
+    const name = document.createElement("div");
+    name.className = "tool-name";
+    name.textContent = call.tool || "工具";
+    const status = document.createElement("div");
+    status.className = "tool-status";
+    status.textContent = toolLine(call);
+    item.append(name, status);
+    if (call.status === "waiting_confirm" && message.status === "running") {
+      item.append(confirmRow(message, call));
+    }
+    list.append(item);
+  }
+  return list;
+}
+
+function confirmRow(message, call) {
+  const row = document.createElement("div");
+  row.className = "confirm-row";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.textContent = "确认";
+  yes.addEventListener("click", () => submitConfirm(message, true, yes));
+  const no = document.createElement("button");
+  no.type = "button";
+  no.textContent = "拒绝";
+  no.addEventListener("click", () => submitConfirm(message, false, no));
+  row.append(yes, no);
+  return row;
+}
+
+function waitingConfirm() {
+  const assistant = currentAssistant();
+  if (!assistant || assistant.status !== "running") return null;
+  const found = (assistant.events || []).find((item) => item.type === "tool_call" && item.status === "waiting_confirm");
+  return found ? assistant : null;
+}
+
+async function submitConfirm(message, allowed, button) {
+  const runId = message.run_id || (waitingConfirm() && waitingConfirm().run_id);
+  if (!runId) {
+    showNote("现在没有在等待确认。");
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/confirm`, { allowed: Boolean(allowed) });
+  } catch (error) {
+    if (button) button.disabled = false;
+    showNote(error.message || "没能提交确认。");
+  }
+}
+
+function attachmentView(attachment) {
+  const chip = document.createElement("div");
+  chip.className = "attach-chip";
+  if (attachment.kind === "image" && attachment.handle && state.currentId) {
+    const image = document.createElement("img");
+    image.alt = attachment.name || "附件图片";
+    image.src = `/api/sessions/${state.currentId}/attachments/${attachment.handle}`;
+    chip.append(image);
+  }
+  const label = document.createElement("span");
+  label.textContent = attachment.name || MODALITY_LABELS[attachment.kind] || "文件";
+  chip.append(label);
+  return chip;
+}
+
+async function addPendingFile(file) {
+  if (!file) return;
+  if (!file.size) {
+    showNote("空文件。");
+    return;
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    showNote("这条消息太长了。");
+    return;
+  }
+  const kind = kindFromFile(file);
+  const accepted = acceptedModalities();
+  if (accepted.length && accepted.indexOf(kind) < 0) {
+    showNote(`这个模型不接受${MODALITY_LABELS[kind] || kind}。`);
+  } else {
+    showNote("");
+  }
+  try {
+    if (!state.currentId) await createSession(false);
+    const encoded = await encodeFile(file);
+    const record = await api("POST", `/api/sessions/${state.currentId}/attachments`, {
+      file: encoded,
+      media_type: file.type || "application/octet-stream",
+      name: file.name || "",
+    });
+    state.pending.push(record);
+    renderPending();
+    updateButtons();
+  } catch (error) {
+    showNote(error.message || "没能上传附件。");
+  }
+}
+
+function kindFromFile(file) {
+  const type = (file.type || "").toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("video/")) return "video";
+  return "file";
+}
+
+function acceptedModalities() {
+  const items = (state.provider && state.provider.input_modalities) || ["text"];
+  return items.slice();
+}
+
+function attachmentBlock() {
+  const accepted = acceptedModalities();
+  for (const item of state.pending) {
+    if (accepted.indexOf(item.kind) < 0) {
+      return `这个模型不接受${MODALITY_LABELS[item.kind] || item.kind}。`;
+    }
+  }
+  return "";
+}
+
+function renderPending() {
+  const box = document.querySelector("#attach-list");
+  box.replaceChildren();
+  if (!state.pending.length) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  state.pending.forEach((item, index) => {
+    const chip = attachmentView(item);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "去掉";
+    remove.addEventListener("click", () => {
+      state.pending.splice(index, 1);
+      const blocked = attachmentBlock();
+      showNote(blocked);
+      renderPending();
+      updateButtons();
+    });
+    chip.append(remove);
+    box.append(chip);
+  });
+}
+
+function canRetry(message, failure) {
+  if (!failure || message.role !== "assistant" || message.status !== "failed") return false;
+  if (failure.retryable === true) return true;
+  return false;
+}
+
+function retryRow(message) {
+  const row = document.createElement("div");
+  row.className = "retry-row";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "重试";
+  button.addEventListener("click", () => retryLast(message));
+  row.append(button);
+  return row;
+}
+
+async function retryLast(message) {
+  if (state.sending) return;
+  const messages = (state.session && state.session.messages) || [];
+  const index = messages.indexOf(message);
+  let user = null;
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    if (messages[cursor].role === "user") {
+      user = messages[cursor];
+      break;
+    }
+  }
+  if (!user) {
+    showNote("找不到要重试的消息。");
+    return;
+  }
+  input.value = user.text || "";
+  state.pending = (user.attachments || []).map((item) => ({ ...item }));
+  renderPending();
+  await sendMessage();
 }
 
 function progressLine(event) {
@@ -615,8 +902,11 @@ function artifactSrc(event) {
 }
 
 function updateButtons() {
-  document.querySelector("#send").disabled = state.sending || !input.value.trim();
+  const blocked = attachmentBlock();
+  const empty = !input.value.trim() && !state.pending.length;
+  document.querySelector("#send").disabled = state.sending || empty || Boolean(blocked);
   document.querySelector("#stop").disabled = !state.sending;
+  if (blocked && !state.sending) showNote(blocked);
 }
 
 function showNote(message) {

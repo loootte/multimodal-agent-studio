@@ -28,8 +28,10 @@ from packages.contracts.events import (
     EVENT_RUN_STARTED,
     EVENT_RUNTIME_STEP,
     EVENT_TOOL_CALL,
+    EVENT_TOOL_CONFIRM,
     EVENT_TOOL_REQUESTED,
     HUMAN,
+    RETRYABLE,
     TERMINAL_EVENTS,
 )
 from services.gateway import GatewayError, stream as gateway_stream
@@ -39,9 +41,12 @@ from store import StoreError, new_id
 
 SYSTEM = (
     "你是一个有帮助的助手。用用户使用的语言回答。"
+    "这一轮用户消息里已经带上的图片附件，你可以直接看图回答。"
+    "用户要识别、描述图片，或根据图片编写提示词时，直接写出文字。"
+    "不要为此调用 accept_local_content，也不要调用 generate_image。"
     "用户要留下、附上、引用，或在后续任务里使用应留在本机的内容时，调用 accept_local_content。"
     "purpose 只能是 image_prompt 或 keep。kind 只能是 text 或 file。不要填写正文、字节、路径或文件名。"
-    "出图时 purpose 填 image_prompt，kind 填 text。"
+    "只有用户明确要求生成一张新图时，purpose 才填 image_prompt，kind 填 text。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "只读演示查询调用 lookup_demo，传入 topic。"
@@ -66,6 +71,18 @@ _IMAGE_MARKERS = (
     "做一张",
     "文生图",
     "出图",
+)
+_VISION_MARKERS = (
+    "识别",
+    "描述",
+    "看这",
+    "看看这",
+    "这是什么",
+    "图里",
+    "图中",
+    "写提示词",
+    "编写提示词",
+    "逆向",
 )
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
@@ -108,6 +125,10 @@ class Run:
         self._content_value: dict | None = None
         self._expect_kind = "text"
         self.waiting_content = False
+        self._confirm_ready = threading.Event()
+        self._confirm_lock = threading.Lock()
+        self._confirm_value: bool | None = None
+        self.waiting_confirm = False
 
     def begin_content_wait(self, kind: str = "text") -> None:
         self._content_ready.clear()
@@ -139,6 +160,32 @@ class Run:
                 return None
             return self._content_value
 
+    def begin_confirm_wait(self) -> None:
+        self._confirm_ready.clear()
+        with self._confirm_lock:
+            self._confirm_value = None
+            self.waiting_confirm = True
+
+    def offer_confirm(self, allowed: bool) -> str:
+        with self._confirm_lock:
+            if not self.waiting_confirm or self.cancel.is_set() or self._confirm_value is not None:
+                return "not_waiting"
+            self._confirm_value = bool(allowed)
+        self._confirm_ready.set()
+        return "ok"
+
+    def wait_confirm(self, timeout: float = _CONTENT_WAIT_SEC) -> bool:
+        if self.cancel.is_set():
+            with self._confirm_lock:
+                self.waiting_confirm = False
+            return False
+        signaled = self._confirm_ready.wait(timeout)
+        with self._confirm_lock:
+            self.waiting_confirm = False
+            if self.cancel.is_set() or not signaled:
+                return False
+            return bool(self._confirm_value)
+
     def note_comfy(self, prompt_id: str, base: str) -> None:
         with self._state_lock:
             if self.prompt_id is None:
@@ -161,6 +208,9 @@ class Run:
         with self._content_lock:
             self.waiting_content = False
         self._content_ready.set()
+        with self._confirm_lock:
+            self.waiting_confirm = False
+        self._confirm_ready.set()
         if not prompt_id or not base:
             return
         try:
@@ -208,18 +258,15 @@ def start(app, session_id: str, text, attachments) -> Run:
     if not isinstance(text, str):
         raise RequestError(400, "invalid_json", "文字需要是字符串。")
     text = text.strip()
-    if not text:
+    records = _resolve_attachments(app, session_id, attachments)
+    if not text and not records:
         raise RequestError(400, "empty", "请输入文字。")
     if len(text) > MAX_INPUT:
         raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
-    if attachments:
-        problem = GatewayError("modality_unsupported", HUMAN["modality_unsupported"])
-    else:
-        problem = None
     message_id = new_id("m_")
     run = Run(session_id, message_id)
     try:
-        assistant = app.sessions.append_turn(session_id, text, run.run_id)
+        assistant = app.sessions.append_turn(session_id, text, run.run_id, records)
     except StoreError as exc:
         if exc.message == "busy":
             raise RequestError(409, "busy", "这一会话还在回答，先停止再发送。") from exc
@@ -233,8 +280,11 @@ def start(app, session_id: str, text, attachments) -> Run:
         "session_id": session_id,
     })
     provider = app.provider.resolve()
-    if problem is None and not provider["api_key"]:
+    problem = None
+    if not provider["api_key"]:
         problem = GatewayError("missing_key", HUMAN["missing_key"])
+    elif records:
+        problem = _modality_problem(provider["model"], records)
     if problem is not None:
         _fail(app, session_id, run.message_id, run, problem, "")
         _log(session_id, provider["model"], "failed", 0.0)
@@ -258,6 +308,14 @@ def submit_content(app, run_id: str, text) -> dict:
     return _offer(app, run_id, "text", {"kind": "text", "text": text})
 
 
+def skip_content(app, run_id: str) -> dict:
+    run = app.runs.get(run_id)
+    if run is None:
+        raise RequestError(409, "not_waiting", "现在没有在等待本地内容。")
+    kind = "file" if run._expect_kind == "file" else "text"
+    return _offer(app, run_id, kind, {"kind": kind, "skip": True})
+
+
 def submit_file(app, run_id: str, encoded, media_type) -> dict:
     if not isinstance(encoded, str) or not encoded.strip():
         raise RequestError(400, "empty", "请选择要留在本机的文件。")
@@ -271,6 +329,82 @@ def submit_file(app, run_id: str, encoded, media_type) -> dict:
         raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
     payload = {"kind": "file", "data": data, "media_type": store.clean_media_type(media_type)}
     return _offer(app, run_id, "file", payload)
+
+
+def submit_confirm(app, run_id: str, allowed) -> dict:
+    run = app.runs.get(run_id)
+    if run is None:
+        raise RequestError(409, "not_waiting", "现在没有在等待确认。")
+    if run.offer_confirm(bool(allowed)) != "ok":
+        raise RequestError(409, "not_waiting", "现在没有在等待确认。")
+    return {"ok": True}
+
+
+def add_attachment(app, session_id: str, encoded, media_type, name="") -> dict:
+    if not isinstance(encoded, str) or not encoded.strip():
+        raise RequestError(400, "empty", "请选择附件。")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise RequestError(400, "invalid_json", "文件内容无法读取。") from exc
+    if not data:
+        raise RequestError(400, "empty", "请选择附件。")
+    if len(data) > store.MAX_ATTACHMENT:
+        raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
+    try:
+        return app.sessions.add_attachment(
+            session_id, data, store.clean_media_type(media_type), store.clean_filename(name),
+        )
+    except StoreError as exc:
+        if exc.message == "空文件。":
+            raise RequestError(400, "empty", "请选择附件。") from exc
+        if exc.message == "太大。":
+            raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"]) from exc
+        if exc.message == "找不到这个会话。":
+            raise RequestError(404, "not_found", "找不到这个会话。") from exc
+        raise RequestError(400, "invalid_json", "没能留下这个附件。") from exc
+
+
+def _resolve_attachments(app, session_id: str, attachments) -> list[dict]:
+    if attachments in (None, []):
+        return []
+    if not isinstance(attachments, list):
+        raise RequestError(400, "invalid_json", "附件需要是列表。")
+    records = []
+    seen = set()
+    for item in attachments:
+        handle = item.get("handle") if isinstance(item, dict) else item
+        if not isinstance(handle, str) or not handle:
+            raise RequestError(400, "invalid_json", "附件缺少句柄。")
+        if handle in seen:
+            continue
+        seen.add(handle)
+        info = app.sessions.attachment_info(session_id, handle)
+        if info is None:
+            raise RequestError(400, "invalid_json", "找不到这个附件。")
+        records.append(info)
+    return records
+
+
+def _modality_problem(model: str, records: list[dict]):
+    from services.gateway import describe
+    caps = describe(model)
+    accepted = set(caps.get("input_modalities") or ())
+    max_bytes = caps.get("max_file_bytes")
+    max_images = caps.get("max_images")
+    images = 0
+    for item in records:
+        kind = item.get("kind")
+        if kind not in accepted:
+            return GatewayError("modality_unsupported", HUMAN["modality_unsupported"])
+        size = item.get("size") or 0
+        if max_bytes is not None and size > max_bytes:
+            return GatewayError("payload_too_large", HUMAN["payload_too_large"])
+        if kind == "image":
+            images += 1
+    if max_images is not None and images > max_images:
+        return GatewayError("payload_too_large", HUMAN["payload_too_large"])
+    return None
 
 
 def _offer(app, run_id: str, kind: str, payload: dict) -> dict:
@@ -309,8 +443,8 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     status = "failed"
     try:
         session = app.sessions.get(session_id)
-        user_id, user_text = _latest_user(session)
-        image_request = _image_request(user_text)
+        user_id, user_text, attachments = _latest_user(session)
+        image_request = _image_request(user_text, attachments)
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
             session = app.sessions.get(session_id)
@@ -370,12 +504,23 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
         claimed["spoken"] = "".join(spoken)
         return True
 
+    def confirm(name, arguments):
+        return run.wait_confirm()
+
     def flush_traces() -> None:
         nonlocal seen
         items = traces_for(run.run_id)
         for entry in items[seen:]:
             seen += 1
-            _emit_runtime(app, session_id, message_id, run, entry, persist=True)
+            event = _emit_runtime(app, session_id, message_id, run, entry, persist=True)
+            if event.get("kind") == "tool" and event.get("name"):
+                _push_saved(app, session_id, message_id, run, {
+                    "type": EVENT_TOOL_CALL,
+                    "tool": event.get("name"),
+                    "status": "failed" if event.get("ok") is False else "success",
+                    "message_id": message_id,
+                    "run_id": run.run_id,
+                })
 
     _emit_runtime(
         app, session_id, message_id, run,
@@ -389,7 +534,9 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
             cancel=run.cancel,
             timeout_sec=app.timeout_sec,
             take=take,
+            confirm=confirm,
             run_id=run.run_id,
+            artifacts=_session_artifacts(app, session_id, session),
             local_bodies=app.sessions.local_bodies(session_id),
             base_url=provider["base_url"],
         ):
@@ -408,18 +555,40 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
                 run.push({"type": EVENT_MESSAGE_DELTA, "text": piece})
             elif kind == EVENT_TOOL_REQUESTED:
                 name = event.get("name") or ""
+                args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
                 _emit_runtime(
                     app, session_id, message_id, run,
                     {"kind": "tool", "name": name, "label": "调用 " + name},
                     persist=False,
                 )
-                if name == "lookup_demo":
-                    _push_saved(app, session_id, message_id, run, {
-                        "type": EVENT_TOOL_CALL,
-                        "tool": name,
-                        "arguments": event.get("arguments") if isinstance(event.get("arguments"), dict) else {},
-                        "message_id": message_id,
-                    })
+                _push_saved(app, session_id, message_id, run, {
+                    "type": EVENT_TOOL_CALL,
+                    "tool": name,
+                    "arguments": _public_args(args),
+                    "status": "running",
+                    "message_id": message_id,
+                    "run_id": run.run_id,
+                })
+            elif kind == EVENT_TOOL_CONFIRM:
+                run.begin_confirm_wait()
+                name = event.get("name") or ""
+                args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+                _push_saved(app, session_id, message_id, run, {
+                    "type": EVENT_TOOL_CONFIRM,
+                    "name": name,
+                    "tool": name,
+                    "arguments": _public_args(args),
+                    "message_id": message_id,
+                    "run_id": run.run_id,
+                })
+                _push_saved(app, session_id, message_id, run, {
+                    "type": EVENT_TOOL_CALL,
+                    "tool": name,
+                    "arguments": _public_args(args),
+                    "status": "waiting_confirm",
+                    "message_id": message_id,
+                    "run_id": run.run_id,
+                })
             elif kind == EVENT_MESSAGE_COMPLETED:
                 flush_traces()
                 _complete(app, session_id, message_id, run, event.get("text") or "".join(spoken))
@@ -428,7 +597,11 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
                 flush_traces()
                 code = str(event.get("code") or "provider_error")
                 message = str(event.get("message") or HUMAN.get(code) or HUMAN["provider_error"])
-                _fail(app, session_id, message_id, run, GatewayError(code, message), "".join(spoken))
+                retryable = event.get("retryable")
+                error = GatewayError(code, message)
+                if retryable is not None:
+                    error.retryable = bool(retryable)
+                _fail(app, session_id, message_id, run, error, "".join(spoken))
                 return "cancelled" if code == "cancelled" else "failed"
         flush_traces()
         if claimed:
@@ -484,6 +657,8 @@ def _continue_after_content(
     payload = run.wait_content()
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    if payload and payload.get("skip"):
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", "已取消。"))
     if not payload:
         current = app.sessions.message_text(session_id, message_id)
         return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要留在本机的内容。", current)
@@ -591,7 +766,9 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         "tool": name,
         "arguments": arguments,
         "result": result,
+        "status": "success",
         "message_id": message_id,
+        "run_id": run.run_id,
     })
     return "本地工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)
 
@@ -605,11 +782,13 @@ def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) 
         {"kind": "status", "label": "正在询问模型"},
         persist=False,
     )
+    session = app.sessions.get(session_id)
     for event in gateway_stream(
         _gateway_request(provider, messages),
         api_key=provider["api_key"],
         timeout_sec=app.timeout_sec,
         cancel=run.cancel,
+        artifacts=_session_artifacts(app, session_id, session),
         local_bodies=app.sessions.local_bodies(session_id),
         base_url=provider["base_url"],
     ):
@@ -654,9 +833,21 @@ def _gateway_request(provider: dict, messages: list[dict]) -> dict:
         if role == "system" and system is None and isinstance(content, str):
             system = content
             continue
+        parts = [{"type": "text", "text": content if isinstance(content, str) else ""}]
+        for item in message.get("attachments") or []:
+            if not isinstance(item, dict) or item.get("kind") != "image":
+                continue
+            handle = item.get("handle")
+            if not isinstance(handle, str) or not handle:
+                continue
+            parts.append({
+                "type": "image",
+                "artifact_id": handle,
+                "media_type": item.get("media_type") or "image/png",
+            })
         items.append({
             "role": role,
-            "parts": [{"type": "text", "text": content if isinstance(content, str) else ""}],
+            "parts": parts,
         })
     return {
         "model": provider["model"],
@@ -688,17 +879,19 @@ def _complete(app, session_id, message_id, run, text: str) -> None:
 
 def _fail(app, session_id: str, message_id: str, run: Run, error: GatewayError, text: str) -> None:
     state = "cancelled" if error.code == "cancelled" else "failed"
+    retryable = bool(getattr(error, "retryable", RETRYABLE.get(error.code, False)))
     app.sessions.update_message(
         session_id,
         message_id,
         text=text,
         status=state,
-        error={"code": error.code, "message": error.message},
+        error={"code": error.code, "message": error.message, "retryable": retryable},
     )
     run.push({
         "type": EVENT_RUN_FAILED,
         "code": error.code,
         "message": error.message,
+        "retryable": retryable,
         "text": text,
         "message_id": message_id,
         "run_id": run.run_id,
@@ -712,7 +905,9 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
         "type": EVENT_TOOL_CALL,
         "tool": name,
         "arguments": arguments,
+        "status": "running",
         "message_id": message_id,
+        "run_id": run.run_id,
     })
     if run.cancel.is_set():
         return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
@@ -818,6 +1013,7 @@ def _emit_runtime(app, session_id: str, message_id: str, run: Run, entry: dict, 
     if persist:
         app.sessions.append_runtime(session_id, message_id, event)
     run.push(event)
+    return event
 
 
 def _public_progress(event: dict) -> dict | None:
@@ -832,17 +1028,35 @@ def _public_progress(event: dict) -> dict | None:
     return progress
 
 
-def _latest_user(session: dict) -> tuple[str, str]:
+def _latest_user(session: dict) -> tuple[str, str, list]:
     for message in reversed(session.get("messages") or []):
-        if message.get("role") == "user" and (message.get("text") or "").strip():
-            return message.get("message_id") or "", message.get("text") or ""
-    return "", ""
+        if message.get("role") != "user":
+            continue
+        attachments = [
+            item for item in (message.get("attachments") or [])
+            if isinstance(item, dict)
+        ]
+        if (message.get("text") or "").strip() or attachments:
+            return message.get("message_id") or "", message.get("text") or "", attachments
+    return "", "", []
 
 
-def _image_request(text: str) -> bool:
+def _has_image_attachment(attachments) -> bool:
+    for item in attachments or []:
+        if isinstance(item, dict) and item.get("kind") == "image":
+            return True
+    return False
+
+
+def _image_request(text: str, attachments=None) -> bool:
+    if any(marker in text for marker in _VISION_MARKERS):
+        if not any(marker in text for marker in _IMAGE_MARKERS) and "comfy" not in text.lower():
+            return False
+    if _has_image_attachment(attachments):
+        return "comfy" in text.lower() or any(marker in text for marker in _IMAGE_MARKERS)
     if "comfy" in text.lower():
         return True
-    if "图片" in text and any(word in text for word in ("提示词", "生成", "画")):
+    if "图片" in text and any(word in text for word in ("生成", "画")):
         return True
     return any(marker in text for marker in _IMAGE_MARKERS)
 
@@ -910,7 +1124,9 @@ def _refuse_file_image(app, session_id, message_id, run, tool_call) -> str:
         "type": EVENT_TOOL_CALL,
         "tool": "generate_image",
         "arguments": arguments,
+        "status": "failed",
         "message_id": message_id,
+        "run_id": run.run_id,
     })
     current = app.sessions.message_text(session_id, message_id)
     return _error_finish(
@@ -1043,9 +1259,16 @@ def _model_messages(
                 error = message.get("error") or {}
                 text = error.get("message") or ""
             text = _cover_bodies(text, bodies)
-        if not text.strip():
+        attachments = [
+            item for item in (message.get("attachments") or [])
+            if isinstance(item, dict) and isinstance(item.get("handle"), str)
+        ]
+        if not text.strip() and not attachments:
             continue
-        items.append({"role": message["role"], "content": text[:MAX_MESSAGE]})
+        packed = {"role": message["role"], "content": (text[:MAX_MESSAGE] if text else "")}
+        if attachments and message.get("role") == "user":
+            packed["attachments"] = attachments
+        items.append(packed)
     if len(items) > MAX_TURNS:
         items = items[-MAX_TURNS:]
     while items and sum(len(item["content"]) for item in items) > MAX_TOTAL:
@@ -1060,6 +1283,37 @@ def _cover_bodies(text: str, bodies: list[tuple[str, str]]) -> str:
         if body in text:
             return _handle_line(handle)
     return text
+
+
+def _session_artifacts(app, session_id: str, session: dict) -> dict:
+    found = {}
+    for message in session.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        for item in message.get("attachments") or []:
+            if not isinstance(item, dict) or item.get("kind") != "image":
+                continue
+            handle = item.get("handle")
+            if not isinstance(handle, str) or handle in found:
+                continue
+            data = app.sessions.attachment_bytes(session_id, handle)
+            if data:
+                found[handle] = data
+    return found
+
+
+def _public_args(arguments: dict) -> dict:
+    public = {}
+    for key, value in arguments.items():
+        label = str(key).lower()
+        if any(word in label for word in ("key", "secret", "password", "token")):
+            public[key] = "…"
+            continue
+        if isinstance(value, str) and len(value) > 80:
+            public[key] = value[:80] + "…"
+            continue
+        public[key] = value
+    return public
 
 
 def _log(session_id: str, model: str, status: str, elapsed: float) -> None:
