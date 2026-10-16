@@ -686,6 +686,14 @@ def _gateway_capabilities() -> None:
         fail("能力声明没有上下文上限")
     if caps["tools"] is not True:
         fail("能力声明没有工具调用")
+    text_only = describe("deepseek-v4-pro")
+    if "image" in text_only["input_modalities"]:
+        fail("deepseek-v4-pro 不该声明能看图")
+    if set(text_only["input_modalities"]) != {"text"}:
+        fail("deepseek-v4-pro 的输入模态不对")
+    flash = describe("deepseek-flash")
+    if "image" not in flash["input_modalities"] or "text" not in flash["input_modalities"]:
+        fail("deepseek-flash 没有声明能看图")
 
 
 def _gateway_switch_adapter(provider, upstream: str) -> None:
@@ -1155,6 +1163,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
     _reject_file_case(base, session_id, provider)
+    _reject_image_text_model_case(base, session_id, provider, upstream)
     _ask_image_case(base, session_id, provider)
     _vision_prompt_case(base, provider)
     _skip_content_case(base, provider)
@@ -1352,6 +1361,49 @@ def _reject_file_case(base: str, session_id: str, provider) -> None:
         fail("不接受的附件仍然发给了模型")
     if raw and SECRET in raw:
         fail("事件流里出现了密钥")
+
+
+def _reject_image_text_model_case(base: str, session_id: str, provider, upstream: str) -> None:
+    before = len(provider.requests)
+    status, saved = request("PUT", base + "/api/provider", {
+        "base_url": upstream,
+        "model": "deepseek-v4-pro",
+        "api_key": SECRET,
+    })
+    if status != 200:
+        fail(f"没能改成纯文本模型：{status} {saved}")
+    view = json.loads(saved)
+    if "image" in (view.get("input_modalities") or []):
+        fail("deepseek-v4-pro 的设置仍显示能看图")
+    try:
+        encoded = base64.b64encode(_PNG).decode("ascii")
+        status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+            "file": encoded,
+            "media_type": "image/png",
+            "name": "swatch.png",
+        })
+        if status != 200:
+            fail(f"纯文本模型下图片附件没有收下：{status} {body}")
+        handle = json.loads(body)["handle"]
+        status, raw, events = read_sse(
+            site_port(base),
+            f"/api/sessions/{session_id}/messages",
+            {"text": "看这张图", "attachments": [{"handle": handle}]},
+        )
+        if status != 200 or events[-1].get("code") != "modality_unsupported":
+            fail("纯文本模型没有按能力拒绝图片")
+        if events[-1].get("message") != "这个模型不接受这种输入。":
+            fail("纯文本模型拒绝图片没有用人话提示")
+        if len(provider.requests) != before:
+            fail("纯文本模型仍然把图片发给了模型")
+        if raw and SECRET in raw:
+            fail("事件流里出现了密钥")
+    finally:
+        request("PUT", base + "/api/provider", {
+            "base_url": upstream,
+            "model": "demo-model",
+            "api_key": SECRET,
+        })
 
 
 def _ask_image_case(base: str, session_id: str, provider) -> None:

@@ -82,7 +82,7 @@ Agent 运行时
 | --- | --- |
 | `GET /`、`GET /static/app.js`、`GET /static/app.css` | 直接回静态文件 |
 | `GET /api/identity` | `store.py` 的 `IdentityStore`。单用户开发登录 |
-| `GET/PUT /api/provider` | `store.py` 的 `ProviderStore`。`input_modalities` 来自网关对该模型的能力声明 |
+| `GET/PUT /api/provider` | `store.py` 的 `ProviderStore`。`input_modalities` 来自网关对该模型的能力声明。OpenAI 兼容适配器对 grok 和未知模型声明图像；`deepseek-v4-pro` 这类已知纯文本模型只声明文字 |
 | `GET/POST /api/sessions`、`GET /api/sessions/{id}` | `store.py` 的 `SessionStore`。会话带 `user_id` |
 | `POST /api/sessions/{id}/messages` | `chat_run.start`，响应是 SSE。附件只带句柄 |
 | `POST /api/sessions/{id}/attachments`、`GET /api/sessions/{id}/attachments/{handle}` | 对话附件的上传和预览 |

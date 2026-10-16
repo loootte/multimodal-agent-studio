@@ -11,6 +11,7 @@ local_bodies 里长度不少于 8 的正文一旦出现在请求里，连接还�
 调用方把已入库的文字、文件的文本和文件字节的 base64 放进这个列表。
 工具契约本身不参与这道检查，避免说明文字被当成正文。
 图像部件按工件标识解析，写成 data URL。音频和视频由能力声明拒绝。
+能力按模型名区分：已知纯文本模型不声明图像输入，避免把图发给看不见图的接口。
 """
 
 from __future__ import annotations
@@ -49,16 +50,17 @@ class OpenAIAdapter:
     name = "openai"
 
     def capabilities(self, model: str) -> dict:
+        vision = _accepts_image(model)
         return capabilities(
             model=model,
-            input_modalities=(TEXT, IMAGE),
+            input_modalities=(TEXT, IMAGE) if vision else (TEXT,),
             output_modalities=(TEXT,),
             streaming=True,
             tools=True,
             context_limit=_CONTEXT_LIMIT,
             context_unit="tokens",
-            max_file_bytes=_MAX_FILE,
-            max_images=_MAX_IMAGES,
+            max_file_bytes=_MAX_FILE if vision else None,
+            max_images=_MAX_IMAGES if vision else None,
         )
 
     def stream(
@@ -291,6 +293,13 @@ def _artifact_bytes(artifacts: dict, artifact_id: str):
         with open(item, "rb") as handle:
             return handle.read()
     return None
+
+
+def _accepts_image(model: str) -> bool:
+    name = model.strip().lower() if isinstance(model, str) else ""
+    if "deepseek" in name:
+        return "flash" in name or "vision" in name or "-vl" in name
+    return True
 
 
 def _artifact_id(value) -> bool:
