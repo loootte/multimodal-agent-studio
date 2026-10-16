@@ -577,14 +577,21 @@ function localEntry(message, request) {
   const hint = document.createElement("p");
   hint.className = "status-line";
   hint.textContent = request.hint || "请输入要留在本机的内容。";
+  const actions = document.createElement("div");
+  actions.className = "confirm-row";
   const button = document.createElement("button");
   button.type = "submit";
   button.textContent = "加入本地内容并继续";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => skipLocal(message, request, cancel, button));
+  actions.append(button, cancel);
   if (request.kind === "file") {
     const file = document.createElement("input");
     file.type = "file";
     file.setAttribute("aria-label", "留在本机的文件");
-    form.append(hint, file, button);
+    form.append(hint, file, actions);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       submitLocalFile(message, request, file, button);
@@ -594,7 +601,7 @@ function localEntry(message, request) {
   const area = document.createElement("textarea");
   area.value = request.draft || "";
   area.setAttribute("aria-label", "留在本机的内容");
-  form.append(hint, area, button);
+  form.append(hint, area, actions);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     submitLocal(message, request, area, button);
@@ -615,6 +622,23 @@ async function submitLocal(message, request, area, button) {
   } catch (error) {
     button.disabled = false;
     showNote(error.message || "没能加入本地内容。");
+  }
+}
+
+async function skipLocal(message, request, cancel, submit) {
+  const runId = message.run_id || request.run_id;
+  if (!runId) {
+    showNote("现在没有在等待本地内容。");
+    return;
+  }
+  cancel.disabled = true;
+  if (submit) submit.disabled = true;
+  try {
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/content`, { skip: true });
+  } catch (error) {
+    cancel.disabled = false;
+    if (submit) submit.disabled = false;
+    showNote(error.message || "没能取消。");
   }
 }
 

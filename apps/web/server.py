@@ -197,7 +197,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         matched = _RUN_CONTENT.fullmatch(path)
         if matched and method == "POST":
             body = _read_json(handler, _MAX_ATTACHMENT_BODY)
-            if body.get("file") is not None:
+            if body.get("skip"):
+                result = chat_run.skip_content(app, matched.group(1))
+            elif body.get("file") is not None:
                 result = chat_run.submit_file(
                     app, matched.group(1), body.get("file"), body.get("media_type"),
                 )

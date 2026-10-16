@@ -1075,6 +1075,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "content_request" not in script or "加入本地内容并继续" not in script:
         fail("页面没有本地内容输入")
+    if "取消" not in script or "skip: true" not in script:
+        fail("本地内容输入不能空着关掉")
     if 'kind === "file"' not in script:
         fail("页面没有文件形式的本地内容输入")
     if "本机用户" not in page or "/api/identity" not in script:
@@ -1154,6 +1156,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _reject_key_case(base, session_id, provider, directory)
     _reject_file_case(base, session_id, provider)
     _ask_image_case(base, session_id, provider)
+    _vision_prompt_case(base, provider)
+    _skip_content_case(base, provider)
     _confirm_reject_case(base, provider)
     _busy_case(base, session_id, provider)
     _timeout_case(base, session_id, provider, app)
@@ -1380,6 +1384,59 @@ def _ask_image_case(base: str, session_id: str, provider) -> None:
     user = stored["messages"][-2]
     if user.get("role") != "user" or not any(item.get("handle") == handle for item in user.get("attachments") or []):
         fail("图片没有留在会话消息里")
+
+
+def _vision_prompt_case(base: str, provider) -> None:
+    import chat_run
+
+    if chat_run._image_request("识别这张图片并编写提示词"):
+        fail("根据图片写提示词被当成了出图")
+    if chat_run._image_request("看这张图写提示词", [{"kind": "image"}]):
+        fail("带图写提示词被当成了出图")
+    if not chat_run._image_request("画一只茶壶"):
+        fail("出图关键词没有认出画一只茶壶")
+    provider.mode = "ok"
+    session_id = _fresh_session(base)
+    encoded = base64.b64encode(_PNG).decode("ascii")
+    status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+        "file": encoded,
+        "media_type": "image/png",
+        "name": "swatch.png",
+    })
+    if status != 200:
+        fail(f"识图附件没有收下：{status} {body}")
+    handle = json.loads(body)["handle"]
+    events = _speak(base, session_id, "识别这张图片并编写提示词", attachments=[{"handle": handle}])
+    if any(event.get("type") == "content_request" for event in events):
+        fail("识图写提示词弹出了本地内容窗口")
+    if _assistant_text(events) != "你好":
+        fail("识图写提示词没有完成这一轮")
+
+
+def _skip_content_case(base: str, provider) -> None:
+    provider.mode = "image"
+    session_id = _fresh_session(base)
+
+    def on_event(event):
+        if event.get("type") != "content_request":
+            return
+        status, body = request("POST", base + f"/api/runs/{event.get('run_id')}/content", {"skip": True})
+        if status != 200:
+            fail(f"取消本地内容失败：{status} {body}")
+
+    status, raw, events = read_sse(
+        site_port(base),
+        f"/api/sessions/{session_id}/messages",
+        {"text": "画一只茶壶"},
+        on_event=on_event,
+        timeout=8,
+    )
+    if status != 200 or not events or events[-1].get("type") not in TERMINAL:
+        fail("取消本地内容没有收到结束事件")
+    if events[-1].get("code") != "cancelled" or events[-1].get("message") != "已取消。":
+        fail("取消本地内容没有关掉这一轮")
+    if any(event.get("type") == "artifact" for event in events):
+        fail("取消本地内容后仍然出图")
 
 
 def _confirm_reject_case(base: str, provider) -> None:
@@ -2181,6 +2238,8 @@ def _local_keep(base: str, provider, box: ComfyState) -> None:
     secret = "语义留下的本机正文甲"
     if chat_run._image_request(instruction):
         fail("语义唤起被当成了出图关键词")
+    if chat_run._image_request("识别这张图片并编写提示词"):
+        fail("识别图片写提示词被当成了出图关键词")
     before = len(box.prompts)
     sent = len(provider.requests)
     events = _speak(base, session_id, instruction, timeout=12, content=secret)

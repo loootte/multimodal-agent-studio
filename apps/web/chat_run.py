@@ -41,9 +41,12 @@ from store import StoreError, new_id
 
 SYSTEM = (
     "你是一个有帮助的助手。用用户使用的语言回答。"
+    "这一轮用户消息里已经带上的图片附件，你可以直接看图回答。"
+    "用户要识别、描述图片，或根据图片编写提示词时，直接写出文字。"
+    "不要为此调用 accept_local_content，也不要调用 generate_image。"
     "用户要留下、附上、引用，或在后续任务里使用应留在本机的内容时，调用 accept_local_content。"
     "purpose 只能是 image_prompt 或 keep。kind 只能是 text 或 file。不要填写正文、字节、路径或文件名。"
-    "出图时 purpose 填 image_prompt，kind 填 text。"
+    "只有用户明确要求生成一张新图时，purpose 才填 image_prompt，kind 填 text。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "只读演示查询调用 lookup_demo，传入 topic。"
@@ -68,6 +71,18 @@ _IMAGE_MARKERS = (
     "做一张",
     "文生图",
     "出图",
+)
+_VISION_MARKERS = (
+    "识别",
+    "描述",
+    "看这",
+    "看看这",
+    "这是什么",
+    "图里",
+    "图中",
+    "写提示词",
+    "编写提示词",
+    "逆向",
 )
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
@@ -293,6 +308,14 @@ def submit_content(app, run_id: str, text) -> dict:
     return _offer(app, run_id, "text", {"kind": "text", "text": text})
 
 
+def skip_content(app, run_id: str) -> dict:
+    run = app.runs.get(run_id)
+    if run is None:
+        raise RequestError(409, "not_waiting", "现在没有在等待本地内容。")
+    kind = "file" if run._expect_kind == "file" else "text"
+    return _offer(app, run_id, kind, {"kind": kind, "skip": True})
+
+
 def submit_file(app, run_id: str, encoded, media_type) -> dict:
     if not isinstance(encoded, str) or not encoded.strip():
         raise RequestError(400, "empty", "请选择要留在本机的文件。")
@@ -420,8 +443,8 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     status = "failed"
     try:
         session = app.sessions.get(session_id)
-        user_id, user_text = _latest_user(session)
-        image_request = _image_request(user_text)
+        user_id, user_text, attachments = _latest_user(session)
+        image_request = _image_request(user_text, attachments)
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
             session = app.sessions.get(session_id)
@@ -634,6 +657,8 @@ def _continue_after_content(
     payload = run.wait_content()
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    if payload and payload.get("skip"):
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", "已取消。"))
     if not payload:
         current = app.sessions.message_text(session_id, message_id)
         return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要留在本机的内容。", current)
@@ -1003,19 +1028,35 @@ def _public_progress(event: dict) -> dict | None:
     return progress
 
 
-def _latest_user(session: dict) -> tuple[str, str]:
+def _latest_user(session: dict) -> tuple[str, str, list]:
     for message in reversed(session.get("messages") or []):
         if message.get("role") != "user":
             continue
-        if (message.get("text") or "").strip() or message.get("attachments"):
-            return message.get("message_id") or "", message.get("text") or ""
-    return "", ""
+        attachments = [
+            item for item in (message.get("attachments") or [])
+            if isinstance(item, dict)
+        ]
+        if (message.get("text") or "").strip() or attachments:
+            return message.get("message_id") or "", message.get("text") or "", attachments
+    return "", "", []
 
 
-def _image_request(text: str) -> bool:
+def _has_image_attachment(attachments) -> bool:
+    for item in attachments or []:
+        if isinstance(item, dict) and item.get("kind") == "image":
+            return True
+    return False
+
+
+def _image_request(text: str, attachments=None) -> bool:
+    if any(marker in text for marker in _VISION_MARKERS):
+        if not any(marker in text for marker in _IMAGE_MARKERS) and "comfy" not in text.lower():
+            return False
+    if _has_image_attachment(attachments):
+        return "comfy" in text.lower() or any(marker in text for marker in _IMAGE_MARKERS)
     if "comfy" in text.lower():
         return True
-    if "图片" in text and any(word in text for word in ("提示词", "生成", "画")):
+    if "图片" in text and any(word in text for word in ("生成", "画")):
         return True
     return any(marker in text for marker in _IMAGE_MARKERS)
 
