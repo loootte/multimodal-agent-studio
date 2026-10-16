@@ -335,6 +335,7 @@ def self_check() -> None:
         _redact_unit()
         _redact_history()
         _gateway_cases()
+        _runtime_cases()
         _live()
     finally:
         for name, value in saved.items():
@@ -772,6 +773,222 @@ class _FakeAdapter:
     def stream(self, request, **kwargs):
         self.seen.append(request["model"])
         yield {"type": "message.delta", "text": "from-fake"}
+
+
+def _runtime_cases() -> None:
+    from services.gateway import install_defaults, registry
+    from services.runtime import Budget, run as runtime_run, traces_for
+    from services.runtime.tools import execute_tool, tool_mutates
+
+    try:
+        _runtime_clock()
+        _runtime_demo(registry, runtime_run, traces_for)
+        _runtime_budget(registry, runtime_run, traces_for)
+        _runtime_confirm(registry, runtime_run)
+        _runtime_cancel(registry, runtime_run)
+        _runtime_invalid_schema(registry, runtime_run)
+        if not tool_mutates("generate_image") or tool_mutates("lookup_demo"):
+            fail("写操作和只读演示的确认标记不对")
+        fact = execute_tool("lookup_demo", {"topic": "runtime"})
+        if not fact.get("ok") or "studio-demo: runtime" not in str(fact.get("fact")):
+            fail("只读演示工具没有返回固定说明")
+    finally:
+        install_defaults()
+
+
+def _runtime_clock() -> None:
+    from services.runtime.budget import Budget, Clock
+
+    timed = Clock(Budget(steps=8, time_sec=0, tokens=100000))
+    if "时间" not in (timed.check() or ""):
+        fail("超过时间预算没有可读的停止原因")
+    tokens = Clock(Budget(steps=8, time_sec=120, tokens=1))
+    tokens.tokens_used = 1
+    if "token" not in (tokens.check() or ""):
+        fail("超过 token 预算没有可读的停止原因")
+
+
+def _runtime_demo(registry, runtime_run, traces_for) -> None:
+    adapter = _ScriptAdapter([
+        [{"type": "tool.requested", "name": "lookup_demo", "arguments": {"topic": "runtime"}}],
+        [{"type": "message.delta", "text": "演示完成"}],
+    ])
+    _install_script(registry, "runtime-demo", adapter)
+    events = _runtime_collect(runtime_run, "runtime-demo", "查一下演示")
+    kinds = [event.get("type") for event in events]
+    if kinds[0] != "run.started" or "tool.requested" not in kinds or kinds[-1] != "message.completed":
+        fail(f"只读演示循环的事件不对：{kinds}")
+    if _gateway_text_of(events) != "演示完成":
+        fail("只读演示没有在工具返回后给出回答")
+    if any(event.get("type") == "tool.confirm" for event in events):
+        fail("只读演示被当成了写操作")
+    run_id = events[0].get("run_id")
+    items = traces_for(run_id)
+    types = [item.get("type") for item in items]
+    if types != ["model", "tool", "model"]:
+        fail(f"追踪没有按一次运行串起来：{types}")
+    if items[0].get("modalities") != ["text"] or items[1].get("name") != "lookup_demo":
+        fail("追踪缺少模态或工具名")
+    if len(adapter.calls) != 2:
+        fail("只读演示的模型步数不对")
+    blob = json.dumps(adapter.calls[1]["messages"], ensure_ascii=False)
+    if "studio-demo: runtime" not in blob:
+        fail("第二次模型请求没有带上工具结果")
+
+
+def _runtime_budget(registry, runtime_run, traces_for) -> None:
+    adapter = _ScriptAdapter(None)
+
+    def always(request, **kwargs):
+        adapter.calls.append(request)
+        yield {"type": "tool.requested", "name": "lookup_demo", "arguments": {"topic": "loop"}}
+
+    adapter.stream = always
+    _install_script(registry, "runtime-budget", adapter)
+    from services.runtime import Budget
+
+    events = _runtime_collect(runtime_run, "runtime-budget", "一直查", budget=Budget(steps=2))
+    if events[-1].get("type") != "run.failed" or events[-1].get("code") != "budget_exceeded":
+        fail("超过步数预算没有失败")
+    if "步数" not in (events[-1].get("message") or ""):
+        fail("超过步数预算没有可读的停止原因")
+    if len(adapter.calls) != 2:
+        fail("超过步数预算后仍发出了新的模型请求")
+    items = traces_for(events[0]["run_id"])
+    if [item.get("type") for item in items] != ["model", "tool", "model", "tool"]:
+        fail(f"步数预算用尽时追踪不对：{[item.get('type') for item in items]}")
+
+
+def _runtime_confirm(registry, runtime_run) -> None:
+    asked = []
+    executed = []
+    adapter = _ScriptAdapter([
+        [{"type": "tool.requested", "name": "generate_image", "arguments": {
+            "content_handle": "c_" + "ab" * 16, "aspect_ratio": "1:1",
+        }}],
+        [{"type": "message.delta", "text": "没有出图"}],
+    ])
+    _install_script(registry, "runtime-confirm", adapter)
+
+    def confirm(name, arguments):
+        asked.append(name)
+        return False
+
+    def execute(name, arguments):
+        executed.append(name)
+        return {"ok": True, "tool": name}
+
+    events = _runtime_collect(
+        runtime_run, "runtime-confirm", "画一张", confirm=confirm, execute=execute,
+    )
+    if asked != ["generate_image"] or executed:
+        fail("写操作没有停下来等人确认")
+    if not any(event.get("type") == "tool.confirm" for event in events):
+        fail("写操作没有发出确认事件")
+    if _gateway_text_of(events) != "没有出图":
+        fail("拒绝确认后没有继续回答")
+
+
+def _runtime_cancel(registry, runtime_run) -> None:
+    import threading
+    from services.runtime.tools import execute_tool
+
+    adapter = _ScriptAdapter([
+        [{"type": "tool.requested", "name": "lookup_demo", "arguments": {"topic": "stop"}}],
+        [{"type": "message.delta", "text": "不该出现"}],
+    ])
+    _install_script(registry, "runtime-cancel", adapter)
+    cancel = threading.Event()
+
+    def execute(name, arguments):
+        cancel.set()
+        return execute_tool(name, arguments)
+
+    events = _runtime_collect(runtime_run, "runtime-cancel", "停下", cancel=cancel, execute=execute)
+    if events[-1].get("code") != "cancelled":
+        fail("取消后没有停下")
+    if len(adapter.calls) != 1:
+        fail("取消后仍发出了新的模型请求")
+    if any(event.get("text") == "不该出现" for event in events):
+        fail("取消后仍追加了回答")
+
+
+def _runtime_invalid_schema(registry, runtime_run) -> None:
+    executed = []
+    adapter = _ScriptAdapter([
+        [{"type": "tool.requested", "name": "lookup_demo", "arguments": {}}],
+        [{"type": "message.delta", "text": "参数不对"}],
+    ])
+    _install_script(registry, "runtime-schema", adapter)
+
+    def execute(name, arguments):
+        executed.append(name)
+        return {"ok": True}
+
+    events = _runtime_collect(runtime_run, "runtime-schema", "查", execute=execute)
+    if executed:
+        fail("参数没通过校验仍然执行了工具")
+    if _gateway_text_of(events) != "参数不对":
+        fail("校验失败后没有把结果交回模型")
+
+
+def _runtime_collect(runtime_run, model: str, text: str, **kwargs) -> list[dict]:
+    import threading
+
+    request = {
+        "model": model,
+        "messages": [{"role": "user", "parts": [{"type": "text", "text": text}]}],
+        "tools": [],
+    }
+    cancel = kwargs.pop("cancel", threading.Event())
+    events = []
+    for event in runtime_run(
+        request,
+        api_key=SECRET,
+        cancel=cancel,
+        timeout_sec=2,
+        **kwargs,
+    ):
+        events.append(event)
+    return events
+
+
+def _install_script(registry, model: str, adapter) -> None:
+    from services.gateway import install_defaults
+
+    install_defaults()
+    registry.register("script", adapter)
+    registry.bind(model, "script")
+
+
+class _ScriptAdapter:
+    def __init__(self, replies) -> None:
+        self.replies = replies
+        self.calls: list[dict] = []
+
+    def capabilities(self, model: str) -> dict:
+        return {
+            "model": model,
+            "input_modalities": ("text",),
+            "output_modalities": ("text",),
+            "streaming": True,
+            "tools": True,
+            "context_limit": 1024,
+            "context_unit": "tokens",
+            "max_file_bytes": None,
+            "max_duration_sec": None,
+            "max_images": None,
+        }
+
+    def stream(self, request, **kwargs):
+        self.calls.append(request)
+        index = len(self.calls) - 1
+        replies = self.replies or []
+        if index >= len(replies):
+            yield {"type": "message.delta", "text": "额外一步"}
+            return
+        for event in replies[index]:
+            yield event
 
 
 def _live() -> None:

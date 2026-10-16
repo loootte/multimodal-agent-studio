@@ -32,6 +32,7 @@ from packages.contracts.events import (
     TERMINAL_EVENTS,
 )
 from services.gateway import GatewayError, stream as gateway_stream
+from services.runtime import execute_tool
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -41,6 +42,7 @@ SYSTEM = (
     "出图时 purpose 填 image_prompt，kind 填 text。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
+    "只读演示查询调用 lookup_demo，传入 topic。"
     "要用文字句柄出图时，再调用 generate_image。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
@@ -363,7 +365,7 @@ def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_c
         return _continue_after_content(
             app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
         )
-    if name in ("list_local_content", "forget_local_content"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
         return _run_bound(app, session_id, message_id, run, user_text, tool_call, False)
@@ -436,7 +438,7 @@ def _continue_after_content(
             return _refuse_file_image(app, session_id, message_id, run, tool_call)
         bound = _bind_submitted(submitted, tool_call)
         return _finish_image(app, session_id, message_id, run, reply, bound)
-    if name in ("list_local_content", "forget_local_content"):
+    if name in ("list_local_content", "forget_local_content", "lookup_demo"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     _complete(app, session_id, message_id, run, reply)
     return "completed"
@@ -481,6 +483,9 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         if handle:
             result["handle"] = handle
         arguments = {"content_handle": handle} if handle else {}
+    elif name == "lookup_demo":
+        arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        result = execute_tool(name, arguments)
     else:
         return None
     _push_saved(app, session_id, message_id, run, {

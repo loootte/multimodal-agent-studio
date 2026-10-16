@@ -11,6 +11,7 @@ def tools() -> list[Tool]:
             name="accept_local_content",
             description="向用户收集一条留在本机的内容。可以是文字或文件。不要填写正文、字节、路径或文件名。",
             order=10,
+            mutating=True,
             parameters={
                 "type": "object",
                 "additionalProperties": False,
@@ -43,6 +44,7 @@ def tools() -> list[Tool]:
             name="forget_local_content",
             description="丢掉本会话的一枚内容句柄。不要填写正文。",
             order=30,
+            mutating=True,
             parameters={
                 "type": "object",
                 "additionalProperties": False,

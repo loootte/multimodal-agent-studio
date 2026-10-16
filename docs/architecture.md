@@ -17,7 +17,7 @@ Agent 运行时
 工件库与会话存储
 ```
 
-下面先写目标分层，再写每一层现在落到哪些文件。`services/runtime`、`services/tools`、`packages/artifacts`、`evals` 和 `ops` 还没有建。提前落地的文件不把路线图任一阶段标成完成。
+下面先写目标分层，再写每一层现在落到哪些文件。`services/tools`、`packages/artifacts`、`evals` 和 `ops` 还没有建。
 
 ## 一次请求
 
@@ -31,7 +31,7 @@ Agent 运行时
 6. 工具结果写回运行轨迹，再次进入循环，直到模型给出最终回答或预算用尽。
 7. 界面对着同一条运行标识渲染回答和工具时间线。
 
-预算、工具确认和多步循环还没有单独的运行时。现在接通的是一轮文字、一轮本地内容工具，或一轮文生图。这不把路线图任一阶段标成完成。
+网页仍接通一轮文字、一轮本地内容工具，或一轮文生图。多步循环、预算和写操作确认在 `services/runtime`。网页确认按钮留给第 3 阶段。
 
 ## 现在的一次出图
 
@@ -93,16 +93,26 @@ Agent 运行时
 
 拥有循环和停止条件。它是唯一可以调用工具的地方。模型文本里出现的「我已经执行了」不算执行。
 
-这一层的目录 `services/runtime` 还没建。现在一轮回答放在网页进程里：
+`services/runtime` 拥有循环、预算、校验、确认和追踪。网页这一刀仍走 `apps/web/chat_run.py`：一轮文字、一轮本地内容或一轮文生图。写操作的确认按钮留给第 3 阶段。
+
+| 文件 | 做什么 |
+| --- | --- |
+| `services/runtime/loop.py` | 观察、决定、调用工具或回答，直到结束或碰到预算。模型文本里说已经执行，不算执行 |
+| `services/runtime/budget.py` | 步数、时间和 token 预算。超过时停下并留下可读原因 |
+| `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
+| `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
+| `poc/tools/internal/demo.py`、`poc/tools/external/demo.py` | 只读演示 `lookup_demo` |
+
+现在一轮回答仍放在网页进程里：
 
 | 文件 | 做什么 |
 | --- | --- |
 | `apps/web/chat_run.py` | 一轮回答。文字直接流式写回。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content` 和 `forget_local_content` 只操作本会话。同一条助手消息上排列 `content_request`、`tool_call`、`progress`、`artifact` 或 `error` |
 | `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
 
-`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`forget_local_content` 和 `generate_image`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
+`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`forget_local_content`、`generate_image` 和 `lookup_demo`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
 
-还没有放进运行时的部分：多步循环、预算、写操作前的人工确认、`generate_video`。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`，不把路线图任一阶段标成完成。
+网页确认按钮、`generate_video` 和附件仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`，不把第 3 阶段标成完成。
 
 ### 模型网关
 
@@ -132,10 +142,12 @@ Agent 运行时
 | --- | --- |
 | `poc/comfyui/agent_tools.py` | 本机工具的导入和命令入口。名单来自 `poc/tools/internal/` 的扫描。网页目前只调用 `generate_image` |
 | `poc/tools/registry.py` | 扫描 `internal/` 和 `external/`。不写工具名单。符合规范的新文件重启后可用 |
-| `poc/tools/internal/image.py` | 本机 `generate_image`。参数含画面描述 |
-| `poc/tools/internal/video.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图 |
-| `poc/tools/external/local_content.py` | 外部的接受、列出、删除。只声明参数 |
-| `poc/tools/external/image.py` | 外部 `generate_image`。只收内容句柄 |
+| `poc/tools/internal/image.py` | 本机 `generate_image`。参数含画面描述。会改外部状态 |
+| `poc/tools/internal/video.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图。会改外部状态 |
+| `poc/tools/internal/demo.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
+| `poc/tools/external/local_content.py` | 外部的接受、列出、删除。只声明参数。接受和删除会改外部状态 |
+| `poc/tools/external/image.py` | 外部 `generate_image`。只收内容句柄。会改外部状态 |
+| `poc/tools/external/demo.py` | 外部只读演示 `lookup_demo`。只声明主题 |
 | `poc/tools/mcp.py` | 两边的进程内 MCP 投影。本机 `tools/call` 会执行，外部只校验 |
 | `poc/comfyui/template_fill.py` | 复制模板，只写字段对照里的白名单。模型拼出的工作流 JSON 不会被提交 |
 | `poc/comfyui/comfy_poc.py` | 命令行的文生图、图生图、文生视频、图生视频。它等待下载完成 |
@@ -171,7 +183,7 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖统一请求、能力声明、图像输入、音频视频拒绝、换适配器、可重试错误，也覆盖出图隔离、语义唤起、上传文件、跨会话、删除、文件句柄不出图，以及外部 MCP 只校验、不执行 |
+| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖统一请求、出图隔离、语义唤起、上传文件，以及外部 MCP 只校验、不执行 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
 | `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |
