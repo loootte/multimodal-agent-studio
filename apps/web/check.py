@@ -132,7 +132,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             })
             return
         if mode == "keep":
-            if "本地工具结果" in self._last_user():
+            if self._followed():
                 self._piece(_delta(content="已记下。"))
                 self._done()
                 return
@@ -142,7 +142,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._emit_tool("list_local_content", {})
             return
         if mode == "forget":
-            if "本地工具结果" in self._last_user():
+            if self._followed():
                 self._piece(_delta(content="已忘掉。"))
                 self._done()
                 return
@@ -154,7 +154,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             })
             return
         if mode == "keepfile":
-            if "本地工具结果" in self._last_user():
+            if self._followed():
                 self._piece(_delta(content="已保存文件。"))
                 self._done()
                 return
@@ -164,14 +164,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._emit_tool("list_local_content", {})
             return
         if mode == "retrieve":
-            if "本地工具结果" in self._last_user():
+            if self._followed():
                 self._piece(_delta(content="检索完成"))
                 self._done()
                 return
             self._emit_tool("retrieve_local", {"query": "png"})
             return
         if mode == "forgetfile":
-            if "本地工具结果" in self._last_user():
+            if self._followed():
                 self._piece(_delta(content="已丢掉文件。"))
                 self._done()
                 return
@@ -180,6 +180,23 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("forget_local_content", {
                 "content_handle": _content_handle(self._last_user()) or ("c_" + "00" * 16),
+            })
+            return
+        if mode == "multiimage":
+            if self._tool_result_count("generate_image") >= 5:
+                self._piece(_delta(content="五张都好了"))
+                self._done()
+                return
+            if self._tool_result_count("list_local_content") == 0:
+                self._emit_tool("list_local_content", {})
+                return
+            handle = _content_handle(self._last_user()) or _content_handle(
+                json.dumps(self.server.requests[-1]["body"], ensure_ascii=False)
+            )
+            self._emit_tool("generate_image", {
+                "content_handle": handle or ("c_" + "00" * 16),
+                "aspect_ratio": "1:1",
+                "seed": 7,
             })
             return
         if mode == "fileimage":
@@ -221,6 +238,21 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
     def _ready(self) -> bool:
         return "已就绪" in self._last_user()
+
+    def _followed(self) -> bool:
+        return "工具结果" in self._last_user()
+
+    def _tool_result_count(self, name: str) -> int:
+        count = 0
+        marker = "工具结果 " + name + " "
+        local = "本地工具结果 " + name + " "
+        for item in self.server.requests[-1]["body"].get("messages") or []:
+            if not isinstance(item, dict):
+                continue
+            text = _user_text(item.get("content"))
+            if marker in text or local in text:
+                count += 1
+        return count
 
     def _emit_tool(self, name: str, arguments: dict) -> None:
         args = json.dumps(arguments, ensure_ascii=False)
@@ -1148,6 +1180,10 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "retrieve_local" not in script or "source_id" not in script:
         fail("页面没有检索结果入口")
+    if 'events.filter((entry) => entry.type === "artifact")' not in script:
+        fail("页面没有渲染同一条消息上的多张图片")
+    if "item.artifact_id === event.artifact_id" not in script:
+        fail("页面把后来的图片当成重复事件丢掉了")
     if "content_request" not in script or "加入本地内容并继续" not in script:
         fail("页面没有本地内容输入")
     if "取消" not in script or "skip: true" not in script:
@@ -1606,6 +1642,12 @@ def _vision_prompt_case(base: str, provider) -> None:
         fail("带图写提示词被当成了出图")
     if not chat_run._image_request("画一只茶壶"):
         fail("出图关键词没有认出画一只茶壶")
+    if chat_run._image_request("用本地提示词连续生成5张图片"):
+        fail("连续出图被关键词切片截走")
+    if chat_run._image_request("连续生成5张图片"):
+        fail("带连续的出图要求被关键词切片截走")
+    if not chat_run._image_request("用本地comfyui生成一幅图片"):
+        fail("单次出图关键词没有认出用本地comfyui")
     provider.mode = "ok"
     session_id = _fresh_session(base)
     encoded = base64.b64encode(_PNG).decode("ascii")
@@ -1991,6 +2033,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_forget_file(base, provider, comfy.box, directory)
         _local_file_image(base, provider, comfy.box)
         _egress_file(provider)
+        _multi_image_case(base, provider, comfy.box, directory, workflow)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2264,6 +2307,8 @@ def _assert_bound(directory: str, session_id: str, body: dict, prompt: str, expe
     props = (generate.get("parameters") or {}).get("properties") or {}
     if "prompt" in props or "content_handle" not in props:
         fail(f"工具契约仍要模型填写正文：{sorted(props)}")
+    if "n" in props or "count" in props:
+        fail("generate_image 契约带了张数")
     blocked = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
     for tool in tools:
         function = tool.get("function") or {}
@@ -2603,6 +2648,82 @@ def _local_file_image(base: str, provider, box: ComfyState) -> None:
         raw = _provider_blob(item)
         if data.decode("utf-8") in raw or base64.b64encode(data).decode("ascii") in raw:
             fail("文件字节进入了出图前的供应商请求")
+
+
+def _multi_image_case(base: str, provider, box: ComfyState, directory: str, workflow_path: str) -> None:
+    import chat_run
+
+    if chat_run._image_request("用本地提示词连续生成5张图片"):
+        fail("连续出图被关键词切片截走")
+    if not chat_run._image_request("画一只茶壶"):
+        fail("单次出图关键词没有认出画一只茶壶")
+    provider.mode = "multiimage"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "连续出图本机提示词-不应外发"
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    record = sessions.add_content(session_id, secret, "image_prompt")
+    handle = record.get("handle") or ""
+    if not handle:
+        fail("连续出图没有先留下文字句柄")
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "用本地提示词连续生成5张图片", timeout=25)
+    kinds = [event.get("type") for event in events]
+    arts = [event for event in events if event.get("type") == "artifact"]
+    gens = [event for event in events if event.get("type") == "tool_call" and event.get("tool") == "generate_image"]
+    if any(event.get("type") == "content_request" for event in events):
+        fail("已有提示词还去收集正文")
+    if len(arts) != 5:
+        fail(f"连续出图没有五张成片：{len(arts)} {kinds}")
+    if len(gens) < 5:
+        fail(f"连续出图没有五次 generate_image：{len(gens)}")
+    if len(box.prompts) != before + 5:
+        fail("连续出图没有恰好提交五次")
+    art_at = [index for index, kind in enumerate(kinds) if kind == "artifact"]
+    done_at = [index for index, kind in enumerate(kinds) if kind == "message.completed"]
+    if not art_at or not done_at:
+        fail("连续出图缺少成片或结束事件")
+    if done_at[0] < art_at[1]:
+        fail("第一张图后运行就结束了")
+    if _assistant_text(events) != "五张都好了":
+        fail("连续出图没有等模型调度完再回答")
+    if len(provider.requests) != sent + 7:
+        fail(f"连续出图的供应商请求次数不对：{len(provider.requests) - sent}")
+    ids = {event.get("artifact_id") for event in arts}
+    if len(ids) != 5 or any(not item for item in ids):
+        fail("连续出图的成片标识重复或缺失")
+    message_ids = {event.get("message_id") for event in arts if event.get("message_id")}
+    if len(message_ids) != 1:
+        fail("连续出图的成片不在同一条消息上")
+    for item in provider.requests[sent:]:
+        blob = _provider_blob(item)
+        if secret in blob:
+            fail("连续出图把提示词正文发给了模型")
+        tools = item["body"].get("tools") or []
+        for tool in tools:
+            function = tool.get("function") or {}
+            if function.get("name") != "generate_image":
+                continue
+            props = (function.get("parameters") or {}).get("properties") or {}
+            if "n" in props or "count" in props or "prompt" in props:
+                fail(f"连续出图的工具契约带了张数或正文：{sorted(props)}")
+    _assert_whitelist(box.prompts[-1], workflow_path, secret)
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    message = stored["messages"][-1]
+    stored_arts = [event for event in (message.get("events") or []) if event.get("type") == "artifact"]
+    if len(stored_arts) != 5:
+        fail("刷新后连续出图的成片不齐")
+    if message.get("status") != "completed":
+        fail("连续出图完成后消息状态不对")
+    if secret in json.dumps(events, ensure_ascii=False) or secret in json.dumps(message, ensure_ascii=False):
+        fail("连续出图把提示词正文写进了页面")
+    if handle:
+        for item in provider.requests[sent:]:
+            if handle in _provider_blob(item):
+                break
+        else:
+            fail("连续出图没有把文字句柄交给模型")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):

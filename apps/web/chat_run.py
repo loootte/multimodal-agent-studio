@@ -36,6 +36,7 @@ from packages.contracts.events import (
 )
 from services.gateway import GatewayError, stream as gateway_stream
 from services.runtime import execute_tool, traces_for
+from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from store import StoreError, new_id
 
@@ -51,7 +52,8 @@ SYSTEM = (
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
-    "要用文字句柄出图时，再调用 generate_image。文件句柄不能出图。"
+    "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。用户要连续多张时，对每一张分别再调用一次。"
+    "已经留下的本地提示词直接用句柄，不要再收集正文，也不要填写画面描述。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
@@ -85,9 +87,17 @@ _VISION_MARKERS = (
     "编写提示词",
     "逆向",
 )
+_SCHEDULE_MARKERS = (
+    "连续",
+    "用本地提示词",
+    "已经留下",
+    "已有提示词",
+    "已留下",
+)
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
 MAX_TOTAL = 100000
+_TAKE_TOOLS = ("accept_local_content",)
 _WEB_TOOLS = (
     "accept_local_content",
     "list_local_content",
@@ -498,7 +508,7 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
     claimed: dict = {}
 
     def take(name, arguments):
-        if name not in _WEB_TOOLS:
+        if name not in _TAKE_TOOLS:
             return False
         claimed["name"] = name
         claimed["arguments"] = arguments
@@ -507,6 +517,11 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
 
     def confirm(name, arguments):
         return run.wait_confirm()
+
+    def execute(name, arguments):
+        if name in _WEB_TOOLS and name not in _TAKE_TOOLS:
+            return _execute_web_tool(app, session_id, message_id, run, name, arguments)
+        return execute_tool(name, arguments)
 
     def flush_traces() -> None:
         nonlocal seen
@@ -536,6 +551,8 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
             timeout_sec=app.timeout_sec,
             take=take,
             confirm=confirm,
+            execute=execute,
+            budget=Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
             local_bodies=app.sessions.local_bodies(session_id),
@@ -927,6 +944,87 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
         return _error_finish(
             app, session_id, message_id, run, "invalid_tool_call", "这一版只能生成图片。", text
         )
+    result = _run_image(app, session_id, message_id, run, arguments)
+    if run.cancel.is_set():
+        return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else None
+        error = error if isinstance(error, dict) else {}
+        code = str(error.get("code") or "comfyui_error")
+        message = str(error.get("message") or "生成失败。")
+        if "已经生成" in message:
+            message = "生成失败。"
+        return _error_finish(app, session_id, message_id, run, code, message, text)
+    _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
+    _complete(app, session_id, message_id, run, text)
+    return "completed"
+
+
+def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict:
+    if name == "generate_image":
+        return _execute_generate_image(app, session_id, message_id, run, arguments)
+    tool_call = {"name": name, "arguments": arguments if isinstance(arguments, dict) else {}}
+    line = _apply_local_tool(app, session_id, message_id, run, tool_call)
+    if line is None:
+        return {
+            "ok": False,
+            "tool": name,
+            "error": {"code": "invalid_tool_call", "message": HUMAN["invalid_tool_call"]},
+        }
+    prefix = "本地工具结果 " + name + " "
+    if line.startswith(prefix):
+        try:
+            parsed = json.loads(line[len(prefix):])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            if "ok" not in parsed:
+                parsed["ok"] = True
+            parsed.setdefault("tool", name)
+            return parsed
+    return {"ok": True, "tool": name}
+
+
+def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict:
+    tool_call = {
+        "name": "generate_image",
+        "arguments": arguments if isinstance(arguments, dict) else {},
+    }
+    handle = _named_handle(tool_call)
+    block = _handle_block(app, session_id, tool_call)
+    if block == "file":
+        return {
+            "ok": False,
+            "tool": "generate_image",
+            "content_handle": handle,
+            "error": {"code": "invalid_tool_call", "message": "文件内容不能用来生成图片。"},
+        }
+    bound = _bind_image(app, session_id, "", tool_call, False)
+    if bound is None:
+        return {
+            "ok": False,
+            "tool": "generate_image",
+            "content_handle": handle,
+            "error": {"code": "invalid_tool_call", "message": "这个内容句柄不属于本会话。"},
+        }
+    if run.cancel.is_set():
+        return {
+            "ok": False,
+            "tool": "generate_image",
+            "content_handle": handle,
+            "error": {"code": "cancelled", "message": HUMAN["cancelled"]},
+        }
+    result = _run_image(app, session_id, message_id, run, bound.get("arguments") or {})
+    public = _public_generate_result(result, handle)
+    if public.get("ok"):
+        _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
+        app.sessions.update_message(
+            session_id, message_id, text=app.sessions.message_text(session_id, message_id), status="running", error=None,
+        )
+    return public
+
+
+def _run_image(app, session_id, message_id, run, arguments) -> dict:
     base = image_run.comfy_base()
 
     def on_event(event: dict) -> None:
@@ -960,17 +1058,11 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
         },
         persist=True,
     )
-    if run.cancel.is_set():
-        return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = result.get("error") if isinstance(result, dict) else None
-        error = error if isinstance(error, dict) else {}
-        code = str(error.get("code") or "comfyui_error")
-        message = str(error.get("message") or "生成失败。")
-        if "已经生成" in message:
-            message = "生成失败。"
-        return _error_finish(app, session_id, message_id, run, code, message, text)
-    artifact = {
+    return result if isinstance(result, dict) else {"ok": False}
+
+
+def _artifact_event(message_id: str, result: dict) -> dict:
+    return {
         "type": EVENT_ARTIFACT,
         "artifact_id": result.get("artifact_id"),
         "media": result.get("type") or "image",
@@ -980,16 +1072,37 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
         "url": result.get("url"),
         "message_id": message_id,
     }
-    _push_saved(app, session_id, message_id, run, artifact)
-    app.sessions.update_message(session_id, message_id, text=text, status="completed", error=None)
-    app.sessions.refresh_memory(session_id)
-    run.push({
-        "type": EVENT_MESSAGE_COMPLETED,
-        "text": text,
-        "message_id": message_id,
-        "run_id": run.run_id,
-    })
-    return "completed"
+
+
+def _public_generate_result(result: dict, handle: str) -> dict:
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else None
+        error = error if isinstance(error, dict) else {}
+        code = str(error.get("code") or "comfyui_error")
+        message = str(error.get("message") or "生成失败。")
+        if "已经生成" in message:
+            message = "生成失败。"
+        public = {
+            "ok": False,
+            "tool": "generate_image",
+            "error": {"code": code, "message": message},
+        }
+        if handle:
+            public["content_handle"] = handle
+        return public
+    public = {
+        "ok": True,
+        "tool": "generate_image",
+        "artifact_id": result.get("artifact_id"),
+        "media": result.get("type") or "image",
+        "media_type": result.get("media_type"),
+        "width": result.get("width"),
+        "height": result.get("height"),
+        "url": result.get("url"),
+    }
+    if handle:
+        public["content_handle"] = handle
+    return public
 
 
 def _error_finish(app, session_id: str, message_id: str, run: Run, code: str, message: str, text: str) -> str:
@@ -1062,6 +1175,8 @@ def _has_image_attachment(attachments) -> bool:
 
 
 def _image_request(text: str, attachments=None) -> bool:
+    if any(marker in text for marker in _SCHEDULE_MARKERS):
+        return False
     if any(marker in text for marker in _VISION_MARKERS):
         if not any(marker in text for marker in _IMAGE_MARKERS) and "comfy" not in text.lower():
             return False

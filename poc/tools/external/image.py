@@ -33,7 +33,7 @@ def tools() -> list[Tool]:
         }
     return [Tool(
         name="generate_image",
-        description="用本机会话中的文字句柄生成一张图片。不要填写画面描述。文件句柄不能用来出图。",
+        description="用本机会话中的文字句柄生成一张图片。一次调用只出一张。要连续多张时分别再调用。不要填写画面描述。文件句柄不能用来出图。",
         order=40,
         mutating=True,
         parameters={
