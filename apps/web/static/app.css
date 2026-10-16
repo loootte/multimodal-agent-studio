@@ -329,6 +329,26 @@ main {
 
 .timeline .tool-status { color: var(--muted); font-size: 0.8rem; }
 
+.retrieve-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.retrieve-list a {
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.retrieve-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .confirm-row, .retry-row {
   display: flex;
   gap: 0.4rem;

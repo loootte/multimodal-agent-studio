@@ -691,6 +691,7 @@ function toolBrief(event) {
     return String(event.result.error.message).slice(0, 40);
   }
   if (event.tool === "list_local_content") return "查看本机内容";
+  if (event.tool === "retrieve_local") return "检索本机会话";
   if (event.tool === "forget_local_content") return "移除本机内容";
   if (event.tool === "lookup_demo") return "查询演示";
   if (event.tool === "generate_image") return "生成图片";
@@ -713,7 +714,42 @@ function toolTimeline(message, calls) {
     if (call.status === "waiting_confirm" && message.status === "running") {
       item.append(confirmRow(message, call));
     }
+    if (call.tool === "retrieve_local") {
+      item.append(retrieveView(call.result));
+    }
     list.append(item);
+  }
+  return list;
+}
+
+function retrieveView(result) {
+  const list = document.createElement("ul");
+  list.className = "retrieve-list";
+  const items = (result && result.items) || [];
+  if (!items.length) {
+    const empty = document.createElement("li");
+    empty.textContent = "没有匹配的来源";
+    list.append(empty);
+    return list;
+  }
+  for (const entry of items) {
+    const row = document.createElement("li");
+    const source = entry.source_id || "";
+    if (entry.url) {
+      const link = document.createElement("a");
+      link.href = entry.url;
+      link.textContent = source;
+      row.append(link);
+    } else {
+      const label = document.createElement("span");
+      label.textContent = source;
+      row.append(label);
+    }
+    const meta = document.createElement("span");
+    meta.className = "retrieve-meta";
+    meta.textContent = [entry.kind, entry.media_type].filter(Boolean).join(" · ");
+    if (meta.textContent) row.append(meta);
+    list.append(row);
   }
   return list;
 }

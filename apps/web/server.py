@@ -25,11 +25,13 @@ if WEB_DIR not in sys.path:
 import chat_run
 import image_run
 import store
+from packages.artifacts import ArtifactStore
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
+_SESSION_CONTENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/contents/(c_[0-9a-f]{32})$")
 _SESSION = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})$")
 _RUN_EVENTS = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/events$")
 _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
@@ -50,7 +52,8 @@ class App:
         self.timeout_sec = timeout_sec
         self.provider = store.ProviderStore(os.path.join(data_dir, "provider.json"))
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
-        self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"))
+        self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
+        self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts)
         self.runs = chat_run.RunHub()
 
 
@@ -186,6 +189,16 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             data = app.sessions.attachment_bytes(session["session_id"], matched.group(2))
             if info is None or data is None:
                 _send_json(handler, 404, {"code": "not_found", "message": "找不到这个附件。"})
+                return
+            _send_bytes(handler, data, info.get("media_type") or "application/octet-stream")
+            return
+        matched = _SESSION_CONTENT.fullmatch(path)
+        if matched and method == "GET":
+            session = _owned_session(app, matched.group(1))
+            info = app.sessions.content_info(session["session_id"], matched.group(2))
+            data = app.sessions.content_bytes(session["session_id"], matched.group(2))
+            if info is None or data is None:
+                _send_json(handler, 404, {"code": "not_found", "message": "找不到这个内容。"})
                 return
             _send_bytes(handler, data, info.get("media_type") or "application/octet-stream")
             return
