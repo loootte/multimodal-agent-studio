@@ -210,6 +210,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "aspect_ratio": "1:1",
             })
             return
+        if mode == "anatomy":
+            user = self._last_user()
+            if "工具结果 read_skill" in user or "The object is the explanation" in user:
+                self._emit_tool("build_skill_page", {"name": "anatomy", "subject": "令牌桶"})
+                return
+            self._emit_tool("read_skill", {"name": "anatomy"})
+            return
         self._piece(b"")
 
     def _last_user(self) -> str:
@@ -377,6 +384,7 @@ def self_check() -> None:
         _redact_history()
         _gateway_cases()
         _runtime_cases()
+        _skill_cases()
         _live()
     finally:
         for name, value in saved.items():
@@ -1146,6 +1154,8 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面脚本没有接上运行过程")
     if "innerHTML" in script or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
+    if "打开等距图" not in script:
+        fail("页面没有等距图入口")
     if "retrieve_local" not in script or "source_id" not in script:
         fail("页面没有检索结果入口")
     if "content_request" not in script or "加入本地内容并继续" not in script:
@@ -1225,7 +1235,13 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     if not sent or sent[0].get("role") != "system" or not answered or sent[-1].get("content") != "看推理":
         brief = [(item.get("role"), len(item.get("content") or "")) for item in sent]
         fail(f"下一轮没有带上已经完成的对话：{brief}")
+    system = sent[0].get("content") or ""
+    if "anatomy" not in system or "four-tone shading" not in system:
+        fail("普通回合的系统指令没有技能名字和短描述")
+    if "The object is the explanation" in system or "iso-kit.mjs" in system:
+        fail("普通回合的系统指令带上了技能正文")
 
+    _skill_turn(base, provider)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
@@ -1253,6 +1269,92 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     events = _speak(base, session_id, "清除后再问")
     if events[-1].get("code") != "missing_key" or len(provider.requests) != before:
         fail("清除密钥后仍向模型发了请求")
+
+
+def _skill_cases() -> None:
+    path = os.path.join(ROOT, "skills", "anatomy", "SKILL.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    if "name: anatomy" not in text:
+        fail("技能正面没有名字 anatomy")
+    if "upstream: https://github.com/wheresryan22/anatomy" not in text:
+        fail("技能没有记下上游地址")
+    if "commit: e9488296a44211c42701ff71705b7901470ec78f" not in text:
+        fail("技能没有钉住提交")
+    from services.runtime.skills import catalog_suffix, read_instructions
+
+    catalog = catalog_suffix()
+    if "anatomy" not in catalog or "four-tone shading" not in catalog:
+        fail("系统指令没有带上技能名字和短描述")
+    if "The object is the explanation" in catalog or "iso-kit.mjs" in catalog:
+        fail("系统指令带上了技能正文或 kit")
+    loaded = read_instructions("anatomy")
+    blob = json.dumps(loaded, ensure_ascii=False)
+    instructions = loaded.get("instructions") or ""
+    if not loaded.get("ok") or "The object is the explanation" not in instructions:
+        fail("读取技能没有返回做法")
+    if "D:\\" in blob or "D:/" in blob or "multimodal-agent-studio" in blob:
+        fail("读取技能带出了本机路径")
+    import skill_page
+
+    missing = skill_page.build_page("s_" + "ab" * 16, "anatomy", "令牌桶", node="")
+    missing_blob = json.dumps(missing, ensure_ascii=False)
+    message = (missing.get("error") or {}).get("message") or ""
+    if missing.get("ok") or "Node" not in message:
+        fail("没有 Node.js 时没有说明做不了等距图")
+    if "generate_image" in missing_blob:
+        fail("没有 Node.js 时落到了出图")
+
+
+def _skill_turn(base: str, provider) -> None:
+    secret = "隔离用的画面正文甲乙丙丁"
+    saved_dir = os.environ.get("COMFY_ARTIFACT_DIR")
+    os.environ["COMFY_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="skill-artifacts-")
+    try:
+        _skill_turn_body(base, provider, secret)
+    finally:
+        if saved_dir is None:
+            os.environ.pop("COMFY_ARTIFACT_DIR", None)
+        else:
+            os.environ["COMFY_ARTIFACT_DIR"] = saved_dir
+
+
+def _skill_turn_body(base: str, provider, secret: str) -> None:
+    session_id = _fresh_session(base)
+    provider.mode = "keep"
+    noted = _speak(base, session_id, secret)
+    if _assistant_text(noted) != "已记下。":
+        fail("等距图之前没有把本会话正文记下")
+    provider.mode = "anatomy"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "用一张等距图说明令牌桶怎么工作", timeout=90)
+    new_requests = provider.requests[sent:]
+    if len(new_requests) != 2:
+        fail(f"等距图的供应商请求次数不对：{len(new_requests)}")
+    first = json.dumps(new_requests[0]["body"], ensure_ascii=False)
+    second = json.dumps(new_requests[1]["body"], ensure_ascii=False)
+    system = ((new_requests[0]["body"].get("messages") or [{}])[0].get("content") or "")
+    if "anatomy" not in system or "four-tone shading" not in system:
+        fail("等距图回合的系统指令没有技能名字和短描述")
+    if "The object is the explanation" in first:
+        fail("还没读技能就把做法发给了模型")
+    if "The object is the explanation" not in second:
+        fail("读技能后没有把做法交给模型")
+    for blob in (first, second):
+        if secret in blob or "D:\\" in blob or "D:/" in blob or "multimodal-agent-studio" in blob:
+            fail("技能回合把本会话正文或路径发给了模型")
+    if any(event.get("tool") == "generate_image" or event.get("name") == "generate_image" for event in events):
+        fail("等距图调用了 generate_image")
+    artifact = next((event for event in events if event.get("type") == "artifact"), None)
+    artifact_id = str((artifact or {}).get("artifact_id") or "")
+    if artifact is None or not artifact_id.startswith("art_") or artifact.get("media") != "html":
+        fail("等距图没有放进会话")
+    status, raw = request_bytes("GET", base + artifact["url"], timeout=30)
+    page = raw.decode("utf-8", errors="replace")
+    if status != 200 or "<svg" not in page or "令牌桶" not in page:
+        fail("等距图页面打不开")
+    if _assistant_text(events) != "等距图已经放进这个会话。":
+        fail("等距图完成后没有告诉用户页面已放进会话")
 
 
 def _post_content(base: str, run_id: str, text: str) -> None:

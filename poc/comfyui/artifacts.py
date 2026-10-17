@@ -314,6 +314,33 @@ class ArtifactStore:
         os.replace(temporary, record_path)
         return self.publish(record)
 
+    def save_html(self, *, session_id: str, html: str, title: str) -> dict:
+        """保存技能做成的页面。记录里没有技能正文，也没有路径。"""
+        session_id = check_token(session_id, "会话")
+        if not isinstance(html, str) or "<svg" not in html:
+            raise ArtifactError("等距图页面没有图。")
+        record = {
+            "artifact_id": "art_" + uuid.uuid4().hex,
+            "session_id": session_id,
+            "type": "html",
+            "media_type": "text/html; charset=utf-8",
+            "title": str(title)[:80],
+        }
+        record["file"] = record["artifact_id"] + ".html"
+        folder = self._session_dir(session_id)
+        os.makedirs(os.path.join(folder, "files"), exist_ok=True)
+        os.makedirs(os.path.join(folder, "records"), exist_ok=True)
+        target = os.path.join(folder, "files", record["file"])
+        with open(target, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(html)
+        record_path = os.path.join(folder, "records", record["artifact_id"] + ".json")
+        temporary = record_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, record_path)
+        return self.publish(record)
+
     def publish(self, record: dict) -> dict:
         shown = {key: value for key, value in record.items() if key != "file"}
         shown["url"] = self.display_url(record["session_id"], record["artifact_id"])
