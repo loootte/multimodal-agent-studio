@@ -76,7 +76,8 @@ def cancel(base: str, prompt_id: str) -> None:
     comfy_client.ComfyClient(base).cancel(prompt_id)
 
 
-def open_artifact(session_id: str, artifact_id: str) -> tuple[str | None, str | None]:
+def artifact_store():
+    """和打开工件用同一个库。没有 ComfyUI 配置时落到 poc 的 artifacts。"""
     _ensure_poc()
     import artifacts
     import comfy_poc
@@ -84,8 +85,16 @@ def open_artifact(session_id: str, artifact_id: str) -> tuple[str | None, str | 
     try:
         config = comfy_poc.load_config()
     except comfy_poc.ComfyFailure:
-        return None, None
+        return artifacts.ArtifactStore(os.path.join(POC, "artifacts"))
     store, _session = artifacts.open_store(config)
+    return store
+
+
+def open_artifact(session_id: str, artifact_id: str) -> tuple[str | None, str | None]:
+    _ensure_poc()
+    import artifacts
+
+    store = artifact_store()
     try:
         path = store.file_for(session_id, artifact_id)
     except artifacts.ArtifactError:

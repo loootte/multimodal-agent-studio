@@ -104,17 +104,22 @@ Agent 运行时
 | `services/runtime/budget.py` | 步数、时间和 token 预算。超过时停下并留下可读原因 |
 | `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
 | `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
+| `services/runtime/skills.py` | 扫描 `skills/*/SKILL.md`。系统指令只带技能名字和短描述。模型调用 `read_skill` 之后，这一轮才带上正文 |
 | `poc/tools/internal/demo.py`、`poc/tools/external/demo.py` | 只读演示 `lookup_demo` |
 | `poc/tools/external/retrieve.py` | 检索本会话 `retrieve_local`。只收查询词，结果带来源标识 |
+| `poc/tools/external/skill.py`、`poc/tools/internal/skill.py` | `read_skill` 只收技能名，本机实现返回做法。`build_skill_page` 只收技能名和机制短名，由网页切片做成页面 |
 
 现在一轮回答仍放在网页进程里：
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。语义唤起可以收文字或文件。`list_local_content`、`retrieve_local` 和 `forget_local_content` 只操作本会话。发给模型的是会话记忆加最近几条，不含本地正文。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
-| `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
+| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。系统指令附上已安装技能的名字和短描述。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。等距说明走 `read_skill` 和 `build_skill_page`，不调用 `generate_image`。语义唤起可以收文字或文件。`list_local_content`、`retrieve_local` 和 `forget_local_content` 只操作本会话。发给模型的是会话记忆加最近几条，不含本地正文。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
+| `apps/web/skill_page.py` | 用本机 Node 跑 `skills/anatomy` 的最小例子，把页面存成这个会话的 HTML 工件。没有 Node 时这一轮以可读错误结束，不落到出图 |
+| `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。技能页面和出图打开同一个工件库。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
 
-`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content`、`generate_image` 和 `lookup_demo`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`poc/tools/internal/` 里的工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
+`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content`、`generate_image`、`lookup_demo`、`read_skill` 和 `build_skill_page`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`read_skill` 只收技能名，正文留到模型来读的那一轮。`build_skill_page` 只收技能名和机制短名，页面是 HTML 工件。`poc/tools/internal/` 里的生成工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
+
+`skills/anatomy/` 是钉住的 [Anatomy](https://github.com/wheresryan22/anatomy) 提交 `e9488296a44211c42701ff71705b7901470ec78f`。正面信息在 `SKILL.md`。这一刀只带最小例子和 `kit/`。系统指令不放正文，也不放 kit 源码。读到的正文是做法，不进入画面描述。这不开始插件市场，也不把第 5 或第 6 阶段标成完成。
 
 `generate_video` 仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`。不把第 5 或第 6 阶段标成完成。
 
@@ -178,7 +183,7 @@ Agent 运行时
 | `packages/artifacts/store.py` | 按 sha256 保存上传文件的字节。同一份文件只写一次。会话记录只留句柄和校验和 |
 | `apps/web/store.py` | `IdentityStore` 是单用户开发登录。`ProviderStore` 存基址、模型标识和密钥。`SessionStore` 存会话、消息、事件、对话附件、本地内容句柄和会话记忆。会话带 `user_id`。对话附件句柄是 `a_` 加随机十六进制。本地内容句柄是 `c_` 加随机十六进制，不编码正文或字节。同一会话相同字节或相同正文复用句柄。`retrieve` 按本会话检索，结果带来源标识和可打开的地址 |
 | `apps/web/data/` | 不进 Git。`identity.json` 是本机用户，`provider.json` 是供应商设置，`sessions/*.json` 是会话，`artifacts/blobs/` 是上传文件的字节。接口响应不返回内容正文、字节或路径 |
-| `poc/comfyui/artifacts.py` | 按会话保存生成文件和记录。对外只给 `artifact_id`。读文件必须会话和标识都对 |
+| `poc/comfyui/artifacts.py` | 按会话保存生成文件和记录。图片、视频，以及技能做成的 HTML 页面。对外只给 `artifact_id`。读文件必须会话和标识都对 |
 | `poc/comfyui/artifacts/` | 不进 Git。下面按会话分 `files/` 和 `records/` |
 
 本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
@@ -187,7 +192,7 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件、同一会话复用工件、检索来源标识和会话记忆，以及外部 MCP 只校验、不执行 |
+| `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件、同一会话复用工件、检索来源标识和会话记忆，以及外部 MCP 只校验、不执行。等距技能只在普通回合带上名字和短描述；模型来读之后这一轮才带正文，页面按 `artifact_id` 打开，没有 Node 时不落到出图 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
 | `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |
