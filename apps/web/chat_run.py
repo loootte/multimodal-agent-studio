@@ -99,7 +99,7 @@ _SCHEDULE_MARKERS = (
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
 MAX_TOTAL = 100000
-_TAKE_TOOLS = ("accept_local_content",)
+_TAKE_TOOLS = ("accept_local_content", "build_skill_page")
 _WEB_TOOLS = (
     "accept_local_content",
     "list_local_content",
