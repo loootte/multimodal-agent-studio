@@ -338,7 +338,7 @@ main {
   gap: 0.25rem;
 }
 
-.retrieve-list a {
+.retrieve-list a, .artifact-link {
   color: var(--accent);
   word-break: break-all;
 }

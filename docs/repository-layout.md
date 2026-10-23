@@ -1,6 +1,6 @@
 # 以后的目录
 
-这些目录留到对应阶段再创建，避免空的代码树被当成已经开工。每一层现在落到哪些文件，写在 [docs/architecture.md](architecture.md)。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前加了 `apps/web`、`services/gateway` 和 `packages/contracts`，先做文字聊天。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 仍用这些目录，文生图直接调用 `poc/comfyui`，不把 poc 搬进 `services/`。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 也仍用这些目录，不新建内容库。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 仍用这些目录：文字和上传文件留在 `apps/web` 的会话数据里，不新建内容库，也不把文件送进 ComfyUI。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 建了 `services/runtime`。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 建了 `packages/artifacts`。`services/tools`、`evals` 和 `ops` 仍然不创建。
+这些目录留到对应阶段再创建，避免空的代码树被当成已经开工。每一层现在落到哪些文件，写在 [docs/architecture.md](architecture.md)。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前加了 `apps/web`、`services/gateway` 和 `packages/contracts`，先做文字聊天。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 仍用这些目录，文生图直接调用 `poc/comfyui`，不把 poc 搬进 `services/`。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 也仍用这些目录，不新建内容库。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 仍用这些目录：文字和上传文件留在 `apps/web` 的会话数据里，不新建内容库，也不把文件送进 ComfyUI。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 建了 `services/runtime`。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 建了 `packages/artifacts`。[issue #25](https://github.com/loootte/multimodal-agent-studio/issues/25) 增加 `skills/anatomy`，运行时按目录发现这一份技能，系统指令只带名字和短描述。`services/tools`、`evals` 和 `ops` 仍然不创建。插件市场仍留到以后。
 
 ```
 apps/web/                 Web 界面
@@ -26,3 +26,7 @@ ops/                      运行手册和部署说明
 ## 例外：issue #1
 
 `poc/comfyui/` 是一张本地脚本，用来把提示词打进固定的 ComfyUI API 工作流，并按会话把生成结果收成工件。同一次生成的工具、进度、成片和错误记在同一条助手消息里。它不是 `apps/` 或 `services/`，也不提前决定第 1 阶段的语言。换工作流 JSON 时，调用命令不变。工件文件和聊天记录在 `poc/comfyui/artifacts/`，不进 Git。
+
+## 例外：issue #25
+
+`skills/anatomy/` 是装进这个 Agent 的 Anatomy 技能，钉住上游提交。`SKILL.md` 放在这份技能的根上。运行时先只告诉模型技能名字和短描述，模型调用 `read_skill` 之后才读正文。做成的页面是会话里的 HTML 工件。这不是插件市场，也不另起服务。

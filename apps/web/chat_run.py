@@ -16,6 +16,7 @@ import threading
 import time
 
 import image_run
+import skill_page
 import store
 from packages.contracts.events import (
     EVENT_ARTIFACT,
@@ -35,9 +36,10 @@ from packages.contracts.events import (
     TERMINAL_EVENTS,
 )
 from services.gateway import GatewayError, stream as gateway_stream
-from services.runtime import execute_tool, traces_for
+from services.runtime import execute_tool, traces_for, validate_arguments
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
+from services.runtime.skills import catalog_suffix
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -104,7 +106,9 @@ _WEB_TOOLS = (
     "forget_local_content",
     "retrieve_local",
     "generate_image",
+    "build_skill_page",
 )
+_SKILL_MARKERS = ("等距", "等轴测", "isometric")
 
 
 class RequestError(Exception):
@@ -199,9 +203,8 @@ class Run:
 
     def note_comfy(self, prompt_id: str, base: str) -> None:
         with self._state_lock:
-            if self.prompt_id is None:
-                self.prompt_id = prompt_id
-                self.comfy_base = base
+            self.prompt_id = prompt_id
+            self.comfy_base = base
 
     def accept_progress(self, key: tuple) -> bool:
         with self._state_lock:
@@ -648,6 +651,8 @@ def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_c
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
         return _run_bound(app, session_id, message_id, run, user_text, tool_call, False)
+    if name == "build_skill_page":
+        return _finish_skill_page(app, session_id, message_id, run, text, tool_call)
     return _finish_image(app, session_id, message_id, run, text, tool_call)
 
 
@@ -1026,6 +1031,8 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
 
 def _run_image(app, session_id, message_id, run, arguments) -> dict:
     base = image_run.comfy_base()
+    with run._state_lock:
+        run._progress_key = None
 
     def on_event(event: dict) -> None:
         if not isinstance(event, dict):
@@ -1105,6 +1112,68 @@ def _public_generate_result(result: dict, handle: str) -> dict:
     return public
 
 
+def _finish_skill_page(app, session_id: str, message_id: str, run: Run, text: str, tool_call: dict) -> str:
+    arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_TOOL_CALL,
+        "tool": "build_skill_page",
+        "arguments": _public_args(arguments),
+        "status": "running",
+        "message_id": message_id,
+        "run_id": run.run_id,
+    })
+    if run.cancel.is_set():
+        return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
+    problem = validate_arguments("build_skill_page", arguments)
+    if problem:
+        error = problem.get("error") if isinstance(problem.get("error"), dict) else {}
+        return _error_finish(
+            app, session_id, message_id, run, "invalid_tool_call",
+            str(error.get("message") or HUMAN["invalid_tool_call"]), text,
+        )
+    started = time.monotonic()
+    result = skill_page.build_page(session_id, str(arguments.get("name") or ""), arguments.get("subject"))
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {
+            "kind": "tool",
+            "name": "build_skill_page",
+            "ms": int((time.monotonic() - started) * 1000),
+            "ok": bool(isinstance(result, dict) and result.get("ok")),
+        },
+        persist=True,
+    )
+    if run.cancel.is_set():
+        return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
+    if not isinstance(result, dict) or not result.get("ok") or result.get("tool") == "generate_image":
+        error = result.get("error") if isinstance(result, dict) else None
+        error = error if isinstance(error, dict) else {}
+        return _error_finish(
+            app, session_id, message_id, run,
+            str(error.get("code") or "skill_error"),
+            str(error.get("message") or "等距图没有做成。"),
+            text,
+        )
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_ARTIFACT,
+        "artifact_id": result.get("artifact_id"),
+        "media": result.get("type") or "html",
+        "media_type": result.get("media_type"),
+        "url": result.get("url"),
+        "message_id": message_id,
+    })
+    reply = text.strip() or "等距图已经放进这个会话。"
+    app.sessions.update_message(session_id, message_id, text=reply, status="completed", error=None)
+    app.sessions.refresh_memory(session_id)
+    run.push({
+        "type": EVENT_MESSAGE_COMPLETED,
+        "text": reply,
+        "message_id": message_id,
+        "run_id": run.run_id,
+    })
+    return "completed"
+
+
 def _error_finish(app, session_id: str, message_id: str, run: Run, code: str, message: str, text: str) -> str:
     _push_saved(app, session_id, message_id, run, {
         "type": EVENT_ERROR,
@@ -1177,6 +1246,8 @@ def _has_image_attachment(attachments) -> bool:
 def _image_request(text: str, attachments=None) -> bool:
     if any(marker in text for marker in _SCHEDULE_MARKERS):
         return False
+    if _skill_figure(text):
+        return False
     if any(marker in text for marker in _VISION_MARKERS):
         if not any(marker in text for marker in _IMAGE_MARKERS) and "comfy" not in text.lower():
             return False
@@ -1187,6 +1258,11 @@ def _image_request(text: str, attachments=None) -> bool:
     if "图片" in text and any(word in text for word in ("生成", "画")):
         return True
     return any(marker in text for marker in _IMAGE_MARKERS)
+
+
+def _skill_figure(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SKILL_MARKERS)
 
 
 def _handle_line(handle: str) -> str:
@@ -1413,6 +1489,7 @@ def _model_messages(
         named = [item for item in refs if isinstance(item, str) and item]
         if named:
             system += " 引用：" + " ".join(named)
+    system += catalog_suffix()
     return [{"role": "system", "content": system}, *items]
 
 

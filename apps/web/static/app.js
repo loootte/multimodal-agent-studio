@@ -253,7 +253,9 @@ function onEvent(event) {
     if (event.type === "content_request") {
       document.querySelector("#live").textContent = event.hint || "请输入要留在本机的内容。";
     }
-    if (event.type === "artifact") document.querySelector("#live").textContent = "已收到图片";
+    if (event.type === "artifact") {
+      document.querySelector("#live").textContent = event.media === "html" ? "已收到等距图" : "已收到图片";
+    }
     if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
     if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
   } else if (event.type === "message.completed") {
@@ -560,6 +562,18 @@ function bubble(message) {
     image.alt = "生成的图片";
     image.src = src;
     item.append(image);
+  }
+  if (artifact && artifact.media === "html") {
+    const src = artifactSrc(artifact);
+    if (src) {
+      const link = document.createElement("a");
+      link.className = "artifact-link";
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "打开等距图";
+      item.append(link);
+    }
   }
   const agentError = events.find((entry) => entry.type === "error");
   const failure = agentError || message.error;
