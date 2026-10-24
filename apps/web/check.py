@@ -210,6 +210,24 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
             return
+        if mode == "localstop":
+            # 像真实模型一样：出了一两张就用文字收尾，靠服务端续写指令接着做。
+            count = self._tool_result_count("generate_image")
+            if count >= 5:
+                self._piece(_delta(content="五张都好了"))
+                self._done()
+                return
+            last = self._last_user()
+            if count in (1, 2) and last.startswith("工具结果 generate_image"):
+                self._piece(_delta(content=f"已生成第 {count} 张。继续生成第 {count + 1} 张。"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
         if mode == "fileimage":
             if not self._ready():
                 self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
@@ -2177,6 +2195,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _egress_file(provider)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
         _local_multi_image_case(base, provider, comfy.box, workflow)
+        _local_early_stop_case(base, provider, comfy.box)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2911,6 +2930,32 @@ def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path:
             fail("收下本地提示词后把正文发给了模型")
     if secret in json.dumps(events, ensure_ascii=False):
         fail("收下本地提示词后把正文写进了页面")
+
+
+def _local_early_stop_case(base: str, provider, box: ComfyState) -> None:
+    import chat_run
+
+    for text, want in (("连续生成5张图片", 5), ("生成两张图", 2), ("画十张", 10), ("画一只猫", 0), ("来十二幅", 12)):
+        if chat_run._requested_count(text) != want:
+            fail(f"读不出要几张：{text} -> {chat_run._requested_count(text)}")
+    provider.mode = "localstop"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "模型半路收尾的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我连续生成5张图片，先输入本地提示词然后生成", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 5 or len(box.prompts) != before + 5:
+        fail(f"模型出一两张就收尾时没有续到五张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed":
+        fail(f"模型半路收尾后连续出图没有正常结束：{events[-1]}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if "已生成 1/5 张" not in blob or "images_remaining" not in blob:
+        fail("没有把进度和续写指令告诉模型")
+    if secret in blob:
+        fail("续写时把本地正文发给了模型")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):

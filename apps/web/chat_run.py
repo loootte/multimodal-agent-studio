@@ -522,6 +522,26 @@ def _generate_text_turn(
         return True
 
     allowed: set[str] = set()
+    run._images_done = 0
+    run._images_total = _requested_count(user_text) if _wants_images("", user_text) or _requested_count(user_text) else 0
+    pushes = {"stalls": 0, "seen": 0, "handle": ""}
+
+    def resume(text):
+        # 用户要 N 张、模型做了 k 张就自己收尾时，服务端追一句续写指令；连续两次没进展就放弃，免得死循环。
+        total = int(getattr(run, "_images_total", 0) or 0)
+        done = int(getattr(run, "_images_done", 0) or 0)
+        handle = pushes["handle"]
+        if total <= 1 or done <= 0 or done >= total or not handle or run.cancel.is_set():
+            return None
+        if done == pushes["seen"]:
+            pushes["stalls"] += 1
+        else:
+            pushes["stalls"] = 0
+        pushes["seen"] = done
+        if pushes["stalls"] >= 2:
+            return None
+        print(f"resume {run.run_id} {done}/{total}", file=sys.stderr)
+        return _continue_line(done, total, handle)
 
     def confirm(name, arguments):
         ok = run.wait_confirm()
@@ -539,6 +559,8 @@ def _generate_text_turn(
         return tool_mutates(name)
 
     def execute(name, arguments):
+        if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
+            pushes["handle"] = str(arguments.get("content_handle"))
         if name in _WEB_TOOLS and name not in take_tools:
             return _execute_web_tool(app, session_id, message_id, run, name, arguments)
         return execute_tool(name, arguments)
@@ -570,6 +592,7 @@ def _generate_text_turn(
             cancel=run.cancel,
             timeout_sec=app.timeout_sec,
             take=take,
+            resume=resume,
             confirm=confirm,
             execute=execute,
             mutating=mutating,
@@ -1050,6 +1073,10 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     if public.get("ok"):
         run._images_done = getattr(run, "_images_done", 0) + 1
         public["images_done_this_turn"] = run._images_done
+        total = int(getattr(run, "_images_total", 0) or 0)
+        if total:
+            public["images_total"] = total
+            public["images_remaining"] = max(0, total - run._images_done)
         _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
         app.sessions.update_message(
             session_id, message_id, text=app.sessions.message_text(session_id, message_id), status="running", error=None,
@@ -1303,6 +1330,35 @@ def _skill_figure(text: str) -> bool:
 
 def _handle_line(handle: str) -> str:
     return f"本地内容句柄 {handle}。正文留在本机。"
+
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_number(text: str) -> int:
+    if text.isdigit():
+        return int(text)
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        tens = _CN_DIGITS.get(head, 0) if head else 1
+        return tens * 10 + (_CN_DIGITS.get(tail, 0) if tail else 0)
+    return _CN_DIGITS.get(text, 0)
+
+
+def _requested_count(user_text: str) -> int:
+    """从“连续生成5张”“生成两幅”“三张图”里读出要几张；读不出或超过 20 返回 0。"""
+    match = re.search(r"(\d+|[零一二两三四五六七八九十]+)\s*(?:张|幅|个图|副)", user_text or "")
+    if not match:
+        return 0
+    count = _cn_number(match.group(1))
+    return count if 1 <= count <= 20 else 0
+
+
+def _continue_line(done: int, total: int, handle: str) -> str:
+    return (
+        f"已生成 {done}/{total} 张，还差 {total - done} 张。请继续调用 generate_image 生成第 {done + 1} 张，"
+        f"content_handle 用同一个本地句柄 {handle}，一次调用一张；全部完成后再回答。"
+    )
 
 
 def _ready_line(handle: str) -> str:

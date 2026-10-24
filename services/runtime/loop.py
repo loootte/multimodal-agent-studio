@@ -39,6 +39,7 @@ def run(
     execute=None,
     mutating=None,
     take=None,
+    resume=None,
     artifacts=None,
     local_bodies=None,
     base_url=None,
@@ -129,6 +130,15 @@ def run(
             "step": clock.steps_used,
         })
         if tool_call is None:
+            spoken = "".join(text_parts)
+            # 模型没调工具就收尾时，调用方可以给一句续写指令（比如连续出图还没到张数），在同一个循环里接着做。
+            note = resume(spoken) if callable(resume) else None
+            if note:
+                messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or "（未完成）"}]})
+                messages.append({"role": "user", "parts": [{"type": "text", "text": note}]})
+                if spoken:
+                    yield {"type": EVENT_MESSAGE_DELTA, "text": "\n", "run_id": run_id}
+                continue
             yield {"type": EVENT_MESSAGE_COMPLETED, "run_id": run_id, "text": "".join(text_parts)}
             return
         if cancel is not None and cancel.is_set():
