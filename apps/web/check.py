@@ -482,6 +482,7 @@ def self_check() -> None:
         _gateway_cases()
         _runtime_cases()
         _skill_cases()
+        _toolpack_cases()
         _live()
     finally:
         for name, value in saved.items():
@@ -2252,6 +2253,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_ask_case(base, provider, comfy.box)
         _batch_stop_case(base, provider, comfy.box)
         _tool_config_case(base, provider, comfy.box, directory, port)
+        _toolpack_http_case(base, directory)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -3116,8 +3118,10 @@ def _tool_config_case(base: str, provider, box: ComfyState, directory: str, port
         fail("工具配置用例找不到 provider.json 的目录")
     status, body = request("GET", base + "/api/tools")
     listing = json.loads(body)
-    if status != 200 or [tool["name"] for tool in listing.get("tools") or []] != ["comfyui"]:
-        fail(f"工具列表不对：{body}")
+    if status != 200 or [item["name"] for item in listing.get("backends") or []] != ["comfyui"]:
+        fail(f"后端列表不对：{body}")
+    if "comfyui" in [tool["name"] for tool in listing.get("tools") or []]:
+        fail("下拉框的工具组里出现了后端名 comfyui")
     view = json.loads(request("GET", base + "/api/tools/comfyui/config")[1])
     fields = {field["name"]: field for field in view.get("fields") or []}
     for name in ("base_url", "auth_token", "output_dir", "image_workflow", "image_fields", "video_i2v_workflow",
@@ -3445,6 +3449,287 @@ def _egress_file(provider) -> None:
                 fail("文件出口检查失败后仍然把字节发给了供应商")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+# ---------- #31 工具包 ----------
+
+BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
+                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo"}
+
+
+def _packs_module():
+    poc_root = os.path.join(ROOT, "poc")
+    if poc_root not in sys.path:
+        sys.path.append(poc_root)
+    from tools import packs
+
+    return packs
+
+
+def _write_pack(folder: str, manifest: dict, code: str | None = None) -> str:
+    target = os.path.join(folder, manifest["name"])
+    os.makedirs(target, exist_ok=True)
+    with open(os.path.join(target, "tool.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False)
+    if code is not None:
+        with open(os.path.join(target, "tool.py"), "w", encoding="utf-8") as handle:
+            handle.write(code)
+    return target
+
+
+def _pack_manifest(name: str, **extra) -> dict:
+    manifest = {
+        "schema": "mas.tool/1", "name": name, "version": "1.0.0", "description": f"{name} 测试工具。",
+        "parameters": {"type": "object", "additionalProperties": False, "properties": {"n": {"type": "integer"}}},
+        "mutating": False, "confirm": "never", "entry": {"kind": "python", "module": "tool.py"},
+        "config": [], "requires": {"backends": [], "python": []},
+        "permissions": {"read_local_content": False, "network": False, "write_files": False, "send_local_to_model": False},
+    }
+    manifest.update(extra)
+    return manifest
+
+
+_PACK_CODE = "def call(arguments, config):\n    return {'ok': True, 'executed': True, 'n': arguments.get('n'), 'config': sorted(config)}\n"
+
+
+def _toolpack_cases() -> None:
+    """清单校验、发现、依赖缺失、权限拒绝、确认策略。"""
+    packs = _packs_module()
+    from services.runtime.loop import _asks_confirm
+    from services.runtime.tools import execute_tool, openai_tools, tool_mutates
+    from tools.registry import audience_tools
+
+    found = {pack.name: pack for pack in packs.discover()}
+    if set(found) != BUILTIN_TOOLS or not all(pack.builtin for pack in found.values()):
+        fail(f"内置工具清单不全：{sorted(found)}")
+    for pack in found.values():
+        problems = packs.validate_manifest(pack.manifest, builtin=True)
+        if problems:
+            fail(f"{pack.name} 的清单不合格：{problems}")
+    exposed = [item["function"]["name"] for item in openai_tools()]
+    if set(exposed) != BUILTIN_TOOLS - {"generate_video"}:
+        fail(f"给模型的工具不是按清单来的：{exposed}")
+    image = next(item for item in openai_tools() if item["function"]["name"] == "generate_image")["function"]
+    if "prompt" in image["parameters"]["properties"] or "count" in image["parameters"]["properties"] or "n" in image["parameters"]["properties"]:
+        fail("generate_image 的模型参数里出现了 prompt/count/n")
+    if not image["parameters"]["properties"].get("style", {}).get("enum"):
+        fail("generate_image 的 style 白名单没有从 parameter_sources 填进去")
+    plan = found["plan_images"].manifest["parameters"]["properties"]["count"]
+    if plan.get("minimum") != 1 or plan.get("maximum") != 20:
+        fail("plan_images 的张数范围变了")
+    if [item.name for item in audience_tools("internal")] != ["generate_image", "lookup_demo", "read_skill", "generate_video"] and \
+            {item.name for item in audience_tools("internal")} != {"generate_image", "lookup_demo", "read_skill", "generate_video"}:
+        fail("本机实现没有按清单的 entry 装载")
+    for name, pack in found.items():
+        if tool_mutates(name) != (pack.manifest["confirm"] != "never"):
+            fail(f"{name} 的确认策略没有按清单生效")
+    if not tool_mutates("generate_image") or tool_mutates("plan_images") or not tool_mutates("accept_local_content"):
+        fail("内置工具的确认策略变了")
+    if found["generate_image"].manifest["permissions"]["send_local_to_model"]:
+        fail("generate_image 不能把本地内容交给模型")
+
+    bad = {
+        "send_local_to_model": _pack_manifest("bad_one", permissions={"send_local_to_model": True}),
+        "prompt": _pack_manifest("bad_two", parameters={"type": "object", "additionalProperties": False, "properties": {"prompt": {"type": "string"}}}),
+        "host": _pack_manifest("bad_three", entry={"kind": "host"}),
+        "confirm=never": _pack_manifest("bad_four", mutating=True, confirm="never"),
+        "version": _pack_manifest("bad_five", version="1"),
+        "默认值": _pack_manifest("bad_six", config=[{"name": "key", "type": "secret", "default": "leak", "required": False, "secret": True, "description": ""}]),
+        "相对路径": _pack_manifest("bad_seven", entry={"kind": "python", "module": "../evil.py"}),
+        "confirm_args": _pack_manifest("bad_eight", confirm="by_args"),
+    }
+    for word, manifest in bad.items():
+        problems = packs.validate_manifest(manifest)
+        if not any(word in item for item in problems):
+            fail(f"清单校验没有拒绝 {word}：{problems}")
+    if packs.validate_manifest(_pack_manifest("good_one")):
+        fail("合格的清单被拒绝了")
+
+    folder = tempfile.mkdtemp(prefix="toolpacks-")
+    source = tempfile.mkdtemp(prefix="toolpack-src-")
+    saved = os.environ.get("MAS_TOOLPACKS_DIR")
+    os.environ["MAS_TOOLPACKS_DIR"] = folder
+    try:
+        # 依赖缺失：稳定错误码 dependency_missing，不执行。
+        needy = _write_pack(source, _pack_manifest("needs_backend", requires={"backends": ["nowhere"], "python": ["no_such_pkg_31"]}), _PACK_CODE)
+        info = packs.inspect(needy)
+        if info["problems"] or len(info.get("missing") or []) != 2:
+            fail(f"检查工具包时没有报出缺的依赖：{info}")
+        packs.install(needy, [])
+        result = execute_tool("needs_backend", {"n": 1})
+        if result.get("error", {}).get("code") != "dependency_missing" or result.get("executed") is not False:
+            fail(f"缺依赖时没有稳定错误码：{result}")
+        # 权限：安装要确认；授权记录被改掉后调用 permission_denied。
+        netty = _write_pack(source, _pack_manifest("needs_network", permissions={"network": True}), _PACK_CODE)
+        try:
+            packs.install(netty, [])
+        except packs.PackError as exc:
+            if exc.code != "permission_not_accepted":
+                fail(f"没确认权限就安装的错误码不对：{exc.code}")
+        else:
+            fail("没确认权限也装上了")
+        packs.install(netty, ["network"])
+        if execute_tool("needs_network", {"n": 2}).get("n") != 2:
+            fail("授权后的工具没有执行")
+        with open(os.path.join(folder, "needs_network", ".granted.json"), "w", encoding="utf-8") as handle:
+            json.dump({"permissions": []}, handle)
+        result = execute_tool("needs_network", {"n": 2})
+        if result.get("error", {}).get("code") != "permission_denied":
+            fail(f"没授权的权限没有被拒绝：{result}")
+        # 确认策略 by_args：带 overwrite 才确认。
+        argy = _write_pack(source, _pack_manifest("by_args_tool", mutating=True, confirm="by_args", confirm_args=["overwrite"],
+                                                  parameters={"type": "object", "additionalProperties": False,
+                                                              "properties": {"overwrite": {"type": "boolean"}}}), _PACK_CODE)
+        packs.install(argy, [])
+        if tool_mutates("by_args_tool", {}) or not tool_mutates("by_args_tool", {"overwrite": True}) or not tool_mutates("by_args_tool"):
+            fail("confirm=by_args 没有按参数生效")
+        if _asks_confirm(tool_mutates, "by_args_tool", {}) or not _asks_confirm(tool_mutates, "by_args_tool", {"overwrite": True}):
+            fail("运行时没有把参数交给确认策略")
+        if not _asks_confirm(lambda name: True, "by_args_tool", {}):
+            fail("只收工具名的确认回调不再生效")
+        # 重名：不能和内置工具或后端重名。
+        clash = _write_pack(source, _pack_manifest("plan_images"), _PACK_CODE)
+        if not packs.inspect(clash)["problems"]:
+            fail("和内置工具重名的包没有被拒绝")
+        backend = _write_pack(source, _pack_manifest("comfyui"), _PACK_CODE)
+        if not packs.inspect(backend)["problems"]:
+            fail("和后端重名的包没有被拒绝")
+        # 坏清单会让发现失败，而不是悄悄跳过。
+        broken = os.path.join(folder, "broken_pack")
+        os.makedirs(broken)
+        with open(os.path.join(broken, "tool.json"), "w", encoding="utf-8") as handle:
+            json.dump(_pack_manifest("broken_pack", permissions={"send_local_to_model": True}), handle)
+        try:
+            packs.discover()
+        except packs.PackError as exc:
+            if exc.code != "invalid_manifest":
+                fail(f"坏清单的错误码不对：{exc.code}")
+        else:
+            fail("坏清单没有被发现阶段拒绝")
+        shutil.rmtree(broken)
+        try:
+            packs.uninstall("generate_image")
+        except packs.PackError as exc:
+            if exc.code != "builtin_tool":
+                fail(f"卸载内置工具的错误码不对：{exc.code}")
+        else:
+            fail("内置工具被卸载了")
+    finally:
+        if saved is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved
+        shutil.rmtree(folder, ignore_errors=True)
+        shutil.rmtree(source, ignore_errors=True)
+    if set(item["function"]["name"] for item in openai_tools()) != BUILTIN_TOOLS - {"generate_video"}:
+        fail("测试装的工具包没有清干净")
+
+
+def _toolpack_http_case(base: str, directory: str) -> None:
+    """下拉框按工具名列出；通过网页接口安装、配置、调用、导出、在另一份目录装上、卸载。"""
+    import io
+    import zipfile
+
+    from services.runtime.tools import execute_tool, openai_tools
+
+    status, body = request("GET", base + "/api/tools")
+    listing = json.loads(body)
+    names = [tool["name"] for tool in listing.get("tools") or []]
+    if status != 200 or set(names) != BUILTIN_TOOLS:
+        fail(f"下拉框没有按实际工具名列出：{names}")
+    for tool in listing["tools"]:
+        if not {"version", "permissions", "backends", "builtin", "ready", "exposed"} <= set(tool):
+            fail(f"工具列表缺字段：{tool}")
+    view = json.loads(request("GET", base + "/api/tools/generate_image/config")[1])
+    if view.get("kind") != "tool" or [b["name"] for b in view["pack"]["backend_status"]] != ["comfyui"]:
+        fail(f"generate_image 的页面没有显示依赖的后端：{view.get('pack')}")
+    if view["fields"]:
+        fail("内置工具不该有自己的配置项")
+    if json.loads(request("GET", base + "/api/tools/comfyui/config")[1]).get("kind") != "backend":
+        fail("ComfyUI 没有标成后端")
+    script = open(os.path.join(WEB_DIR, "static", "app.js"), encoding="utf-8").read()
+    for needle in ("optgroup", "tool.name", "/api/toolpacks/install", "/api/toolpacks/inspect", "/export", "/uninstall", "backend_status"):
+        if needle not in script:
+            fail(f"工具对话框缺 {needle}")
+
+    folder = tempfile.mkdtemp(prefix="toolpacks-http-")
+    other = tempfile.mkdtemp(prefix="toolpacks-other-")
+    saved = os.environ.get("MAS_TOOLPACKS_DIR")
+    os.environ["MAS_TOOLPACKS_DIR"] = folder
+    example = os.path.join(ROOT, "toolpacks", "examples", "dice_roll")
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": example})
+        info = json.loads(body)
+        if status != 200 or info.get("name") != "dice_roll" or info.get("problems") or info.get("permissions") != []:
+            fail(f"检查示例工具包失败：{body}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": example})
+        if status != 400 or json.loads(body).get("code") != "permission_not_accepted":
+            fail(f"没确认权限的安装没有被拒绝：{status} {body}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": example, "accept_permissions": []})
+        if status != 200:
+            fail(f"安装示例工具包失败：{body}")
+        listing = json.loads(request("GET", base + "/api/tools")[1])
+        mine = next((t for t in listing["tools"] if t["name"] == "dice_roll"), None)
+        if not mine or mine["builtin"] or not mine["configurable"] or not mine["ready"]:
+            fail(f"装上的工具没有出现在下拉框：{mine}")
+        if "dice_roll" not in [item["function"]["name"] for item in openai_tools()]:
+            fail("装上的工具没有提供给模型")
+        secret = "dice-secret-WXYZ4321"
+        status, body = request("PUT", base + "/api/tools/dice_roll/config", {"values": {"default_sides": 1000, "api_key": secret}})
+        if status != 200 or secret in body:
+            fail(f"保存工具自己的配置失败：{status} {body}")
+        status, body = request("PUT", base + "/api/tools/dice_roll/config", {"values": {"default_sides": 1}})
+        if status != 400:
+            fail("工具配置没有按清单的范围校验")
+        result = execute_tool("dice_roll", {"times": 3})
+        if not result.get("ok") or result.get("sides") != 1000 or len(result.get("rolls") or []) != 3 or result.get("has_key") is not True:
+            fail(f"装上的工具没有用到它的配置：{result}")
+        if execute_tool("dice_roll", {"sides": 1}).get("error", {}).get("code") != "invalid_parameter":
+            fail("装上的工具没有按清单校验参数")
+        status, raw = request_bytes("GET", base + "/api/toolpacks/dice_roll/export")
+        if status != 200:
+            fail("导出工具包失败")
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+        listed = sorted(archive.namelist())
+        if listed != ["dice_roll/tool.json", "dice_roll/tool.py"]:
+            fail(f"导出的包内容不对：{listed}")
+        if any(secret.encode() in archive.read(n) for n in listed):
+            fail("导出的包带走了密钥")
+        status, _raw = request_bytes("GET", base + "/api/toolpacks/generate_image/export")
+        if status != 400:
+            fail("内置工具也被导出了")
+        zipped = os.path.join(other, "dice_roll.zip")
+        with open(zipped, "wb") as handle:
+            handle.write(raw)
+        # 拷到另一份目录：从 zip 装上并调用；配置不随包走，回到清单默认值。
+        os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(other, "installed")
+        packs = _packs_module()
+        saved_source = packs.CONFIG_SOURCE
+        packs.CONFIG_SOURCE = None
+        try:
+            packs.install(zipped, [])
+            result = execute_tool("dice_roll", {})
+            if not result.get("ok") or result.get("sides") != 6 or result.get("has_key"):
+                fail(f"另一份目录里装上的包不能用，或带走了配置：{result}")
+        finally:
+            packs.CONFIG_SOURCE = saved_source
+        os.environ["MAS_TOOLPACKS_DIR"] = folder
+        status, body = request("POST", base + "/api/toolpacks/generate_image/uninstall")
+        if status != 400 or json.loads(body).get("code") != "builtin_tool":
+            fail(f"内置工具被卸载了：{body}")
+        status, body = request("POST", base + "/api/toolpacks/dice_roll/uninstall")
+        if status != 200 or os.path.isdir(os.path.join(folder, "dice_roll")):
+            fail(f"卸载失败：{body}")
+        names = [tool["name"] for tool in json.loads(request("GET", base + "/api/tools")[1])["tools"]]
+        if "dice_roll" in names:
+            fail("卸载后仍在下拉框里")
+    finally:
+        if saved is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved
+        shutil.rmtree(folder, ignore_errors=True)
+        shutil.rmtree(other, ignore_errors=True)
 
 
 def request_bytes(method: str, url: str, timeout: float = 5):
