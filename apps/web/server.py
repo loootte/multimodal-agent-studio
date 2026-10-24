@@ -24,6 +24,7 @@ if WEB_DIR not in sys.path:
 
 import chat_run
 import image_run
+import resources
 import store
 import tool_config
 from packages.artifacts import ArtifactStore
@@ -43,6 +44,7 @@ _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32}
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
     "markdown.js": "text/javascript; charset=utf-8",
+    "resources.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
@@ -154,6 +156,61 @@ def _trajectories(handler, app, query) -> None:
     _send_json(handler, 200, {"schema": "mas.trajectory/1", "export": stats, "trajectories": items})
 
 
+def _resource_route(handler, app, method, path, query) -> None:
+    """本地资源面板（issue #51）。只给本机；返回值只进浏览器，不进模型。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in resources.LOOPBACK:
+        _send_json(handler, 403, {"code": "forbidden", "message": "本地资源只给本机看。"})
+        return
+
+    def one(name):
+        return ((query.get(name) or [""])[0]).strip()[:200]
+
+    try:
+        if path == "/api/resources" and method == "GET":
+            kind, session = one("type") or None, one("session") or None
+            if kind and kind not in resources.TYPES:
+                raise resources.ResourceError(400, "invalid_query", "type 不合法。")
+            if session and not re.fullmatch(r"s_[0-9a-f]{32}", session):
+                raise resources.ResourceError(400, "invalid_query", "session 不合法。")
+            _send_json(handler, 200, resources.inventory(app, kind, session, one("q") or None))
+            return
+        if path == "/api/resources/preview" and method == "GET":
+            _send_json(handler, 200, resources.preview_text(app, one("id")))
+            return
+        if path == "/api/resources/raw" and method == "GET":
+            data, media, name = resources.raw(app, one("id"))
+            handler.send_response(200)
+            handler.send_header("Content-Type", media)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("Content-Security-Policy", "sandbox")
+            disposition = "attachment" if one("download") else "inline"
+            handler.send_header("Content-Disposition", f'{disposition}; filename="{name}"')
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
+        if path == "/api/resources/label" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, resources.set_label(app, body.get("id"), body.get("label") or ""))
+            return
+        if path == "/api/resources/delete" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, resources.delete(app, body.get("ids"), bool(body.get("confirm"))))
+            return
+        if path == "/api/resources/reuse" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, resources.reuse(app, body.get("id"), body.get("session_id") or ""))
+            return
+    except resources.ResourceError as exc:
+        payload = {"code": exc.code, "message": exc.message}
+        payload.update(exc.extra)
+        _send_json(handler, exc.status, payload)
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
 def _meta_loopback(handler) -> bool:
     host = (handler.client_address or ("",))[0]
     if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
@@ -230,6 +287,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             return
         if method == "GET" and path == "/api/trajectories":
             _trajectories(handler, app, urllib.parse.parse_qs(parsed.query))
+            return
+        if path == "/api/resources" or path.startswith("/api/resources/"):
+            _resource_route(handler, app, method, path, urllib.parse.parse_qs(parsed.query))
             return
         if method == "POST" and path == "/api/meta/mine":
             _meta_mine(handler, app, urllib.parse.parse_qs(parsed.query))
