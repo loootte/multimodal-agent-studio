@@ -211,6 +211,13 @@ class Run:
         with self._state_lock:
             self.prompt_id = prompt_id
             self.comfy_base = base
+            late = self.cancel.is_set()
+        # 停止刚好落在两张图之间、新一张已经提交时，stop() 取消的是上一张；这里补取消新提交的这张。
+        if late:
+            try:
+                image_run.cancel(base, prompt_id)
+            except Exception as exc:
+                print(f"chat cancel {type(exc).__name__}", file=sys.stderr)
 
     def accept_progress(self, key: tuple) -> bool:
         with self._state_lock:
@@ -674,6 +681,9 @@ def _generate_text_turn(
                 flush_traces()
                 code = str(event.get("code") or "provider_error")
                 message = str(event.get("message") or HUMAN.get(code) or HUMAN["provider_error"])
+                done = int(getattr(run, "_images_done", 0) or 0)
+                if code == "cancelled" and (done or _plan_total(run)):
+                    message = f"已停止，完成 {done}/{_plan_total(run) or done} 张。"
                 retryable = event.get("retryable")
                 error = GatewayError(code, message)
                 if retryable is not None:

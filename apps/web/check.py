@@ -2017,6 +2017,7 @@ class ComfyState:
         self.deletes = []
         self.history_hits = {}
         self.release = threading.Event()
+        self.hold_after = None
 
     def set_mode(self, mode: str) -> None:
         with self.cv:
@@ -2074,6 +2075,10 @@ class ComfyState:
             return _history_entry("error")
         if interrupted:
             return _history_entry("interrupted")
+        with self.cv:
+            held = self.hold_after is not None and prompt_id in self.ids and self.ids.index(prompt_id) >= self.hold_after
+        if held:
+            return _history_entry("running")
         if mode in ("hold", "interrupt") and not released:
             return _history_entry("running")
         if not sent or hits < 2:
@@ -2232,6 +2237,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_early_stop_case(base, provider, comfy.box)
         _local_plan_case(base, provider, comfy.box)
         _local_ask_case(base, provider, comfy.box)
+        _batch_stop_case(base, provider, comfy.box)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -3022,6 +3028,69 @@ def _local_ask_case(base: str, provider, box: ComfyState) -> None:
     tools = json.dumps(provider.requests[sent].get("body", {}).get("tools") or [], ensure_ascii=False)
     if "弹出输入框" not in tools or "绝不要让用户把提示词贴到聊天里" not in tools:
         fail("accept_local_content 的说明没有讲清楚是本机输入框")
+
+
+def _batch_stop_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localmulti"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    before = len(box.prompts)
+    box.hold_after = before + 2
+    arts = []
+    caught = {}
+
+    def watch(event):
+        if event.get("type") == "tool.confirm":
+            _post_confirm(base, event.get("run_id") or "", True)
+        if event.get("type") == "content_request":
+            _post_content(base, event.get("run_id") or "", "批量中断用的本地提示词")
+        if event.get("type") == "artifact":
+            arts.append(event)
+
+    def run():
+        caught["events"] = read_sse(
+            site_port(base), f"/api/sessions/{session_id}/messages",
+            {"text": "用本地提示词连续生成5张图片"}, on_event=watch, timeout=20,
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and len(box.prompts) < before + 3:
+        time.sleep(0.05)
+    try:
+        if len(box.prompts) < before + 3 or len(arts) != 2:
+            fail(f"批量中断没有等到第三张在画：{len(box.prompts) - before} {len(arts)}")
+        third = box.ids[before + 2]
+        asked = len(provider.requests)
+        status, _body = request("POST", base + f"/api/sessions/{session_id}/stop", {})
+        if status != 200:
+            fail("批量中断的停止请求失败")
+        worker.join(10)
+    finally:
+        box.hold_after = None
+    events = caught.get("events", (0, "", []))[2]
+    if not events or events[-1].get("type") != "run.failed" or events[-1].get("code") != "cancelled":
+        fail(f"批量中断没有以取消结束：{events[-1] if events else ''}")
+    if "已停止，完成 2/5 张" not in (events[-1].get("message") or ""):
+        fail(f"批量中断的状态行不对：{events[-1].get('message')}")
+    if len([event for event in events if event.get("type") == "artifact"]) != 2:
+        fail("批量中断后保留的成片不是两张")
+    if third not in box.interrupts or not any(isinstance(item, list) and third in item for item in box.deletes):
+        fail("批量中断没有取消 ComfyUI 里正在画的第三张")
+    time.sleep(0.5)
+    if len(box.prompts) != before + 3:
+        fail(f"批量中断后还在提交：{len(box.prompts) - before}")
+    if len(provider.requests) > asked + 1:
+        fail(f"批量中断后还在追问模型（续写）：{len(provider.requests) - asked}")
+    status, saved = request("GET", base + f"/api/sessions/{session_id}")
+    data = json.loads(saved) if isinstance(saved, (str, bytes)) else saved
+    last = (data.get("messages") or [])[-1]
+    if last.get("status") != "cancelled" or len([e for e in last.get("events") or [] if e.get("type") == "artifact"]) != 2:
+        fail(f"批量中断后保存的消息不对：{last.get('status')}")
+    script = request("GET", base + "/static/app.js")[1]
+    if 'failure.code === "cancelled")) {' not in script:
+        fail("有成片时页面不显示已停止的状态行")
 
 
 def _local_plan_case(base: str, provider, box: ComfyState) -> None:

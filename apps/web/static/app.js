@@ -582,7 +582,7 @@ function bubble(message) {
   }
   const agentError = events.find((entry) => entry.type === "error");
   const failure = agentError || message.error;
-  if (failure && failure.message && !artifacts.length) {
+  if (failure && failure.message && (!artifacts.length || failure.code === "cancelled")) {
     const extra = document.createElement("p");
     extra.className = failure.code === "cancelled" ? "status-line" : "error";
     extra.textContent = failure.message;
