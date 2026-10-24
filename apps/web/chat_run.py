@@ -1321,11 +1321,15 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
     return bool(ok)
 
 
-def _note_image(run, source: str, backend: str, explicit_backend: bool) -> None:
+def _note_image(run, source: str, backend: str, explicit_backend: bool, result: dict | None = None) -> dict | None:
     log = getattr(run, "_image_log", None)
     if log is None:
         log = run._image_log = []
-    log.append({"source": source, "backend": backend, "explicit_backend": explicit_backend})
+    error = None
+    if isinstance(result, dict) and not result.get("ok", True) and isinstance(result.get("error"), dict):
+        error = {key: str(result["error"][key]) for key in ("code", "message", "hint") if result["error"].get(key)}
+    log.append({"source": source, "backend": backend, "explicit_backend": explicit_backend, "error": error})
+    return result
 
 
 def image_config(run) -> dict | None:
@@ -1346,7 +1350,16 @@ def image_config(run) -> dict | None:
     count_text = f"{done} 张" + (f"（计划 {total} 张）" if total else "（未指定，默认 1 张）")
     summary = "本次配置：提示词来源 " + "、".join(_SOURCE_LABEL.get(name, name) for name in sources) \
         + " · 出图 " + backend_text + " · 张数 " + count_text
-    return {"prompt_source": sources, "backend": backends, "count": done, "planned": total or None, "summary": summary}
+    errors = []
+    for item in log:
+        if item.get("error") and item["error"] not in errors:
+            errors.append(item["error"])
+    for error in errors[:3]:
+        summary += f"\n出图失败（{error.get('code')}）：{error.get('message', '')}" + (f" 建议：{error['hint']}" if error.get("hint") else "")
+    out = {"prompt_source": sources, "backend": backends, "count": done, "planned": total or None, "summary": summary}
+    if errors:
+        out["errors"] = errors
+    return out
 
 
 def _push_image_config(app, session_id, message_id, run) -> None:
@@ -1395,24 +1408,21 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
 
         problem = remote_image.check_ready(settings)
         if problem:
-            _note_image(run, source, backend, explicit_backend)
             problem["content_handle"] = handle
-            return problem
+            return _note_image(run, source, backend, explicit_backend, problem)
         run._remote_model = str(settings.get("remote_model") or "")
         if source == "local":
             if settings.get("remote_local_prompt") != "confirm":
-                _note_image(run, source, backend, explicit_backend)
-                return _image_error(
+                return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "local_prompt_remote_refused",
                     "本地提示词（1.3）默认不发给第三方出图服务。",
                     "改用本机 ComfyUI 出图（backend 不填）；或让我用聊天里的文字/我写的提示词出图；"
                     "确实要发时在 设置 → 工具 → generate_image 把 remote_local_prompt 改成 confirm，之后每轮会先请你确认。",
                     backend,
-                )
+                ))
             if not _remote_consent(app, session_id, message_id, run, handle, str(settings.get("remote_base_url") or "")):
-                _note_image(run, source, backend, explicit_backend)
-                return _image_error(handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。",
-                                    "可以改用本机 ComfyUI 出图。", backend)
+                return _note_image(run, source, backend, explicit_backend, _image_error(
+                    handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。", "可以改用本机 ComfyUI 出图。", backend))
     bound_args = dict(bound.get("arguments") or {})
     if backend == "remote":
         bound_args["backend"] = "remote"
@@ -1425,7 +1435,7 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
         }
     result = _run_image(app, session_id, message_id, run, bound_args)
     public = _public_generate_result(result, handle)
-    _note_image(run, source, backend, explicit_backend)
+    _note_image(run, source, backend, explicit_backend, public)
     public["prompt_source"] = source
     public["backend"] = backend
     if public.get("ok"):
