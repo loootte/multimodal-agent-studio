@@ -12,9 +12,18 @@
 | 名字 | 角色 | 工具 | 用途 |
 | --- | --- | --- | --- |
 | orchestrator | orchestrator | delegate、accept_local_content、list_local_content、retrieve_local、read_skill | 面对用户，拆任务、委托、汇总 |
-| planner | planner | plan_images、list_local_content、read_skill | 定张数和分工，不出图 |
+| planner | planner | plan_images、list_local_content、read_skill | 文字任务给提纲和分节；出图任务定张数，不出图 |
+| writer | writer | read_skill | 按提纲起草或按审稿意见修改文字，输出 Markdown |
 | image | image | generate_image、list_local_content | 用内容句柄逐张出图（一次调用一张） |
-| reviewer | reviewer | retrieve_local、list_local_content | 只读检查，给“通过/需要修改” |
+| reviewer | reviewer | retrieve_local、list_local_content | 审文字草稿或只读检查出图结果，给“通过/需要修改” |
+
+## 编排者什么时候委托
+
+勾上多智能体后，**文字和出图任务都走编排**：
+
+- 文字任务（文章、报告、方案、邮件、总结、长文翻译等）：planner 出提纲 → writer 起草（分节多时可并行） → reviewer 审稿（需要修改时 writer 最多再改一次） → 编排者整合成最终答案。
+- 出图任务：planner 定张数 → image 逐张出图 → reviewer 检查。
+- **可以不委托、直接回答的只有**：寒暄、一句话就能答的事实问答、对上一条回答的简短追问。这条规则写在编排者的系统指令里，由模型判断；所以很短的问题看不到 Agent 树是预期行为。
 
 ## 清单字段
 
@@ -24,7 +33,7 @@
 | name | 是 | 小写字母开头，2-48 位 `[a-z0-9_]`，不能和内置重名 |
 | version | 是 | `主.次.修` |
 | description | 是 | 一句话，编排者靠它决定委托给谁 |
-| role | 是 | `planner`、`image`、`reviewer`、`worker`（`orchestrator` 只给内置） |
+| role | 是 | `planner`、`image`、`writer`、`reviewer`、`worker`（`orchestrator` 只给内置） |
 | instructions | 是 | 系统指令，最多 4000 字 |
 | model | 否 | 不写就跟会话模型；写的话是同一服务商下的模型名。环境变量 `MAS_AGENT_MODEL_<NAME>` 可覆盖 |
 | tools | 是 | 已注册的工具名列表 |

@@ -294,6 +294,27 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._piece(_delta(content="不该被调用"))
             self._done()
             return
+        if mode == "multitext":
+            messages = self.server.requests[-1]["body"].get("messages") or [{}]
+            system = _user_text(messages[0].get("content")) if messages[0].get("role") == "system" else ""
+            if "你是编排者" in system:
+                done = self._tool_result_count("delegate")
+                order = ["planner", "writer", "reviewer"]
+                if done >= len(order):
+                    self._piece(_delta(content="# 终稿\n\n- 第一节\n- 第二节"))
+                    self._done()
+                    return
+                self._emit_tool("delegate", {"tasks": [{"agent": order[done], "task": "写一篇短文：" + order[done]}]})
+                return
+            reply = {"你是规划 Agent": "- 提纲一\n- 提纲二", "你是写作 Agent": "## 草稿\n正文", "你是检查 Agent": "通过\n结构清楚"}
+            for marker, text in reply.items():
+                if marker in system:
+                    self._piece(_delta(content=text))
+                    self._done()
+                    return
+            self._piece(_delta(content="不该被调用"))
+            self._done()
+            return
         if mode == "demo":
             user = self._last_user()
             if "工具结果" in user or "studio-demo" in user:
@@ -523,7 +544,7 @@ def _agent_cases() -> None:
 
     known = agents.registered_tools()
     names = sorted(agent.name for agent in agents.discover())
-    if names[:4] != ["image", "orchestrator", "planner", "reviewer"] and not {"image", "orchestrator", "planner", "reviewer"} <= set(names):
+    if not {"image", "orchestrator", "planner", "reviewer", "writer"} <= set(names):
         fail(f"内置 Agent 没有全部发现：{names}")
     good = {"schema": "mas.agent/1", "name": "critic", "version": "0.1.0", "description": "只读检查",
             "role": "reviewer", "instructions": "只读检查。", "tools": ["list_local_content"], "budget": {"steps": 4}}
@@ -1540,6 +1561,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
 
     _skill_turn(base, provider)
     _multi_agent_turn(base, provider)
+    _multi_text_turn(base, provider)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
@@ -1643,7 +1665,7 @@ def _multi_agent_turn(base: str, provider) -> None:
         fail("刷新后子 Agent 树不在")
     status, listing = request("GET", base + "/api/agents")
     names = {item.get("name") for item in json.loads(listing).get("agents") or []}
-    if status != 200 or not {"orchestrator", "planner", "image", "reviewer"} <= names:
+    if status != 200 or not {"orchestrator", "planner", "image", "reviewer", "writer"} <= names:
         fail(f"/api/agents 没列出内置 Agent：{status} {listing[:200]}")
     status, raw = request("POST", base + "/api/agents/planner/uninstall", {})
     if status != 400:
@@ -1657,6 +1679,25 @@ def _multi_agent_turn(base: str, provider) -> None:
     names = [tool.get("function", {}).get("name") for tool in plain[0]["body"].get("tools") or []]
     if "delegate" in names or "你是编排者" in json.dumps(plain[0]["body"], ensure_ascii=False):
         fail("没勾多智能体时也走了编排者")
+
+
+def _multi_text_turn(base: str, provider) -> None:
+    """勾了多智能体的文字任务也走编排：planner 提纲 → writer 起草 → reviewer 审稿 → 编排者汇总。"""
+    session_id = _fresh_session(base)
+    provider.mode = "multitext"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "写一篇关于城市骑行的短文", timeout=30, mode="multi")
+    if not _assistant_text(events).startswith("# 终稿"):
+        fail(f"多智能体文字任务没有由编排者汇总：{_assistant_text(events)}")
+    nodes = [e for e in events if e.get("type") == "agent" and e.get("status") != "running"]
+    if [n.get("agent") for n in nodes] != ["planner", "writer", "reviewer"]:
+        fail(f"文字任务的 Agent 树不对：{[n.get('agent') for n in nodes]}")
+    systems = [_user_text((r["body"].get("messages") or [{}])[0].get("content")) for r in provider.requests[sent:]]
+    if not any("你是写作 Agent" in text for text in systems):
+        fail("文字任务没有委托给 writer")
+    lead = next(text for text in systems if "你是编排者" in text)
+    if "writer" not in lead or "文字任务" not in lead:
+        fail("编排者的系统指令里没有文字任务的委托规则")
 
 
 def _skill_turn(base: str, provider) -> None:

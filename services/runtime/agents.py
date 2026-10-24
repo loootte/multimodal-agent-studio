@@ -30,7 +30,7 @@ SCHEMA = "mas.agent/1"
 MANIFEST = "agent.json"
 ORCHESTRATOR = "orchestrator"
 DELEGATE = "delegate"
-ROLES = ("orchestrator", "planner", "image", "reviewer", "worker")
+ROLES = ("orchestrator", "planner", "image", "writer", "reviewer", "worker")
 # 只有面对用户的编排者能弹本地内容对话框。
 ORCHESTRATOR_ONLY = ("accept_local_content",)
 MAX_DEPTH = 2
