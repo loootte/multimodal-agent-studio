@@ -119,7 +119,7 @@ _WEB_TOOLS = (
     "build_skill_page",
 )
 EVENT_AGENT = "agent"
-_AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps")
+_AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
 
 _SKILL_MARKERS = ("等距", "等轴测", "isometric")

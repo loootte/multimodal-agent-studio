@@ -574,7 +574,8 @@ class Delegator:
                          ok=status == "completed", status=status,
                          error_code=(out.get("error") or {}).get("code") if status != "completed" else None)
         if callable(self.on_event):
-            self.on_event(span)
+            # 子 Agent 的摘要只给界面看（Markdown 渲染），不进 trace。
+            self.on_event(dict(span, summary=summarize(out.get("text") or "")))
         result = {"agent": agent.name, "run_id": run_id, "status": status, "summary": summarize(out.get("text") or ""),
                   "artifacts": list(out.get("artifacts") or []), "steps": used}
         if out.get("error"):
