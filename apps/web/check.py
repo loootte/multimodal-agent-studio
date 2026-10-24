@@ -219,6 +219,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
             return
+        if mode == "localask":
+            # 复现真实模型：第一步只回文字，让用户把提示词贴进聊天，还追问变体。
+            body = json.dumps(self.server.requests[-1]["body"], ensure_ascii=False)
+            if "这是出图请求" not in body and self._tool_result_count("plan_images") == 0 and not _content_handle(body):
+                self._piece(_delta(content="请把提示词直接发给我，我会先用 accept_local_content 留在本机。要同一提示词还是变体？"))
+                self._done()
+                return
+            mode = "localmulti"
         if mode == "localmulti":
             if self._tool_result_count("generate_image") >= 5:
                 self._piece(_delta(content="五张都好了"))
@@ -2223,6 +2231,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_multi_image_case(base, provider, comfy.box, workflow)
         _local_early_stop_case(base, provider, comfy.box)
         _local_plan_case(base, provider, comfy.box)
+        _local_ask_case(base, provider, comfy.box)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2984,6 +2993,35 @@ def _local_early_stop_case(base: str, provider, box: ComfyState) -> None:
         fail("续写时把本地正文发给了模型")
     if not any(event.get("type") == "tool_call" and event.get("tool") == "plan_images" for event in events):
         fail("多张出图前没有走 plan_images")
+
+
+def _local_ask_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localask"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "模型先追问时的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我连续生成5张图片", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    order = [
+        event.get("tool") if event.get("type") == "tool_call" else event.get("type")
+        for event in events
+        if (event.get("type") == "tool_call" and event.get("status") == "running") or event.get("type") == "content_request"
+    ]
+    if order[:3] != ["plan_images", "accept_local_content", "content_request"]:
+        fail(f"模型先回文字追问后，没有被纠正成 plan_images → 收集提示词：{order}")
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 5 or len(box.prompts) != before + 5:
+        fail(f"纠正后没有做满五张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed":
+        fail(f"纠正后连续出图没有正常结束：{events[-1]}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if blob.count("这是出图请求") < 1 or secret in blob:
+        fail("纠正指令没有发给模型，或者把本地正文发给了模型")
+    tools = json.dumps(provider.requests[sent].get("body", {}).get("tools") or [], ensure_ascii=False)
+    if "弹出输入框" not in tools or "绝不要让用户把提示词贴到聊天里" not in tools:
+        fail("accept_local_content 的说明没有讲清楚是本机输入框")
 
 
 def _local_plan_case(base: str, provider, box: ComfyState) -> None:

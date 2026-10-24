@@ -9,9 +9,9 @@ def tools() -> list[Tool]:
     return [Tool(
         name="plan_images",
         description=(
-            "用户的请求意味着要多张图片时（明说张数、一组、一套、系列、每季一张等），"
-            "在第一次调用 generate_image 之前调用一次，报出你理解的总张数。只要一张时可以不调。"
-            "之后仍然每张单独调用一次 generate_image。"
+            "用户的请求意味着要多张图片时（明说张数、一组、一套、系列、每季一张等），第一步就调用一次，"
+            "在收集提示词和 generate_image 之前，count 按用户请求填。只要一张时可以不调。"
+            "不要先追问变体：用户没说时默认同一提示词、不同 seed。之后每张单独调用一次 generate_image。"
         ),
         order=55,
         mutating=False,

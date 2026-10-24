@@ -48,15 +48,18 @@ SYSTEM = (
     "这一轮用户消息里已经带上的图片附件，你可以直接看图回答。"
     "用户要识别、描述图片，或根据图片编写提示词时，直接写出文字。"
     "不要为此调用 accept_local_content，也不要调用 generate_image。"
-    "用户要留下、附上、引用，或在后续任务里使用应留在本机的内容时，调用 accept_local_content。"
-    "purpose 只能是 image_prompt 或 keep。kind 只能是 text 或 file。不要填写正文、字节、路径或文件名。"
-    "只有用户明确要求生成一张新图时，purpose 才填 image_prompt，kind 填 text。"
+    "accept_local_content 会在用户本机界面弹出一个输入框，用户在框里输入，正文不经过你，你只拿到句柄。"
+    "用户要留下、附上、引用本机内容，或者要出图但还没有可用的提示词句柄时，直接调用它。"
+    "绝不要让用户把提示词贴到聊天里，也不要说“请把提示词发给我”。"
+    "出图收提示词时 purpose 填 image_prompt，kind 填 text；只留存时填 keep。不要填写正文、字节、路径或文件名。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
     "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。"
-    "请求意味着多张图片时（不管有没有写出数字），先调用一次 plan_images 报出总张数，再对每一张分别调用一次 generate_image，直到做完计划的张数。只要一张时可以不调 plan_images。"
+    "请求意味着多张图片时（不管有没有写出数字），第一步就调用 plan_images 报出总张数，"
+    "顺序是 plan_images → （没有提示词句柄时）accept_local_content → 逐张 generate_image，直到做完计划的张数。只要一张时可以不调 plan_images。"
+    "出图请求不要先追问细节：用户没说要变体时，默认每张用同一个提示词句柄、不同 seed。直接调用工具，不要只回复文字。"
     "已经留下的本地提示词直接用句柄，不要再收集正文，也不要填写画面描述。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
@@ -525,9 +528,19 @@ def _generate_text_turn(
 
     allowed: set[str] = set()
     # 张数只认第三方模型调用 plan_images 报的计划（存在 run 上，收集本地提示词后重进循环也还在）；没有计划就不追。
-    pushes = {"stalls": 0, "seen": 0, "handle": ""}
+    pushes = {"stalls": 0, "seen": 0, "handle": "", "nudged": False, "tools": 0}
+    image_turn = _wants_images("", user_text) or _image_request(user_text)
 
     def resume(text):
+        # 出图请求第一步就只回文字（追问提示词、追问变体）时，纠正一次，让它按 plan_images → accept_local_content 走。
+        if (
+            image_turn and not pushes["nudged"] and pushes["tools"] == 0
+            and not getattr(run, "_image_plan", None) and not int(getattr(run, "_images_done", 0) or 0)
+            and not run.cancel.is_set()
+        ):
+            pushes["nudged"] = True
+            print(f"nudge {run.run_id}", file=sys.stderr)
+            return _NUDGE_LINE
         # 用户要 N 张、模型做了 k 张就自己收尾时，服务端追一句续写指令；连续两次没进展就放弃，免得死循环。
         total = _plan_total(run)
         done = int(getattr(run, "_images_done", 0) or 0)
@@ -560,6 +573,7 @@ def _generate_text_turn(
         return tool_mutates(name)
 
     def execute(name, arguments):
+        pushes["tools"] += 1
         if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
             pushes["handle"] = str(arguments.get("content_handle"))
         if name in _WEB_TOOLS and name not in take_tools:
@@ -1367,6 +1381,13 @@ def _skill_figure(text: str) -> bool:
 
 def _handle_line(handle: str) -> str:
     return f"本地内容句柄 {handle}。正文留在本机。"
+
+
+_NUDGE_LINE = (
+    "这是出图请求，请现在调用工具，不要只回复文字，不要让用户在聊天里贴提示词，也不要追问变体。"
+    "要多张时先调用 plan_images（count 按用户请求）；还没有提示词句柄时调用 accept_local_content"
+    "（purpose=image_prompt，kind=text），它会在用户本机弹出输入框，正文不经过你；拿到句柄后逐张调用 generate_image。"
+)
 
 
 def _continue_line(done: int, total: int, handle: str) -> str:
