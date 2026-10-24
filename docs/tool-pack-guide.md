@@ -348,6 +348,10 @@ def call(arguments: dict, config: dict) -> dict:
 
 对话框里会显示 ComfyUI 后端的状态和“去配置 ComfyUI”按钮；入口函数用自己的 `config["comfy_url"]` 去请求 `/queue`。
 
+### 6.x 内置示例：`character_image`（预设 + 配置覆盖）
+
+需要“一组预设 + 可自由填写 + 用户能改预设”的工具，可以参考内置的 [character_image](character-image.md)：预设放在包里的 `presets.json`，`config` 里给每个字段一个 `default_*` 和一个 `presets_json`（JSON 字符串，同键替换、新键追加），保存配置时在 `tool_config._cross_check` 里校验。注意它的入口是 `host`，第三方包不能照搬入口，只能照搬这种“预设 + 配置”的写法；参数名也避开了 `body` 等被拒的名字（体型字段叫 `build`）。
+
 ## 7. 常见安装错误
 
 安装失败时对话框底部会显示“工具包不合格：……”，后面是下面这些原文（多条用“；”分开）。
