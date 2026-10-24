@@ -83,7 +83,7 @@ class OpenAIAdapter:
         payload = {"model": req["model"], "stream": True, "messages": payload_messages}
         if req.get("tools"):
             payload["tools"] = req["tools"]
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = _tool_choice(req.get("tool_choice"), req["tools"])
         if _is_number(req.get("temperature")):
             payload["temperature"] = req["temperature"]
         if _is_int(req.get("max_output")):
@@ -304,6 +304,17 @@ def _accepts_image(model: str) -> bool:
 
 def _artifact_id(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _tool_choice(choice, tools) -> object:
+    """点名的工具必须在本次 tools 里，否则退回 auto。"""
+    if choice in ("required", "none"):
+        return choice
+    if isinstance(choice, dict):
+        names = {((item.get("function") or {}).get("name") or item.get("name")) for item in tools if isinstance(item, dict)}
+        if choice.get("name") in names:
+            return {"type": "function", "function": {"name": choice["name"]}}
+    return "auto"
 
 
 def _is_number(value) -> bool:

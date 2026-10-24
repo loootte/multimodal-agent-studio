@@ -125,6 +125,12 @@
       "category": "multi_agent",
       "kind": "multi_agent_text",
       "fake_only": true
+    },
+    {
+      "id": "multi_agent.forced_delegation",
+      "category": "multi_agent",
+      "kind": "multi_agent_forced",
+      "fake_only": true
     }
   ]
 }
