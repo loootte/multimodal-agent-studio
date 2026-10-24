@@ -1604,6 +1604,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _timeout_case(base, session_id, provider, app)
     _image_cases(base, provider, directory)
     _trajectory_case(base, directory)
+    _mining_case(base, directory)
 
     status, cleared = request("PUT", base + "/api/provider", {
         "base_url": upstream,
@@ -1651,6 +1652,197 @@ def _check_secrets(directory: str) -> list[str]:
             if len(text.strip()) >= 8:
                 found.append(text.strip()[:200])
     return found
+
+
+def _mining_case(base: str, directory: str) -> None:
+    """#40：构造含 5 次重复工具序列 + 噪声的轨迹，挖掘出该模式；噪声不成候选；证据 run_id 真实；无泄漏；关模型也能出候选；文档示例通过校验。"""
+    from services.meta.candidate import validate, validate_store
+    from services.meta.mine import Miner, build_model_prompt
+
+    fixture_dir = tempfile.mkdtemp(prefix="mine-")
+    traj_dir = os.path.join(fixture_dir, "trajectories")
+    os.makedirs(traj_dir)
+    pattern_tools = ["plan_image", "generate_image", "generate_image"]
+    noise_tools = [
+        ["read_skill"],
+        ["accept_local_content", "search_files"],
+        ["delegate"],
+        ["build_skill_page"],
+    ]
+    records = []
+    pattern_run_ids = []
+    # 5 次重复模式，分布在 3 个会话
+    for i in range(5):
+        sid = "s_" + f"{i % 3}" + ("a" * 31)
+        rid = "r_pat" + f"{i:028d}"
+        pattern_run_ids.append(rid)
+        records.append(_synthetic_traj(rid, sid, pattern_tools, summary=f"批量出图模式场景 {i}", secret_bait=SECRET if i == 0 else None))
+    # 噪声：每种只出现 1 次
+    for i, tools in enumerate(noise_tools):
+        rid = "r_noise" + f"{i:026d}"
+        records.append(_synthetic_traj(rid, "s_noise" + ("b" * 26), tools, summary=f"噪声 {i}"))
+    # 再加一条带绝对路径诱饵的噪声，确认候选里不会出现
+    records.append(_synthetic_traj(
+        "r_path" + ("c" * 26), "s_path" + ("d" * 26),
+        ["unique_tool_xyz"], summary=r"路径诱饵 D:\comfyui\secret 和 /home/box/x",
+    ))
+    jsonl = os.path.join(traj_dir, "trajectories.jsonl")
+    with open(jsonl, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # 空索引，避免 Exporter 捣乱；mine 时 export_first=False
+    with open(os.path.join(traj_dir, "index.json"), "w", encoding="utf-8") as handle:
+        json.dump({"schema": "mas.trajectory-index/1", "runs": {}, "sessions": {}}, handle)
+    miner = Miner(fixture_dir)
+    # 直接喂 records，跳过 export（夹具没有会话文件）
+    result = miner.mine(min_count=5, min_sessions=3, use_model=False, export_first=False, records=records)
+    if result["candidates"] != 1:
+        fail(f"应挖出恰好 1 个候选，实际 {result}")
+    store = miner.load_store()
+    problems = validate_store(store)
+    if problems:
+        fail(f"候选库校验失败：{problems}")
+    cand = store["candidates"][0]
+    if validate(cand):
+        fail(f"候选校验失败：{validate(cand)}")
+    if cand["pattern"]["steps"] != pattern_tools:
+        fail(f"挖到的模式不对：{cand['pattern']}")
+    if set(cand["evidence"]["run_ids"]) != set(pattern_run_ids):
+        fail(f"证据 run_id 对不上：{cand['evidence']['run_ids']}")
+    if cand["evidence"]["count"] != 5 or cand["evidence"]["sessions"] != 3:
+        fail(f"次数/会话不对：{cand['evidence']}")
+    # 噪声不应成为候选
+    for item in store["candidates"]:
+        if "unique_tool" in item["pattern"]["signature"] or item["pattern"]["signature"].startswith("read_skill"):
+            fail(f"噪声产生了候选：{item['pattern']}")
+    # 泄漏检查
+    blob = json.dumps(store, ensure_ascii=False)
+    if SECRET in blob or "sk-live" in blob:
+        fail("候选里有密钥")
+    if "D:\\comfyui" in blob or "/home/box" in blob or os.path.abspath(fixture_dir) in blob:
+        fail("候选里有绝对路径")
+    # 关模型时 model_assisted 应为 false
+    if cand.get("model_assisted") is not True and cand.get("model_assisted") is not False:
+        fail("缺 model_assisted")
+    if cand["model_assisted"]:
+        fail("未开模型却标记了 model_assisted")
+    # 模型归纳输入脱敏
+    prompt = build_model_prompt({
+        "kind": "tool_sequence",
+        "signature": ">".join(pattern_tools),
+        "steps": tuple(pattern_tools),
+        "count": 5,
+        "sessions": 3,
+        "success_rate": 1.0,
+        "scenarios": [f"含密钥 {SECRET} 和路径 D:\\leak\\a 的摘要", "正常场景"],
+        "run_ids": pattern_run_ids,
+    })
+    if SECRET in prompt or "sk-live" in prompt or "D:\\leak" in prompt or "/home/" in prompt:
+        fail(f"模型归纳输入未脱敏：{prompt[:200]}")
+    if "[secret]" not in prompt and "密钥" in prompt:
+        # 密钥形态应被替换；若 scenarios 里只有 SECRET 常量应变成 [secret]
+        pass
+    if SECRET in prompt:
+        fail("模型 prompt 仍含 SECRET")
+    # 真实数据目录上也能跑通（基于 #39 已导出的轨迹），且 skills/ 未被改动
+    before = _skills_fingerprint()
+    live = Miner(directory)
+    live_result = live.mine(min_count=3, min_sessions=2, use_model=False, export_first=False,
+                            records=Exporter_records(directory))
+    if live_result["records"] <= 0:
+        fail("真实轨迹挖掘没有读到记录")
+    after = _skills_fingerprint()
+    if before != after:
+        fail("挖掘改写了 skills/")
+    # API
+    status, body = request("POST", base + "/api/meta/mine?min_count=3&min_sessions=2")
+    data = json.loads(body)
+    if status != 200 or data.get("schema") != "mas.skill-candidates/1":
+        fail(f"挖掘接口不对：{status} {body[:300]}")
+    status, body = request("GET", base + "/api/meta/candidates")
+    listed = json.loads(body)
+    if status != 200 or not isinstance(listed.get("candidates"), list):
+        fail(f"候选列表接口不对：{status}")
+    if listed["candidates"]:
+        cid = listed["candidates"][0]["id"]
+        status, body = request("GET", base + f"/api/meta/candidates/{cid}")
+        if status != 200 or json.loads(body).get("id") != cid:
+            fail(f"候选详情接口不对：{status}")
+    if SECRET in body or os.path.abspath(directory) in body:
+        fail("候选接口带出了密钥或路径")
+    _mining_doc_example()
+    print(f"mining fixture 1 candidate from 5× pattern; live patterns_seen={live_result['patterns_seen']}")
+    shutil.rmtree(fixture_dir, ignore_errors=True)
+
+
+def Exporter_records(directory: str) -> list:
+    from services.meta.export import Exporter
+    return Exporter(directory).query(limit=0)
+
+
+def _skills_fingerprint() -> list[tuple]:
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "skills")
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            path = os.path.join(dirpath, name)
+            st = os.stat(path)
+            out.append((os.path.relpath(path, root), st.st_mtime_ns, st.st_size))
+    return sorted(out)
+
+
+def _synthetic_traj(run_id: str, session_id: str, tools: list[str], summary: str, secret_bait: str | None = None) -> dict:
+    from services.meta.trajectory import SCHEMA
+    steps = [{"kind": "tool", "name": name, "ok": True, "ms": 1, "at": "2026-10-24T12:00:00Z",
+              "args": {"keys": ["prompt"]}} for name in tools]
+    text = summary
+    if secret_bait:
+        text = summary + " " + secret_bait
+    # 摘要侧在挖掘时还会再 scrub；这里模拟已导出的干净摘要，诱饵只放进会再被检查的 prompt 构造里
+    return {
+        "schema": SCHEMA,
+        "run_id": run_id,
+        "parent_run_id": None,
+        "trace_id": run_id,
+        "session_id": session_id,
+        "turn_id": "m_" + run_id[2:34].ljust(32, "0")[:32],
+        "agent": "assistant",
+        "role": "assistant",
+        "mode": "single",
+        "depth": 0,
+        "model": "demo-vision",
+        "started_at": "2026-10-24T12:00:00Z",
+        "ended_at": "2026-10-24T12:00:01Z",
+        "ms": 1,
+        "input": {"summary": text[:120], "chars": len(text), "local_handle": None, "attachments": []},
+        "output": {"summary": "完成", "chars": 2, "artifacts": []},
+        "outcome": {"status": "completed", "error_code": None, "failure_class": None},
+        "feedback": {"retried": False, "reseeded": False, "stopped": False},
+        "steps": steps,
+        "tools": list(tools),
+        "skills": [],
+        "budget": {"steps": len(steps), "tokens": {"estimated": 1}},
+        "delegations": [],
+        "exported_at": "2026-10-24T12:00:02Z",
+    }
+
+
+def _mining_doc_example() -> None:
+    """docs/mining.md 里的示例必须能通过 validate。"""
+    from services.meta.candidate import validate
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "mining.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    match = re.search(r"```json\n(.*?)\n```", text, re.S)
+    if not match:
+        fail("docs/mining.md 缺少 json 示例")
+    problems = validate(json.loads(match.group(1)))
+    if problems:
+        fail(f"docs/mining.md 示例没通过校验：{problems}")
+
 
 
 def _trajectory_case(base: str, directory: str) -> None:

@@ -137,6 +137,12 @@
       "category": "meta",
       "kind": "trajectory_export",
       "fake_only": true
+    },
+    {
+      "id": "meta.skill_mining",
+      "category": "meta",
+      "kind": "skill_mining",
+      "fake_only": true
     }
   ]
 }

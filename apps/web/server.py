@@ -154,6 +154,66 @@ def _trajectories(handler, app, query) -> None:
     _send_json(handler, 200, {"schema": "mas.trajectory/1", "export": stats, "trajectories": items})
 
 
+def _meta_loopback(handler) -> bool:
+    host = (handler.client_address or ("",))[0]
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        _send_json(handler, 403, {"code": "forbidden", "message": "Meta 接口只给本机看。"})
+        return False
+    return True
+
+
+def _meta_mine(handler, app, query) -> None:
+    """本机：跑一次技能挖掘，覆盖写入 data/meta/skill-candidates.json（#40）。"""
+    if not _meta_loopback(handler):
+        return
+    from services.meta.mine import Miner
+
+    def one(name, default=""):
+        return (query.get(name) or [default])[0].strip()
+
+    try:
+        min_count = max(1, min(100, int(one("min_count", "3") or 3)))
+        min_sessions = max(1, min(100, int(one("min_sessions", "2") or 2)))
+    except ValueError:
+        _send_json(handler, 400, {"code": "invalid_query", "message": "min_count / min_sessions 应为整数。"})
+        return
+    use_model = one("model") in ("1", "true", "yes")
+    miner = Miner(app.data_dir)
+    result = miner.mine(min_count=min_count, min_sessions=min_sessions, use_model=use_model)
+    result.pop("model_prompts", None)
+    store = miner.load_store()
+    _send_json(handler, 200, {"schema": "mas.skill-candidates/1", "result": result, "candidates": store.get("candidates") or []})
+
+
+def _meta_candidates(handler, app, query, candidate_id: str | None = None) -> None:
+    """本机：列出或查看技能候选。"""
+    if not _meta_loopback(handler):
+        return
+    from services.meta.mine import Miner
+
+    miner = Miner(app.data_dir)
+    if candidate_id:
+        if not re.fullmatch(r"sc_[0-9a-f]{8,64}", candidate_id):
+            _send_json(handler, 400, {"code": "invalid_id", "message": "候选 id 不合法。"})
+            return
+        item = miner.get(candidate_id)
+        if not item:
+            _send_json(handler, 404, {"code": "not_found", "message": "找不到候选。"})
+            return
+        _send_json(handler, 200, item)
+        return
+    items = miner.list_candidates()
+    store = miner.load_store()
+    _send_json(handler, 200, {
+        "schema": "mas.skill-candidates/1",
+        "mined_at": store.get("mined_at"),
+        "params": store.get("params") or {},
+        "candidates": items,
+        "insufficient": store.get("insufficient") or [],
+    })
+
+
+
 def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
     try:
         parsed = urllib.parse.urlparse(handler.path)
@@ -170,6 +230,15 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             return
         if method == "GET" and path == "/api/trajectories":
             _trajectories(handler, app, urllib.parse.parse_qs(parsed.query))
+            return
+        if method == "POST" and path == "/api/meta/mine":
+            _meta_mine(handler, app, urllib.parse.parse_qs(parsed.query))
+            return
+        if method == "GET" and path == "/api/meta/candidates":
+            _meta_candidates(handler, app, urllib.parse.parse_qs(parsed.query))
+            return
+        if method == "GET" and path.startswith("/api/meta/candidates/"):
+            _meta_candidates(handler, app, urllib.parse.parse_qs(parsed.query), path[len("/api/meta/candidates/"):])
             return
         if method == "GET" and (path == "/api/telemetry" or path.startswith("/api/telemetry/")):
             query = urllib.parse.parse_qs(parsed.query)
