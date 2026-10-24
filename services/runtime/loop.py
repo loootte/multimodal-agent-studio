@@ -46,6 +46,7 @@ def run(
     local_bodies=None,
     base_url=None,
     run_id: str | None = None,
+    validate=None,
 ):
     """产出统一事件。模型文本里说已经执行，不算执行。"""
     req = normalize(request)
@@ -53,6 +54,7 @@ def run(
     clock = Clock(budget if isinstance(budget, Budget) else Budget())
     execute = execute or execute_tool
     mutating = mutating or tool_mutates
+    validate = validate or validate_arguments
     tools = req.get("tools")
     if tools is None:
         req = dict(req)
@@ -159,6 +161,7 @@ def run(
             execute,
             mutating,
             take,
+            validate,
         )
         # 时间预算只算模型思考：等人确认和工具执行（如一张图一分钟）不计入，免得连续出图做到一半被掐断。
         clock.started += time.monotonic() - tool_started
@@ -175,7 +178,7 @@ def _asks_confirm(mutating, name, arguments) -> bool:
     return bool(mutating(name, arguments) if count >= 2 else mutating(name))
 
 
-def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mutating, take=None):
+def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mutating, take=None, validate=None):
     name = tool_call.get("name") or ""
     arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
     yield {
@@ -214,7 +217,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
             return False
     if callable(take) and take(name, arguments):
         return True
-    problem = validate_arguments(name, arguments)
+    problem = (validate or validate_arguments)(name, arguments)
     if problem:
         result = problem
         telemetry.record("tool", name=name, ms=0, ok=False, error_code=_code_of(problem), executed=False)
