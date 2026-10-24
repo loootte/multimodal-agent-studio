@@ -1,5 +1,7 @@
 # 工具包规范
 
+> 想知道什么样的工具能装、怎么从零写一个并安装，请看 [工具包使用和编写指南](tool-pack-guide.md)。本页是字段的简明参考。
+
 [issue #31](https://github.com/loootte/multimodal-agent-studio/issues/31)。每个工具是一个目录，目录里一份 `tool.json` 清单。运行时只从清单注册工具，不再扫描 Python 文件。
 
 ## 目录
@@ -21,7 +23,7 @@
 | `parameters` | 发给模型的 JSON Schema，`type: object`，`additionalProperties: false`。`null` 表示不提供给模型（例如 `generate_video`） |
 | `mutating` | 是否改外部状态 |
 | `confirm` | `always`、`never` 或 `by_args`（配 `confirm_args`，参数里出现这些键才确认） |
-| `entry` | `{"type": "host"}` 由宿主实现；`{"type": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现 |
+| `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现 |
 | `config` | 配置字段，格式同 #28（`int`、`string`、`secret` 等） |
 | `requires.backends` | 依赖的后端名 |
 | `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`。最后一项必须为 `false` |

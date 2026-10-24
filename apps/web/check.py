@@ -483,6 +483,7 @@ def self_check() -> None:
         _runtime_cases()
         _skill_cases()
         _toolpack_cases()
+        _tool_pack_guide_cases()
         _live()
     finally:
         for name, value in saved.items():
@@ -3491,6 +3492,59 @@ def _pack_manifest(name: str, **extra) -> dict:
 
 
 _PACK_CODE = "def call(arguments, config):\n    return {'ok': True, 'executed': True, 'n': arguments.get('n'), 'config': sorted(config)}\n"
+
+
+def _tool_pack_guide_cases() -> None:
+    """指南里的每份示例清单都要过真实校验；dice_roll 的示例和仓库里的一致；示例代码能编译；入口抛异常变成 tool_error。"""
+    import re as _re
+
+    packs = _packs_module()
+    from services.runtime.tools import execute_tool
+
+    guide = open(os.path.join(ROOT, "docs", "tool-pack-guide.md"), encoding="utf-8").read()
+    blocks = _re.findall(r"<!-- validate:manifest -->\s*```json\n(.*?)```", guide, _re.S)
+    if len(blocks) < 4:
+        fail(f"指南里标记校验的示例清单太少：{len(blocks)}")
+    names = []
+    for raw in blocks:
+        data = json.loads(raw)
+        problems = packs.validate_manifest(data)
+        if problems:
+            fail(f"指南示例 {data.get('name')} 过不了校验：{problems}")
+        names.append(data["name"])
+    with open(os.path.join(ROOT, "toolpacks", "examples", "dice_roll", "tool.json"), encoding="utf-8") as handle:
+        if json.loads(blocks[0]) != json.load(handle):
+            fail("指南里的 dice_roll 清单和 toolpacks/examples/dice_roll/tool.json 不一致")
+    for code in _re.findall(r"```python\n(.*?)```", guide, _re.S):
+        if code.lstrip().startswith(("def ", "import ", "from ")):
+            compile(code, "tool-pack-guide.md", "exec")
+    for message in ("只有内置工具可以用 entry.kind=host。", "第三方工具必须声明 parameters。",
+                    "改外部状态的工具不能 confirm=never。", "send_local_to_model 必须是 false"):
+        if message not in guide:
+            fail(f"指南的错误表和校验原文对不上：{message}")
+    folder = tempfile.mkdtemp(prefix="guide-packs-")
+    source = os.path.join(folder, "src", "guide_boom")
+    os.makedirs(source)
+    manifest = json.loads(blocks[0])
+    manifest["name"] = "guide_boom"
+    with open(os.path.join(source, "tool.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+    with open(os.path.join(source, "tool.py"), "w", encoding="utf-8") as handle:
+        handle.write("def call(arguments, config):\n    raise RuntimeError('secret-detail')\n")
+    saved = os.environ.get("MAS_TOOLPACKS_DIR")
+    os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(folder, "installed")
+    try:
+        packs.install(source, [])
+        result = execute_tool("guide_boom", {})
+        if result.get("ok") is not False or (result.get("error") or {}).get("code") != "tool_error" \
+                or "secret-detail" in json.dumps(result, ensure_ascii=False):
+            fail(f"入口抛异常没有变成 tool_error：{result}")
+    finally:
+        if saved is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _toolpack_cases() -> None:

@@ -29,6 +29,7 @@
 | [docs/adr/0001-bootstrap-without-code.md](docs/adr/0001-bootstrap-without-code.md) | 为什么先只提交文档 |
 | [docs/adr/0002-implementation-stack.md](docs/adr/0002-implementation-stack.md) | 文字聊天这一刀的语言和进程 |
 | [docs/adr/0003-local-data-isolation.md](docs/adr/0003-local-data-isolation.md) | 本地数据隔离：第三方只见工具契约 |
+| [docs/tool-pack-guide.md](docs/tool-pack-guide.md) | 工具包使用和编写指南：能装什么、入口函数、安装配置导出、常见错误 |
 | [docs/tool-packs.md](docs/tool-packs.md) | 工具包规范：`tool.json` 清单、后端、权限、安装导出 |
 | [docs/adr/0004-tool-governance.md](docs/adr/0004-tool-governance.md) | 工具规范：`poc/tools` 自注册，MCP 是进程内投影 |
 
@@ -36,7 +37,7 @@
 
 工具参数（ComfyUI 地址、工作流模板和字段对照、默认画幅、步数、种子策略、超时、输出目录）可以在网页右上角“工具”里配置，保存后下一次运行生效，不用重启；`COMFY_*` 环境变量仍然优先。见 [docs/architecture.md](docs/architecture.md) 里的 `apps/web/tool_config.py`。
 
-工具按统一清单封装（[issue #31](https://github.com/loootte/multimodal-agent-studio/issues/31)）：每个工具一份 `toolpacks/*/tool.json`，“工具”对话框按实际工具名列出，可从本机目录或 zip 安装、导出、卸载工具包，配置和密钥不随包走。见 [docs/tool-packs.md](docs/tool-packs.md)。
+工具按统一清单封装（[issue #31](https://github.com/loootte/multimodal-agent-studio/issues/31)）：每个工具一份 `toolpacks/*/tool.json`，“工具”对话框按实际工具名列出，可从本机目录或 zip 安装、导出、卸载工具包，配置和密钥不随包走。见 [docs/tool-packs.md](docs/tool-packs.md)；什么样的工具能装、怎么写一个，见 [docs/tool-pack-guide.md](docs/tool-pack-guide.md)。
 
 左侧会话列表每项可以删除（先确认）。会话记录、只属于它的附件字节和生成工件一起删掉；还在回答的会话拒绝删除，要先停下。
 

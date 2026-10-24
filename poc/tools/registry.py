@@ -186,7 +186,10 @@ def _internal(pack) -> Tool | None:
         problem = _validate(arguments)
         if problem:
             return problem
-        result = _call(dict(arguments), packs.config_for(_pack))
+        try:
+            result = _call(dict(arguments), packs.config_for(_pack))
+        except Exception as exc:  # 第三方工具包出错不拖垮整轮对话
+            return tool_error(_pack.name, "tool_error", f"工具运行出错（{type(exc).__name__}）。")
         if not isinstance(result, dict):
             return tool_error(_pack.name, "tool_error", "工具没有返回对象。")
         result.setdefault("tool", _pack.name)
