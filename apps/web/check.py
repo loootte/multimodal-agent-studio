@@ -11,6 +11,7 @@ import re
 import shutil
 import struct
 import subprocess
+import socket
 import sys
 import tempfile
 import threading
@@ -203,6 +204,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "imageskill":
+            self._image_skill()
+            return
         if mode == "localplan":
             # 文字里没有数字，张数由模型理解后用 plan_images 报出。
             count = self._tool_result_count("generate_image")
@@ -373,6 +377,54 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if isinstance(item, dict) and item.get("role") == "user":
                 return _user_text(item.get("content"))
         return ""
+
+    def _user_texts(self) -> list[str]:
+        out = []
+        for item in self.server.requests[-1]["body"].get("messages") or []:
+            if isinstance(item, dict) and item.get("role") == "user":
+                out.append(_user_text(item.get("content")))
+        return out
+
+    def _image_skill(self) -> None:
+        """#49：按用户原话决定来源、后端、张数，像真实模型那样只用工具。"""
+        texts = self._user_texts()
+        ask = next((t for t in reversed(texts) if "工具结果" not in t and "已就绪" not in t and "这是出图请求" not in t), "")
+        failed = any("工具结果 generate_image" in t and '"ok": false' in t for t in texts)
+        planned = 3 if "三张" in ask else 0
+        target = planned or 1
+        if failed or self._tool_result_count("generate_image") >= target:
+            self._piece(_delta(content="好了"))
+            self._done()
+            return
+        if planned and self._tool_result_count("plan_images") == 0:
+            self._emit_tool("plan_images", {"count": planned})
+            return
+        if "原样" in ask or "优化提示词" in ask:
+            if self._tool_result_count("stage_prompt") == 0:
+                if "原样" in ask:
+                    visible = ask.split("：", 1)[-1].strip()
+                    self._emit_tool("stage_prompt", {"visible_prompt": visible, "source": "chat"})
+                else:
+                    visible = "模型写的提示词：" + ask.split("：", 1)[-1].strip() + "，电影感光影"
+                    if "洗白" in ask:
+                        visible = ask.split("洗白", 1)[-1].strip()
+                    self._emit_tool("stage_prompt", {"visible_prompt": visible, "source": "model"})
+                return
+            staged = next((t for t in reversed(texts) if "工具结果 stage_prompt" in t), "")
+            if '"ok": false' in staged:
+                self._piece(_delta(content="不能这样登记"))
+                self._done()
+                return
+            handle = _content_handle(staged)
+        else:
+            handle = next((_content_handle(t) for t in reversed(texts) if _content_handle(t)), "")
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+        args = {"content_handle": handle or ("c_" + "00" * 16)}
+        if "第三方" in ask:
+            args["backend"] = "remote"
+        self._emit_tool("generate_image", args)
 
     def _ready(self) -> bool:
         return "已就绪" in self._last_user()
@@ -3006,6 +3058,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_multi_image_case(base, provider, comfy.box, workflow)
         _local_early_stop_case(base, provider, comfy.box)
         _local_plan_case(base, provider, comfy.box)
+        _image_skill_cases(base, provider, comfy.box, directory)
         _local_ask_case(base, provider, comfy.box)
         _batch_stop_case(base, provider, comfy.box)
         _tool_config_case(base, provider, comfy.box, directory, port)
@@ -4097,6 +4150,221 @@ def _batch_stop_case(base: str, provider, box: ComfyState) -> None:
     script = request("GET", base + "/static/app.js")[1]
     if 'failure.code === "cancelled")) {' not in script:
         fail("有成片时页面不显示已停止的状态行")
+
+
+class RemoteImageHandler(BaseHTTPRequestHandler):
+    """假的 OpenAI 兼容图片服务：只认 /images/generations，记录请求。"""
+
+    def log_message(self, *args):
+        return
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        self.server.calls.append({"path": self.path, "body": body, "auth": self.headers.get("Authorization") or ""})
+        if self.path != "/v1/images/generations":
+            self._reply(404, {"error": {"message": "not found"}})
+            return
+        if self.headers.get("Authorization") != "Bearer " + self.server.key:
+            self._reply(401, {"error": {"message": "bad key"}})
+            return
+        self._reply(200, {"data": [{"b64_json": base64.b64encode(_png(16, 16)).decode("ascii")}]})
+
+    def _reply(self, status: int, payload: dict) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+_REMOTE_ENV = ("MAS_IMAGE_API_BASE", "MAS_IMAGE_API_KEY", "MAS_IMAGE_API_MODEL")
+
+
+def _config_event(events: list[dict]) -> dict:
+    found = [event for event in events if event.get("type") == "image_config"]
+    if len(found) != 1:
+        fail(f"出图后没有一条配置说明：{[event.get('type') for event in events]}")
+    return found[0]
+
+
+def _gen_results(events: list[dict]) -> list[dict]:
+    return [event for event in events if event.get("type") == "tool_call" and event.get("tool") == "generate_image"
+            and event.get("status") in ("success", "failed")]
+
+
+def _image_skill_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#49：3 种来源 × 2 种后端 × 张数（指定/默认），隐私、歧义、错误和配置说明。"""
+    saved = {name: os.environ.get(name) for name in _REMOTE_ENV}
+    remote = ThreadingHTTPServer(("127.0.0.1", 0), RemoteImageHandler)
+    remote.daemon_threads = True
+    remote.calls = []
+    remote.key = "sk-fake-image-key-49"
+    threading.Thread(target=remote.serve_forever, daemon=True).start()
+    os.environ["MAS_IMAGE_API_BASE"] = f"http://127.0.0.1:{remote.server_address[1]}/v1"
+    os.environ["MAS_IMAGE_API_KEY"] = remote.key
+    os.environ["MAS_IMAGE_API_MODEL"] = "fake-image-1"
+    provider.mode = "imageskill"
+    box.set_mode("ok")
+    try:
+        _image_skill_matrix(base, provider, box, remote)
+        existed = os.path.exists(os.path.join(directory, "tools.json"))
+        _image_skill_local_remote(base, provider, box, remote)
+        if not existed:
+            os.remove(os.path.join(directory, "tools.json"))
+        _image_skill_errors(base, provider, remote)
+        _image_skill_launder()
+    finally:
+        remote.shutdown()
+        remote.server_close()
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    print("image skill matrix ok")
+
+
+def _image_run(base, provider, box, remote, text, content=None):
+    session_id = _fresh_session(base)
+    sent, boxed, called = len(provider.requests), len(box.prompts), len(remote.calls)
+    events = _speak(base, session_id, text, timeout=40, content=content)
+    if events[-1].get("type") != "message.completed":
+        fail(f"出图没有正常结束：{text} {events[-1]}")
+    return events, provider.requests[sent:], box.prompts[boxed:], remote.calls[called:]
+
+
+def _image_skill_matrix(base, provider, box, remote) -> None:
+    secret = "本机雪山提示词-第三方不可见-49"
+    cases = [
+        # (原话, 本地正文, 来源, 后端, 张数, 是否指定张数, 出图服务应收到的文字)
+        ("原样出图：月光茶壶水墨", None, "chat", "local", 1, False, "月光茶壶水墨"),
+        ("用第三方原样出三张图：赛博朋克猫", None, "chat", "remote", 3, True, "赛博朋克猫"),
+        ("帮我优化提示词，出三张图：雨夜街景", None, "model", "local", 3, True, "模型写的提示词：雨夜街景，电影感光影"),
+        ("优化提示词后用第三方出图：山间小屋", None, "model", "remote", 1, False, "模型写的提示词：山间小屋，电影感光影"),
+        ("来三张风景，先输入本地提示词", secret, "local", "local", 3, True, secret),
+        ("来一张风景，先输入本地提示词", secret, "local", "local", 1, False, secret),
+    ]
+    for text, content, source, backend, count, specified, expect in cases:
+        events, requests, prompts, calls = _image_run(base, provider, box, remote, text, content)
+        arts = [event for event in events if event.get("type") == "artifact"]
+        results = _gen_results(events)
+        if len(arts) != count or (results and len(results) != count):
+            fail(f"张数不对：{text} 期望 {count}，成片 {len(arts)}，调用 {len(results)}")
+        if backend == "remote":
+            if prompts or len(calls) != count or any(call["body"].get("prompt") != expect for call in calls):
+                fail(f"第三方后端没有按提示词出图：{text} {[c['body'] for c in calls]} {len(prompts)}")
+            if any(call["body"].get("n") != 1 or call["body"].get("model") != "fake-image-1" for call in calls):
+                fail(f"第三方请求不是一次一张或模型不对：{calls[0]['body']}")
+        else:
+            if calls or len(prompts) != count or not all(expect in json.dumps(p, ensure_ascii=False) for p in prompts):
+                fail(f"本机后端没有按提示词出图：{text} {len(calls)} {len(prompts)}")
+        config = _config_event(events)
+        if config.get("prompt_source") != [source] or config.get("backend") != [backend] or config.get("count") != count:
+            fail(f"配置说明不对：{text} {config}")
+        summary = config.get("summary") or ""
+        if "提示词来源" not in summary or "出图" not in summary or f"{count} 张" not in summary:
+            fail(f"配置说明缺维度：{summary}")
+        if specified != ("计划" in summary) or (not specified and "默认 1 张" not in summary):
+            fail(f"张数默认值没有说明：{text} {summary}")
+        if backend == "local" and "本地 ComfyUI（默认）" not in summary:
+            fail(f"没说明默认用本机后端：{summary}")
+        if backend == "remote" and "fake-image-1" not in summary:
+            fail(f"没说明第三方模型：{summary}")
+        blob = json.dumps([item.get("body") for item in requests], ensure_ascii=False)
+        if secret in blob:
+            fail(f"本地提示词进入了对话模型请求：{text}")
+        if remote.key in json.dumps(events, ensure_ascii=False) or remote.key in blob:
+            fail("第三方 key 出现在事件或模型请求里")
+
+
+def _image_skill_local_remote(base, provider, box, remote) -> None:
+    secret = "本机海边提示词-默认不发第三方-49"
+    events, requests, prompts, calls = _image_run(
+        base, provider, box, remote, "用第三方出图，提示词我在本机输入", secret)
+    results = _gen_results(events)
+    error = (results[-1].get("result") or {}).get("error") if results else None
+    blob = json.dumps(events, ensure_ascii=False)
+    if calls or prompts or "local_prompt_remote_refused" not in blob or "remote_local_prompt" not in blob:
+        fail(f"本地提示词默认没有拒绝发给第三方：{len(calls)} {error}")
+    if any(event.get("type") == "artifact" for event in events):
+        fail("拒绝后不该有成片")
+    if secret in json.dumps([item.get("body") for item in requests], ensure_ascii=False):
+        fail("本地提示词进入了对话模型请求（拒绝路径）")
+    status, body = request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "confirm"}})
+    if status != 200:
+        fail(f"改不了 remote_local_prompt：{status} {body}")
+    try:
+        events, requests, prompts, calls = _image_run(
+            base, provider, box, remote, "用第三方出图，提示词我在本机输入", secret)
+        notices = [event for event in events if event.get("type") == "tool.confirm" and event.get("notice")]
+        if not notices or "不会发给对话模型" not in notices[0]["notice"] or secret in notices[0]["notice"]:
+            fail(f"发第三方前没有专门的确认说明：{notices}")
+        if len(calls) != 1 or calls[0]["body"].get("prompt") != secret or prompts:
+            fail(f"确认后本地提示词没有只发给第三方出图服务：{[c['body'] for c in calls]}")
+        if secret in json.dumps([item.get("body") for item in requests], ensure_ascii=False):
+            fail("确认后本地提示词进入了对话模型请求")
+        config = _config_event(events)
+        if config.get("prompt_source") != ["local"] or config.get("backend") != ["remote"]:
+            fail(f"确认路径的配置说明不对：{config}")
+    finally:
+        request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "refuse"}})
+
+
+def _image_skill_errors(base, provider, remote) -> None:
+    def attempt(expect: str) -> str:
+        session_id = _fresh_session(base)
+        events = _speak(base, session_id, "用第三方原样出图：小猫", timeout=30)
+        blob = json.dumps(events, ensure_ascii=False)
+        if expect not in blob or '"hint"' not in blob:
+            fail(f"第三方出图错误没有给出 {expect} 和建议：{[e.get('type') for e in events]}")
+        if remote.key in blob:
+            fail("错误信息里出现了 key")
+        _config_event(events)
+        return blob
+
+    good = os.environ["MAS_IMAGE_API_BASE"]
+    os.environ["MAS_IMAGE_API_KEY"] = ""
+    attempt("remote_missing_key")
+    os.environ["MAS_IMAGE_API_KEY"] = "sk-wrong"
+    attempt("remote_auth")
+    os.environ["MAS_IMAGE_API_KEY"] = remote.key
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    port = dead.getsockname()[1]
+    dead.close()
+    os.environ["MAS_IMAGE_API_BASE"] = f"http://127.0.0.1:{port}/v1"
+    attempt("remote_unreachable")
+    os.environ["MAS_IMAGE_API_BASE"] = ""
+    attempt("remote_not_configured")
+    os.environ["MAS_IMAGE_API_BASE"] = good
+
+
+def _image_skill_launder() -> None:
+    import chat_run
+
+    class Sessions:
+        def local_bodies(self, session_id):
+            return ["本机正文不能洗白成可见提示词"]
+
+    class App:
+        sessions = Sessions()
+
+    class FakeRun:
+        run_id = "r_test"
+
+    run = FakeRun()
+    refused = chat_run._execute_stage_prompt(App(), "s", run, {"visible_prompt": "请画：本机正文不能洗白成可见提示词", "source": "model"})
+    if refused.get("ok") or refused["error"]["code"] != "local_content":
+        fail(f"stage_prompt 让本地正文换成了可见句柄：{refused}")
+    ok = chat_run._execute_stage_prompt(App(), "s", run, {"visible_prompt": "一只橘猫", "source": "chat"})
+    again = chat_run._execute_stage_prompt(App(), "s", run, {"visible_prompt": "一只橘猫", "source": "chat"})
+    if not ok.get("ok") or ok["content_handle"] != again["content_handle"] or not ok["content_handle"].startswith("c_"):
+        fail(f"stage_prompt 没有返回稳定句柄：{ok} {again}")
+    bad = chat_run._execute_stage_prompt(App(), "s", run, {"visible_prompt": "x", "source": "local"})
+    if bad.get("ok"):
+        fail("stage_prompt 接受了非法来源")
 
 
 def _local_plan_case(base: str, provider, box: ComfyState) -> None:
