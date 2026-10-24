@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -273,6 +274,26 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "prompt": "不该用的文件描述",
             })
             return
+        if mode == "multi":
+            messages = self.server.requests[-1]["body"].get("messages") or [{}]
+            system = _user_text(messages[0].get("content")) if messages[0].get("role") == "system" else ""
+            if "你是编排者" in system:
+                if self._tool_result_count("delegate"):
+                    self._piece(_delta(content="多智能体完成"))
+                    self._done()
+                    return
+                self._emit_tool("delegate", {"tasks": [{"agent": "planner", "task": "规划两张图", "inputs": []}]})
+                return
+            if "你是规划 Agent" in system:
+                if self._tool_result_count("plan_images"):
+                    self._piece(_delta(content="计划好了：两张"))
+                    self._done()
+                    return
+                self._emit_tool("plan_images", {"count": 2, "items": ["甲", "乙"]})
+                return
+            self._piece(_delta(content="不该被调用"))
+            self._done()
+            return
         if mode == "demo":
             user = self._last_user()
             if "工具结果" in user or "studio-demo" in user:
@@ -483,6 +504,7 @@ def self_check() -> None:
         _runtime_cases()
         _skill_cases()
         _toolpack_cases()
+        _agent_cases()
         _tool_pack_guide_cases()
         _live()
     finally:
@@ -491,6 +513,149 @@ def self_check() -> None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+def _agent_cases() -> None:
+    """ADR 0005：清单校验、内置发现、安装导出、委托层数/成环/预算、越权、并行与后端串行、取消。"""
+    import io
+    import zipfile
+    from services.runtime import agents
+
+    known = agents.registered_tools()
+    names = sorted(agent.name for agent in agents.discover())
+    if names[:4] != ["image", "orchestrator", "planner", "reviewer"] and not {"image", "orchestrator", "planner", "reviewer"} <= set(names):
+        fail(f"内置 Agent 没有全部发现：{names}")
+    good = {"schema": "mas.agent/1", "name": "critic", "version": "0.1.0", "description": "只读检查",
+            "role": "reviewer", "instructions": "只读检查。", "tools": ["list_local_content"], "budget": {"steps": 4}}
+    if agents.validate_manifest(good, known_tools=known):
+        fail(f"合法清单被拒：{agents.validate_manifest(good, known_tools=known)}")
+    bad_cases = {
+        "装上编排者": dict(good, role="orchestrator"),
+        "装上委托": dict(good, tools=["delegate"]),
+        "子 Agent 弹本地内容": dict(good, tools=["accept_local_content"]),
+        "未注册的工具": dict(good, tools=["rm_rf"]),
+        "子 Agent 的树预算": dict(good, budget={"tree_steps": 10}),
+        "预算越界": dict(good, budget={"steps": 999}),
+        "多余字段": dict(good, permissions=["net"]),
+        "坏名字": dict(good, name="Bad Name"),
+    }
+    for label, data in bad_cases.items():
+        if not agents.validate_manifest(data, known_tools=known):
+            fail(f"清单校验没拦住：{label}")
+    # docs/agents.md 里的示例清单要能通过校验。
+    guide = open(os.path.join(ROOT, "docs", "agents.md"), encoding="utf-8").read()
+    blocks = re.findall(r"```json agent\n(.*?)```", guide, re.S)
+    if not blocks:
+        fail("docs/agents.md 没有可校验的示例清单")
+    for block in blocks:
+        problems = agents.validate_manifest(json.loads(block), known_tools=known)
+        if problems:
+            fail(f"docs/agents.md 的示例清单不合法：{problems}")
+    # 安装、导出、卸载往返。
+    saved = os.environ.get("MAS_AGENTS_DIR")
+    os.environ["MAS_AGENTS_DIR"] = tempfile.mkdtemp(prefix="agents-")
+    try:
+        folder = tempfile.mkdtemp(prefix="agent-src-")
+        with open(os.path.join(folder, "agent.json"), "w", encoding="utf-8") as handle:
+            json.dump(good, handle, ensure_ascii=False)
+        view = agents.inspect(folder)
+        if view.get("name") != "critic":
+            fail(f"检查 Agent 包不对：{view}")
+        agents.install(folder)
+        if not agents.find("critic"):
+            fail("安装后找不到 Agent")
+        blob = agents.export("critic")
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            if not any(item.endswith("agent.json") for item in archive.namelist()):
+                fail("导出的包里没有 agent.json")
+        agents.install(folder)  # 同名再装就是升级，不报错
+        try:
+            agents.uninstall("planner")
+            fail("内置 Agent 能被卸载")
+        except agents.AgentError:
+            pass
+        agents.uninstall("critic")
+        if agents.find("critic"):
+            fail("卸载后 Agent 还在")
+    finally:
+        if saved is None:
+            os.environ.pop("MAS_AGENTS_DIR", None)
+        else:
+            os.environ["MAS_AGENTS_DIR"] = saved
+    # 工具可见性：子 Agent 永远没有 accept_local_content；到最深一层没有 delegate。
+    planner = agents.find("planner")
+    lead = agents.find("orchestrator")
+    if "accept_local_content" in agents.allowed_tools(planner, depth=1):
+        fail("子 Agent 拿到了 accept_local_content")
+    if "delegate" not in agents.allowed_tools(lead, depth=0) or "delegate" in agents.allowed_tools(lead, depth=agents.MAX_DEPTH):
+        fail("delegate 的层数限制不对")
+    if agents.not_allowed("generate_image", "planner")["error"]["code"] != "tool_not_allowed":
+        fail("越权工具的错误码不对")
+    # 委托：成环、层数、未知 Agent、只放句柄、预算池。
+    calls = []
+
+    def spawn(agent, text, **kw):
+        calls.append((agent.name, kw["depth"], kw["parent_run_id"]))
+        return {"status": "completed", "text": "好了" * 1000, "steps": 1, "artifacts": ["a_1"]}
+
+    pool = agents.Pool(tree_steps=10, delegations=2)
+    top = agents.Delegator(spawn=spawn, parent_run_id="r_top", pool=pool)
+    out = top({"tasks": [{"agent": "planner", "task": "规划"}]})
+    if not out["ok"] or calls[-1] != ("planner", 1, "r_top") or len(out["results"][0]["summary"]) > agents.SUMMARY_CHARS + 1:
+        fail(f"委托结果不对：{out}")
+    if top({"tasks": [{"agent": "orchestrator", "task": "x"}]})["error"]["code"] != "unknown_agent":
+        fail("能委托给编排者")
+    if top({"tasks": [{"agent": "nobody", "task": "x"}]})["error"]["code"] != "unknown_agent":
+        fail("未知 Agent 没报错")
+    if top({"tasks": [{"agent": "image", "task": "x", "inputs": ["一段 画面 描述"]}]})["error"]["code"] != "invalid_tool_call":
+        fail("inputs 里塞了正文也放行了")
+    if top({"tasks": [{"agent": "planner", "task": "x"}] * 5})["error"]["code"] != "invalid_tool_call":
+        fail("一次委托超过任务上限也放行了")
+    cyc = agents.Delegator(spawn=spawn, parent_run_id="r_c", pool=pool, chain=("orchestrator", "planner"), depth=1)
+    if cyc({"tasks": [{"agent": "planner", "task": "x"}]})["error"]["code"] != "delegation_cycle":
+        fail("委托成环没拦住")
+    deep = agents.Delegator(spawn=spawn, parent_run_id="r_d", pool=pool, depth=agents.MAX_DEPTH)
+    if deep({"tasks": [{"agent": "planner", "task": "x"}]})["error"]["code"] != "delegation_depth":
+        fail("委托层数没拦住")
+    top({"tasks": [{"agent": "reviewer", "task": "x"}]})
+    spent = top({"tasks": [{"agent": "reviewer", "task": "x"}]})
+    if spent["results"][0].get("error", {}).get("code") != "budget_exceeded":
+        fail(f"委托次数预算没生效：{spent}")
+    # 并行有上限，同一后端串行。
+    live = {"now": 0, "max": 0, "backend_now": 0, "backend_max": 0}
+    lock = threading.Lock()
+
+    def slow_spawn(agent, text, **kw):
+        with lock:
+            live["now"] += 1
+            live["max"] = max(live["max"], live["now"])
+
+        def work():
+            with lock:
+                live["backend_now"] += 1
+                live["backend_max"] = max(live["backend_max"], live["backend_now"])
+            time.sleep(0.05)
+            with lock:
+                live["backend_now"] -= 1
+
+        agents.serialized("generate_image", work)
+        time.sleep(0.05)
+        with lock:
+            live["now"] -= 1
+        return {"status": "completed", "text": "", "steps": 1}
+
+    par = agents.Delegator(spawn=slow_spawn, parent_run_id="r_p", pool=agents.Pool(40, 10))
+    out = par({"tasks": [{"agent": "image", "task": str(i)} for i in range(4)], "parallel": True})
+    if not out["ok"] or live["max"] > agents.MAX_PARALLEL or live["max"] < 2 or live["backend_max"] != 1:
+        fail(f"并行或后端串行不对：{live}")
+    # 取消向下传：已取消时不再起子 Agent。
+    cancel = threading.Event()
+    cancel.set()
+    stopped = agents.Delegator(spawn=spawn, parent_run_id="r_x", pool=agents.Pool(10, 10), cancel=cancel)
+    before = len(calls)
+    out = stopped({"tasks": [{"agent": "planner", "task": "x"}]})
+    if len(calls) != before or out["results"][0]["status"] != "cancelled":
+        fail("取消后还起了子 Agent")
 
 
 def _mcp_projection() -> None:
@@ -1374,6 +1539,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("普通回合的系统指令带上了技能正文")
 
     _skill_turn(base, provider)
+    _multi_agent_turn(base, provider)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
@@ -1436,6 +1602,54 @@ def _skill_cases() -> None:
         fail("没有 Node.js 时没有说明做不了等距图")
     if "generate_image" in missing_blob:
         fail("没有 Node.js 时落到了出图")
+
+
+def _multi_agent_turn(base: str, provider) -> None:
+    """ADR 0005：勾了多智能体才走编排者；子 Agent 只拿句柄，本地正文不出本机；单 Agent 默认不变。"""
+    secret = "多智能体隔离正文戊己庚辛"
+    session_id = _fresh_session(base)
+    provider.mode = "keep"
+    _speak(base, session_id, secret)
+    provider.mode = "multi"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我规划两张图", timeout=30, mode="multi")
+    if _assistant_text(events) != "多智能体完成":
+        fail(f"多智能体回合没有收尾：{_assistant_text(events)}")
+    new_requests = provider.requests[sent:]
+    blob = json.dumps([item["body"] for item in new_requests], ensure_ascii=False)
+    if secret in blob:
+        fail("多智能体把本地正文发给了模型")
+    systems = [_user_text((item["body"].get("messages") or [{}])[0].get("content")) for item in new_requests]
+    if not any("你是规划 Agent" in text for text in systems):
+        fail("编排者没有把任务委托给 planner")
+    for item in new_requests:
+        names = [tool.get("function", {}).get("name") for tool in item["body"].get("tools") or []]
+        system = _user_text((item["body"].get("messages") or [{}])[0].get("content"))
+        if "你是规划 Agent" in system and ("delegate" in names or "accept_local_content" in names
+                                          or "generate_image" in names):
+            fail(f"planner 拿到了不该有的工具：{names}")
+        if "你是编排者" in system and "delegate" not in names:
+            fail("编排者没有 delegate 工具")
+    nodes = [event for event in events if event.get("type") == "agent"]
+    if not nodes or nodes[0].get("agent") != "planner" or nodes[-1].get("status") != "completed":
+        fail(f"界面没有收到子 Agent 节点：{nodes}")
+    if not all(node.get("parent_run_id") for node in nodes):
+        fail("子 Agent 节点缺 parent_run_id")
+    tagged = [e for e in events if e.get("type") == "tool_call" and e.get("tool") == "plan_images"]
+    if not tagged or tagged[-1].get("agent") != "planner" or not tagged[-1].get("agent_run_id"):
+        fail("子 Agent 的工具调用没有标上是哪个 Agent")
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    if not any(e.get("type") == "agent" for e in stored["messages"][-1].get("events") or []):
+        fail("刷新后子 Agent 树不在")
+    provider.mode = "ok"
+    sent = len(provider.requests)
+    _speak(base, session_id, "普通一句")
+    plain = provider.requests[sent:]
+    if len(plain) != 1:
+        fail("单 Agent 默认回合的请求次数变了")
+    names = [tool.get("function", {}).get("name") for tool in plain[0]["body"].get("tools") or []]
+    if "delegate" in names or "你是编排者" in json.dumps(plain[0]["body"], ensure_ascii=False):
+        fail("没勾多智能体时也走了编排者")
 
 
 def _skill_turn(base: str, provider) -> None:
@@ -1501,7 +1715,8 @@ def _post_confirm(base: str, run_id: str, allowed: bool = True) -> None:
         fail(f"提交工具确认失败：{status} {body}")
 
 
-def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: str | None = None, attachments=None):
+def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: str | None = None, attachments=None,
+           mode=None):
     def on_event(event):
         if event.get("type") == "tool.confirm":
             _post_confirm(base, event.get("run_id") or "", True)
@@ -1511,6 +1726,8 @@ def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: s
     payload = {"text": text}
     if attachments:
         payload["attachments"] = attachments
+    if mode:
+        payload["mode"] = mode
     status, raw, events = read_sse(
         site_port(base),
         f"/api/sessions/{session_id}/messages",

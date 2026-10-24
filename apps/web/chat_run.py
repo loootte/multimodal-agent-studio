@@ -44,6 +44,7 @@ from services.runtime.tools import tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
+from services.runtime import agents
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -117,6 +118,10 @@ _WEB_TOOLS = (
     "plan_images",
     "build_skill_page",
 )
+EVENT_AGENT = "agent"
+_AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps")
+
+
 _SKILL_MARKERS = ("等距", "等轴测", "isometric")
 
 
@@ -284,7 +289,7 @@ class RunHub:
             return self._runs.get(run_id)
 
 
-def start(app, session_id: str, text, attachments) -> Run:
+def start(app, session_id: str, text, attachments, mode=None) -> Run:
     if not isinstance(text, str):
         raise RequestError(400, "invalid_json", "文字需要是字符串。")
     text = text.strip()
@@ -295,6 +300,8 @@ def start(app, session_id: str, text, attachments) -> Run:
         raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
     message_id = new_id("m_")
     run = Run(session_id, message_id)
+    # 多智能体只在这一轮勾了开关时打开；默认仍是单 Agent（ADR 0005）。
+    run.agent_mode = "multi" if mode == "multi" else "single"
     try:
         assistant = app.sessions.append_turn(session_id, text, run.run_id, records)
     except StoreError as exc:
@@ -546,7 +553,7 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     try:
         session = app.sessions.get(session_id)
         user_id, user_text, attachments = _latest_user(session)
-        image_request = _image_request(user_text, attachments)
+        image_request = _image_request(user_text, attachments) and getattr(run, "agent_mode", "single") != "multi"
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
             session = app.sessions.get(session_id)
@@ -596,6 +603,10 @@ def _generate_text_turn(
     app, session_id, message_id, run, provider, session, user_text, extra=None, take_tools=_TAKE_TOOLS,
 ) -> str:
     request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra))
+    multi = getattr(run, "agent_mode", "single") == "multi"
+    delegator = None
+    if multi:
+        request, delegator = _orchestrate(app, session_id, message_id, run, provider, request)
     spoken: list[str] = []
     seen = 0
     claimed: dict = {}
@@ -614,6 +625,8 @@ def _generate_text_turn(
     image_turn = _wants_images("", user_text) or _image_request(user_text)
 
     def resume(text):
+        if multi:
+            return None
         # 出图请求第一步就只回文字（追问提示词、追问变体）时，纠正一次，让它按 plan_images → accept_local_content 走。
         if (
             image_turn and not pushes["nudged"] and pushes["tools"] == 0
@@ -646,6 +659,8 @@ def _generate_text_turn(
         return ok
 
     def mutating(name, arguments=None):
+        if name == agents.DELEGATE:
+            return False
         # 收本机内容走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
         if name == "accept_local_content":
             return False
@@ -654,8 +669,21 @@ def _generate_text_turn(
             return False
         return tool_mutates(name, arguments)
 
+    def validate(name, arguments):
+        if multi:
+            if name not in delegator.allowed:
+                return agents.not_allowed(name, agents.ORCHESTRATOR)
+            if name == agents.DELEGATE:
+                return None if isinstance(arguments, dict) else agents.not_allowed(name, agents.ORCHESTRATOR)
+        return validate_arguments(name, arguments)
+
     def execute(name, arguments):
         pushes["tools"] += 1
+        if multi:
+            if name not in delegator.allowed:
+                return agents.not_allowed(name, agents.ORCHESTRATOR)
+            if name == agents.DELEGATE:
+                return delegator(arguments)
         if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
             pushes["handle"] = str(arguments.get("content_handle"))
         if name in _WEB_TOOLS and name not in take_tools:
@@ -667,6 +695,8 @@ def _generate_text_turn(
         items = traces_for(run.run_id)
         for entry in items[seen:]:
             seen += 1
+            if entry.get("type") == "agent":
+                continue
             event = _emit_runtime(app, session_id, message_id, run, entry, persist=True)
             if event.get("kind") == "tool" and event.get("name"):
                 _push_saved(app, session_id, message_id, run, {
@@ -693,7 +723,8 @@ def _generate_text_turn(
             confirm=confirm,
             execute=execute,
             mutating=mutating,
-            budget=Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
+            validate=validate,
+            budget=delegator.budget if multi else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
             local_bodies=app.sessions.local_bodies(session_id),
@@ -1771,3 +1802,146 @@ def _log(session_id: str, model: str, status: str, elapsed: float) -> None:
     print(f"chat {session_id} {model} {status} {elapsed:.1f}s", file=sys.stderr)
 
 
+
+
+# ---------- 多智能体（ADR 0005） ----------
+
+class _Orchestration:
+    """编排者这一轮的状态：允许的工具、委托器、预算池。"""
+
+    def __init__(self, allowed, budget, call):
+        self.allowed = allowed
+        self.budget = budget
+        self._call = call
+
+    def __call__(self, arguments):
+        return self._call(arguments)
+
+
+def _orchestrate(app, session_id, message_id, run, provider, request):
+    """把这一轮交给内置编排者：换系统指令和工具，挂上 delegate。"""
+    roster = agents.discover()
+    lead = next(agent for agent in roster if agent.name == agents.ORCHESTRATOR)
+    choices = [agent.name for agent in roster if agent.role != "orchestrator"]
+    source = image_run.image_tools()
+    tools = agents.contracts_for(lead, source, depth=0, choices=choices)
+    allowed = {agents._contract_name(item) for item in tools}
+    request = dict(request)
+    request["model"] = lead.model(provider["model"])
+    request["system"] = (
+        lead.manifest["instructions"]
+        + " 可委托的子 Agent："
+        + "；".join(f"{a.name}（{a.role}）：{a.manifest['description']}" for a in roster if a.role != "orchestrator")
+        + catalog_suffix()
+    )
+    request["tools"] = tools
+    pool = agents.Pool(lead.budget_value("tree_steps", 48), lead.budget_value("delegations", 6))
+    if not hasattr(run, "_agent_confirm_lock"):
+        run._agent_confirm_lock = threading.Lock()
+        run._agent_allowed = set()
+    run._agent_pool = pool
+
+    def on_node(node):
+        _push_agent(app, session_id, message_id, run, node)
+
+    def make_delegator(parent_run_id, depth, chain):
+        return agents.Delegator(
+            spawn=lambda agent, text, **kw: _spawn_child(
+                app, session_id, message_id, run, provider, source, choices, make_delegator, agent, text, **kw
+            ),
+            parent_run_id=parent_run_id, pool=pool, cancel=run.cancel, chain=chain, depth=depth,
+            on_event=on_node, agents_source=lambda: roster,
+        )
+
+    top = make_delegator(run.run_id, 0, (agents.ORCHESTRATOR,))
+    budget = Budget(
+        steps=int(lead.budget_value("steps", 16)),
+        time_sec=max(float(lead.budget_value("time_sec", 600)), float(app.timeout_sec)),
+        tokens=int(lead.budget_value("tokens", 120000)),
+    )
+    return request, _Orchestration(allowed, budget, top)
+
+
+def _push_agent(app, session_id, message_id, run, node):
+    event = {"type": EVENT_AGENT, "message_id": message_id}
+    for key in _AGENT_PUBLIC:
+        if node.get(key) is not None:
+            event[key] = node[key]
+    _push_saved(app, session_id, message_id, run, event)
+
+
+def _spawn_child(app, session_id, message_id, run, provider, source, choices, make_delegator, agent, text, *,
+                 run_id, parent_run_id, depth, budget, chain):
+    produced: list[str] = []
+    tag = {"agent": agent.name, "agent_run_id": run_id, "parent_run_id": parent_run_id}
+
+    def tool_event(name, arguments, status, result=None):
+        event = {"type": EVENT_TOOL_CALL, "tool": name, "arguments": _public_args(arguments or {}),
+                 "status": status, "message_id": message_id, "run_id": run.run_id}
+        event.update(tag)
+        if result is not None and name != "generate_image":
+            event["result"] = result
+        _push_saved(app, session_id, message_id, run, event)
+
+    def execute(name, arguments):
+        tool_event(name, arguments, "running")
+        if name in _WEB_TOOLS:
+            result = _execute_web_tool(app, session_id, message_id, run, name, arguments)
+        else:
+            result = execute_tool(name, arguments)
+        ok = isinstance(result, dict) and bool(result.get("ok"))
+        if ok and name == "generate_image" and result.get("artifact_id"):
+            produced.append(str(result["artifact_id"]))
+        tool_event(name, arguments, "success" if ok else "failed")
+        return result
+
+    def mutating(name, arguments=None):
+        if (agent.name, name) in run._agent_allowed:
+            return False
+        return tool_mutates(name, arguments)
+
+    def on_event(event):
+        # 子 Agent 要确认时冒泡到界面：并行的子 Agent 排队，一次只弹一张确认卡，卡上标出是哪个 Agent。
+        if event.get("type") == EVENT_TOOL_CONFIRM:
+            run._agent_confirm_lock.acquire()
+            run.begin_confirm_wait()
+            name = event.get("name") or ""
+            args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+            confirm_event = {"type": EVENT_TOOL_CONFIRM, "name": name, "tool": name, "arguments": _public_args(args),
+                             "message_id": message_id, "run_id": run.run_id}
+            confirm_event.update(tag)
+            _push_saved(app, session_id, message_id, run, confirm_event)
+            tool_event(name, args, "waiting_confirm")
+
+    def confirm(name, arguments):
+        try:
+            ok = run.wait_confirm()
+        finally:
+            try:
+                run._agent_confirm_lock.release()
+            except RuntimeError:
+                pass
+        if ok:
+            run._agent_allowed.add((agent.name, name))
+        return ok
+
+    session = app.sessions.get(session_id)
+    out = agents.run_child(
+        agent, text,
+        model=agent.model(provider["model"]), api_key=provider["api_key"], base_url=provider["base_url"],
+        cancel=run.cancel, budget=budget, run_id=run_id, depth=depth, tool_source=source,
+        execute=execute, mutating=mutating, confirm=confirm,
+        delegator_factory=lambda rid, d: make_delegator(rid, d, chain),
+        on_event=on_event, artifacts=_session_artifacts(app, session_id, session),
+        local_bodies=app.sessions.local_bodies(session_id), timeout_sec=app.timeout_sec,
+        system_suffix=agents_skill_suffix(agent), choices=choices,
+    )
+    out["artifacts"] = produced
+    return out
+
+
+def agents_skill_suffix(agent) -> str:
+    """技能只给名字和短描述；清单 skills 为空就不给。"""
+    if not agent.manifest.get("skills") or "read_skill" not in agent.tools():
+        return ""
+    return catalog_suffix()

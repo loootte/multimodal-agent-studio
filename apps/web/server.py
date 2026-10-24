@@ -217,7 +217,7 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         if matched and method == "POST":
             session = _owned_session(app, matched.group(1))
             body = _read_json(handler)
-            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"))
+            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"), body.get("mode"))
             _send_sse(handler, run, 0)
             return
         matched = _SESSION_STOP.fullmatch(path)
