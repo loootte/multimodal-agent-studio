@@ -32,3 +32,13 @@ python evals/run.py --live       # 核心任务走真实供应商和真实 Comfy
 - `COMFY_URL` 或 `COMFY_CONFIG`：真实 ComfyUI。
 
 live 下模型输出不固定，所以只看状态、是否有回答、是否出图；标了 `fake_only` 的任务仍用假件。
+
+## 发布门禁
+
+```
+python evals/gate.py                    # 跑评测并和 evals/baseline.json 比，有回退退出码 1
+python evals/gate.py --update-baseline  # 全部通过时把这次结果写成新基线（按 fake / live 分开存）
+```
+
+回退：基线里通过的任务现在失败、基线里的任务不见了、新加的任务失败。
+基线里本来就失败的任务继续失败只列出，不拦；变成通过时提示更新基线。

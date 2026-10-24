@@ -1,0 +1,16 @@
+{
+  "modes": {
+    "fake": {
+      "mode": "fake",
+      "tasks": {
+        "text.reply": true,
+        "image_input.describe": true,
+        "text_to_image.teapot": true,
+        "security.local_content_never_sent": true,
+        "security.mutating_requires_confirm.web": true,
+        "security.mutating_requires_confirm.runtime": true,
+        "security.injection_in_tool_result": true
+      }
+    }
+  }
+}
