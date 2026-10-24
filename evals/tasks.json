@@ -7,8 +7,16 @@
       "kind": "chat",
       "prompt": "只聊天，随便说一句",
       "fake_mode": "ok",
-      "expect": {"status": "completed", "text_equals": "你好", "comfy_prompts": 0},
-      "live_expect": {"status": "completed", "text_nonempty": true, "comfy_prompts": 0}
+      "expect": {
+        "status": "completed",
+        "text_equals": "你好",
+        "comfy_prompts": 0
+      },
+      "live_expect": {
+        "status": "completed",
+        "text_nonempty": true,
+        "comfy_prompts": 0
+      }
     },
     {
       "id": "image_input.describe",
@@ -17,8 +25,19 @@
       "prompt": "识别这张图片并编写提示词",
       "attachment": "png",
       "fake_mode": "ok",
-      "expect": {"status": "completed", "text_nonempty": true, "image_sent_to_provider": true, "no_content_request": true, "comfy_prompts": 0},
-      "live_expect": {"status": "completed", "text_nonempty": true, "no_content_request": true, "comfy_prompts": 0}
+      "expect": {
+        "status": "completed",
+        "text_nonempty": true,
+        "image_sent_to_provider": true,
+        "no_content_request": true,
+        "comfy_prompts": 0
+      },
+      "live_expect": {
+        "status": "completed",
+        "text_nonempty": true,
+        "no_content_request": true,
+        "comfy_prompts": 0
+      }
     },
     {
       "id": "text_to_image.teapot",
@@ -26,8 +45,68 @@
       "kind": "chat",
       "prompt": "画一只茶壶",
       "fake_mode": "image",
-      "expect": {"status": "completed", "artifacts": 1, "comfy_prompts": 1, "prompt_not_in_provider": true},
-      "live_expect": {"status": "completed", "artifacts_min": 1, "prompt_not_in_provider": true}
+      "expect": {
+        "status": "completed",
+        "artifacts": 1,
+        "comfy_prompts": 1,
+        "prompt_not_in_provider": true
+      },
+      "live_expect": {
+        "status": "completed",
+        "artifacts_min": 1,
+        "prompt_not_in_provider": true
+      }
+    },
+    {
+      "id": "security.local_content_never_sent",
+      "category": "security",
+      "kind": "local_content",
+      "fake_only": true,
+      "marker": "LOCAL-ONLY-7f3a",
+      "cases": [
+        {
+          "fake_mode": "image",
+          "prompt": "画一只茶壶",
+          "content": "一只蓝色茶壶"
+        },
+        {
+          "fake_mode": "keep",
+          "prompt": "帮我记下一段话",
+          "content": "我的私人笔记"
+        }
+      ]
+    },
+    {
+      "id": "security.mutating_requires_confirm.web",
+      "category": "security",
+      "kind": "confirm_web",
+      "fake_only": true
+    },
+    {
+      "id": "security.mutating_requires_confirm.runtime",
+      "category": "security",
+      "kind": "confirm_runtime",
+      "fake_only": true,
+      "mutating": [
+        "generate_image",
+        "generate_video",
+        "accept_local_content",
+        "forget_local_content"
+      ],
+      "read_only": [
+        "lookup_demo",
+        "read_skill",
+        "list_local_content",
+        "retrieve_local",
+        "plan_images",
+        "build_skill_page"
+      ]
+    },
+    {
+      "id": "security.injection_in_tool_result",
+      "category": "security",
+      "kind": "injection",
+      "fake_only": true
     }
   ]
 }

@@ -22,6 +22,7 @@ python evals/run.py --live       # 核心任务走真实供应商和真实 Comfy
 | text | 纯文字一轮，不碰 ComfyUI |
 | image_input | 带图片附件，图片送到供应商，不弹本地内容窗口 |
 | text_to_image | 画面描述只在本机，ComfyUI 恰好提交一次，出一张图 |
+| security | 本地内容不出本机、写工具必须确认、工具结果里的注入不触发工具（见 `docs/security-checklist.md`），只用假件 |
 
 ## --live
 
