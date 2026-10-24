@@ -116,15 +116,49 @@ def comfy_fields() -> list[dict]:
     return fields
 
 
+def _packs():
+    tools_dir = os.path.join(ROOT, "poc")
+    if tools_dir not in sys.path:
+        sys.path.append(tools_dir)
+    _ensure_poc()
+    from tools import packs
+
+    return packs
+
+
+def backend_declarations() -> dict:
+    """共享后端（toolpacks/backends/*.json）。ComfyUI 的字段沿用 #28 的声明。"""
+    out = {}
+    for name, data in _packs().backends().items():
+        fields = comfy_fields() if data.get("config") == "builtin:comfyui" else list(data.get("config") or [])
+        out[name] = {"kind": "backend", "title": data.get("title") or name, "description": data.get("description") or "",
+                     "fields": fields, "testable": bool(data.get("testable"))}
+    return out
+
+
+def tool_declarations() -> dict:
+    """每个工具（按清单）。工具自己的配置字段来自清单 config。"""
+    packs = _packs()
+    out = {}
+    for pack in packs.discover():
+        fields = []
+        for field in pack.manifest.get("config") or []:
+            item = {"name": field["name"], "type": field["type"], "default": field["default"],
+                    "required": bool(field["required"]), "secret": bool(field["secret"]),
+                    "description": field.get("description") or "", "must_exist": field.get("must_exist", False)}
+            for key in ("choices", "min", "max", "env"):
+                if key in field:
+                    item[key] = field[key]
+            fields.append(item)
+        out[pack.name] = {"kind": "tool", "title": pack.name, "description": pack.manifest["description"],
+                          "fields": fields, "testable": False, "pack": packs.summary(pack)}
+    return out
+
+
 def declarations() -> dict:
-    return {
-        "comfyui": {
-            "title": "ComfyUI",
-            "description": "本机出图（文生图、图生图、视频）用的 ComfyUI。",
-            "fields": comfy_fields(),
-            "testable": True,
-        },
-    }
+    out = backend_declarations()
+    out.update(tool_declarations())
+    return out
 
 
 def _hint(value: str) -> str:
@@ -197,15 +231,42 @@ class ToolConfigStore:
             values[key] = entry
         return {"name": name, "title": decl["title"], "description": decl["description"],
                 "fields": decl["fields"], "values": values, "complete": not missing, "missing": missing,
-                "testable": decl.get("testable", False)}
+                "testable": decl.get("testable", False), "kind": decl.get("kind", "backend"),
+                **({"pack": self._pack_view(decl["pack"])} if decl.get("pack") else {})}
+
+    def _pack_view(self, pack: dict) -> dict:
+        view = dict(pack)
+        status = []
+        backends = backend_declarations()
+        for name in pack.get("backends") or []:
+            if name in backends:
+                missing = self.public(name)["missing"]
+                status.append({"name": name, "title": backends[name]["title"], "complete": not missing, "missing": missing})
+            else:
+                status.append({"name": name, "title": name, "complete": False, "missing": ["(没有这个后端)"]})
+        view["backend_status"] = status
+        return view
 
     def listing(self) -> dict:
-        tools = []
-        for name, decl in declarations().items():
+        """下拉框：工具按实际工具名列出；后端单独一组。"""
+        backends = []
+        for name, decl in backend_declarations().items():
             view = self.public(name)
-            tools.append({"name": name, "title": decl["title"], "description": decl["description"],
-                          "complete": view["complete"], "missing": view["missing"]})
-        return {"tools": tools}
+            backends.append({"name": name, "title": decl["title"], "description": decl["description"],
+                             "complete": view["complete"], "missing": view["missing"]})
+        complete = {item["name"]: item["complete"] for item in backends}
+        tools = []
+        for name, decl in tool_declarations().items():
+            view = self.public(name)
+            pack = decl["pack"]
+            ready = view["complete"] and all(complete.get(b, False) for b in pack["backends"]) \
+                and not pack["missing"] and not pack["denied"]
+            tools.append({"name": name, "title": name, "description": decl["description"],
+                          "version": pack["version"], "builtin": pack["builtin"], "exposed": pack["exposed"],
+                          "permissions": pack["permissions"], "backends": pack["backends"],
+                          "configurable": pack["configurable"], "complete": view["complete"],
+                          "missing": view["missing"], "ready": ready})
+        return {"tools": tools, "backends": backends}
 
     # ---- 写入 ----
     def update(self, name: str, values: dict, reset: bool = False, clear: list | None = None) -> dict:
@@ -367,6 +428,7 @@ def install(store: ToolConfigStore) -> None:
     comfy_poc.CONFIG_OVERLAY = comfy_overlay
     import comfy_client
 
+    _packs().CONFIG_SOURCE = lambda name: store.effective(name) if _ACTIVE is store and name in tool_declarations() else {}
     comfy_client.TOKEN_SOURCE = lambda: store.effective("comfyui").get("auth_token") if _ACTIVE is store else None
 
 
