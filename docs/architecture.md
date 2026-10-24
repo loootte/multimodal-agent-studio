@@ -37,7 +37,7 @@ Agent 运行时
 
 1. `apps/web/static/app.js` 把用户文字 `POST` 到 `/api/sessions/{session_id}/messages`。
 2. `apps/web/server.py` 交给 `apps/web/chat_run.py`。出图时，原文先由 `apps/web/store.py` 的 `put_content` 记成本会话内容。发给模型的是一句不含画面的任务。
-3. `apps/web/chat_run.py` 把对话收成统一请求，交给 `services/gateway.stream`。默认适配器是 `openai_chat.py`。带着 `poc/tools/external/` 里自注册的工具契约去请求供应商。`image_run.image_tools()` 负责转发。载荷里一旦出现已入库的正文、文件文本或文件字节的 base64，连接不会打开。工具契约本身不参与这道检查。
+3. `apps/web/chat_run.py` 把对话收成统一请求，交给 `services/gateway.stream`。默认适配器是 `openai_chat.py`。带着 `toolpacks/` 清单生成的工具契约去请求供应商。`image_run.image_tools()` 负责转发。载荷里一旦出现已入库的正文、文件文本或文件字节的 base64，连接不会打开。工具契约本身不参与这道检查。
 4. 模型调用 `accept_local_content`，`purpose` 为 `image_prompt`，`kind` 为 `text`。`chat_run.py` 发出 `content_request`。页面上的文本框收集画面描述。草稿只出现在这条本机事件里。
 5. 页面 `POST /api/runs/{run_id}/content`，正文是文字。`store.py` 的 `add_content` 用新的随机句柄留下这段文字。下一次模型请求只带句柄。
 6. `chat_run.py` 用对话框里提交的文字填 `prompt`，丢掉模型自己写的画面描述。`image_run.py` 调用 `poc/comfyui/agent_tools.py` 的 `generate_image`。关键词切片一次用户消息最多一张。
@@ -109,9 +109,7 @@ Agent 运行时
 | `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
 | `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
 | `services/runtime/skills.py` | 扫描 `skills/*/SKILL.md`。系统指令只带技能名字和短描述。模型调用 `read_skill` 之后，这一轮才带上正文 |
-| `poc/tools/internal/demo.py`、`poc/tools/external/demo.py` | 只读演示 `lookup_demo` |
-| `poc/tools/external/retrieve.py` | 检索本会话 `retrieve_local`。只收查询词，结果带来源标识 |
-| `poc/tools/external/skill.py`、`poc/tools/internal/skill.py` | `read_skill` 只收技能名，本机实现返回做法。`build_skill_page` 只收技能名和机制短名，由网页切片做成页面 |
+| `poc/tools/internal/demo.py`、`toolpacks/builtin/lookup_demo/tool.json` | 只读演示 `lookup_demo` |
 
 现在一轮回答仍放在网页进程里：
 
@@ -151,13 +149,10 @@ Agent 运行时
 | 文件 | 做什么 |
 | --- | --- |
 | `poc/comfyui/agent_tools.py` | 本机工具的导入和命令入口。名单来自 `poc/tools/internal/` 的扫描。网页目前只调用 `generate_image` |
-| `poc/tools/registry.py` | 扫描 `internal/` 和 `external/`。不写工具名单。符合规范的新文件重启后可用 |
+| `poc/tools/registry.py`、`poc/tools/packs.py` | 只从 `toolpacks/` 清单注册工具，见 [tool-packs.md](tool-packs.md)。安装的包重启后可用 |
 | `poc/tools/internal/image.py` | 本机 `generate_image`。参数含画面描述。会改外部状态 |
 | `poc/tools/internal/video.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图。会改外部状态 |
 | `poc/tools/internal/demo.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
-| `poc/tools/external/local_content.py` | 外部的接受、列出、删除。只声明参数。接受和删除会改外部状态 |
-| `poc/tools/external/image.py` | 外部 `generate_image`。只收内容句柄。会改外部状态 |
-| `poc/tools/external/demo.py` | 外部只读演示 `lookup_demo`。只声明主题 |
 | `poc/tools/mcp.py` | 两边的进程内 MCP 投影。本机 `tools/call` 会执行，外部只校验 |
 | `poc/comfyui/template_fill.py` | 复制模板，只写字段对照里的白名单。模型拼出的工作流 JSON 不会被提交 |
 | `poc/comfyui/comfy_poc.py` | 命令行的文生图、图生图、文生视频、图生视频。它等待下载完成 |

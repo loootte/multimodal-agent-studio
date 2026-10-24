@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受。
+已接受。注册方式已由 [docs/tool-packs.md](../tool-packs.md)（issue #31）取代：工具从 `toolpacks/*/tool.json` 清单注册，`poc/tools/external/` 已删除。
 
 ## 背景
 
