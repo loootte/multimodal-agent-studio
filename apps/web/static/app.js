@@ -1185,6 +1185,7 @@ async function api(method, path, body) {
     const error = new Error(payload.message || "请求失败。");
     error.code = payload.code;
     error.errors = payload.errors || null;
+    error.payload = payload;
     throw error;
   }
   return payload;

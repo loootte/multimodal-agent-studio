@@ -185,6 +185,10 @@
 
 [#49](https://github.com/loootte/multimodal-agent-studio/issues/49)（进行中，`issue-49` 分支）：提示词来源（聊天原文 / 模型撰写 / 本地）× 后端（本机 ComfyUI / 第三方 OpenAI 兼容 API）× 张数（默认 1）。新增 `stage_prompt` 工具、`generate_image` 的 `backend` 参数和第三方配置、`skills/image-gen/SKILL.md`、[ADR 0008](docs/adr/0008-image-skill.md)、[docs/image-skill.md](docs/image-skill.md)。本地提示词始终不进对话模型；发第三方默认拒绝，可改为逐轮确认。
 
+## 11. 本地资源管理
+
+[#51](https://github.com/loootte/multimodal-agent-studio/issues/51)（进行中，`issue-51` 分支）：侧边栏「本地资源」面板，统一查看本地提示词/文字、本地文件、附件和生成文件：类型、时间、大小、引用会话、本机预览、总占用；筛选搜索、改标签、下载、删除/批量删除（引用提示、共享字节、运行中拒删、轨迹重建）、复用到当前对话（只给句柄）。接口只给本机，数据不进模型。见 [docs/local-resources.md](docs/local-resources.md)。
+
 ## 明确延后
 
 这些不进前六个阶段：

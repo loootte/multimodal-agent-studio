@@ -224,6 +224,10 @@ Agent 运行时
 | `poc/comfyui/artifacts.py check` | 工件只按会话和 `artifact_id` 读取 |
 | `poc/comfyui/chat.py check` | POC 消息上的事件顺序 |
 
+## 本地资源管理
+
+`apps/web/resources.py` 汇总 `store.py` 里的本地内容、附件和 poc 产物库里的产物，提供只限 127.0.0.1 的 `/api/resources*` 接口（`server.py` 的 `_resource_route`），前端是 `static/resources.js`。删除走 `store.forget_content` / `forget_attachment`（按校验和回收共享字节），再用 `Exporter.forget_session` 重建该会话的轨迹。正在运行的会话拒绝删除。详见 [local-resources.md](local-resources.md)。
+
 ## 边界
 
 - 模型不可用时，运行时停止并返回原因。界面不自己改用另一个模型，除非用户选了备用策略。

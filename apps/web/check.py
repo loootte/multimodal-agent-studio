@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
@@ -1905,7 +1906,8 @@ def _trajectory_case(base: str, directory: str) -> None:
 
     exporter = Exporter(directory)
     first = exporter.export()
-    if first["written"] <= 0 or first["dropped"]:
+    # 本地资源删除（#51）已经顺手导出过一次，所以这里可能 written == 0，但文件里得有轨迹。
+    if first["total"] <= 0 or first["dropped"]:
         fail(f"轨迹导出不对：{first}")
     second = exporter.export()
     if second["written"] != 0 or second["total"] != first["total"]:
@@ -3064,6 +3066,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _tool_config_case(base, provider, comfy.box, directory, port)
         _toolpack_http_case(base, directory)
         _delete_session_case(base, directory)
+        _resources_case(base, provider, directory)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -4701,6 +4704,194 @@ def _toolpack_cases() -> None:
         shutil.rmtree(source, ignore_errors=True)
     if set(item["function"]["name"] for item in openai_tools()) != BUILTIN_TOOLS - {"generate_video"}:
         fail("测试装的工具包没有清干净")
+
+
+def _resources_case(base: str, provider, directory: str) -> None:
+    """#51 本地资源面板：列表/预览/标签/下载/复用不进模型；删除后正文从磁盘和轨迹消失；
+    共享字节按引用保留；运行中拒删；需要确认；非本机拒绝；页面有入口。"""
+    import server as web_server
+    from services.meta.export import Exporter
+
+    prompt_secret = "资源面板里的本地提示词正文丙丁"
+    text_secret = "资源面板里留下的本机文字戊己"
+    # 本地提示词 + 生成图：出图回合。
+    provider.mode = "image"
+    a = _fresh_session(base)
+    events = _speak(base, a, "用本地comfyui生成一幅图片", timeout=20, content=prompt_secret)
+    art = next((e for e in events if e.get("type") == "artifact"), None)
+    if not art or not art.get("artifact_id"):
+        fail("资源用例没生成工件")
+    sessions = store.SessionStore(os.path.join(directory, "sessions"))
+    text_rec = sessions.add_content(a, text_secret, "keep")
+    b, c = _fresh_session(base), _fresh_session(base)
+    shared = b"RIFF....WAVEfmt resources-shared"
+    handles = {}
+    for sid in (b, c):
+        status, body = request("POST", base + f"/api/sessions/{sid}/attachments", {
+            "file": base64.b64encode(shared).decode("ascii"), "media_type": "audio/wav", "name": "r.wav"})
+        if status != 200:
+            fail(f"资源用例附件没收下：{status}")
+        handles[sid] = json.loads(body)["handle"]
+    Exporter(directory).export()
+    sent = len(provider.requests)
+
+    status, body = request("GET", base + "/api/resources")
+    listing = json.loads(body)
+    if status != 200 or prompt_secret in body or text_secret in body or os.path.abspath(directory) in body:
+        fail(f"资源列表不对或带出了正文/路径：{status}")
+    ids = {i["id"]: i for i in listing["items"]}
+    prompt_id = next((i for i in ids if i.startswith(f"prompt:{a}:")), None)
+    text_id = f"text:{a}:{text_rec['handle']}"
+    art_id = f"artifact:{a}:{art['artifact_id']}"
+    att_b, att_c = f"attachment:{b}:{handles[b]}", f"attachment:{c}:{handles[c]}"
+    for rid in (prompt_id, text_id, art_id, att_b, att_c):
+        if rid not in ids:
+            fail(f"资源列表少了一项：{rid}")
+    if not ids[att_b]["shared"] or len(ids[att_b]["sessions"]) != 2:
+        fail("共享字节的附件没有标出引用会话")
+    if ids[art_id]["size"] <= 0 or listing["total"]["bytes"] <= 0 or not ids[prompt_id]["created_at"]:
+        fail("资源没有大小、时间或总占用")
+    status, body = request("GET", base + "/api/resources?type=attachment&session=" + c)
+    got = sorted(i["id"] for i in json.loads(body)["items"])
+    if got != sorted([att_b, att_c]):  # 按会话筛选包括引用它字节的别的会话的条目
+        fail(f"按类型和会话筛选不对：{got}")
+    status, body = request("GET", base + "/api/resources?session=" + a)
+    if {i["type"] for i in json.loads(body)["items"]} != {"prompt", "text", "artifact"}:
+        fail("按会话筛选混进了别的会话")
+    status, body = request("GET", base + "/api/resources?type=bogus")
+    if status != 400:
+        fail("非法类型没有被拒")
+    texts = []
+    for pid in [i for i in ids if i.startswith(f"prompt:{a}:")]:
+        status, body = request("GET", base + "/api/resources/preview?id=" + urllib.parse.quote(pid))
+        texts.append(json.loads(body).get("text") if status == 200 else None)
+    if prompt_secret not in texts:
+        fail("本机预览拿不到提示词正文")
+    prompt_id = [i for i in ids if i.startswith(f"prompt:{a}:")][texts.index(prompt_secret)]
+    status, body = request("POST", base + "/api/resources/label", {"id": att_b, "label": "资源标签甲"})
+    if status != 200:
+        fail(f"改标签失败：{status}")
+    status, body = request("POST", base + "/api/resources/label", {"id": art_id, "label": "茶壶图"})
+    status, body = request("GET", base + "/api/resources?q=" + urllib.parse.quote("资源标签甲"))
+    if [i["id"] for i in json.loads(body)["items"]] != [att_b]:
+        fail("按标签搜不到")
+    status, raw = request_bytes("GET", base + "/api/resources/raw?download=1&id=" + urllib.parse.quote(att_c))
+    if status != 200 or raw != shared:
+        fail("下载附件不对")
+    status, raw = request_bytes("GET", base + "/api/resources/raw?id=" + urllib.parse.quote(art_id))
+    if status != 200 or not raw.startswith(b"\x89PNG"):
+        fail("下载生成文件不对")
+    if len(provider.requests) != sent:
+        fail("列表、预览、标签、下载触发了模型请求")
+
+    # 非本机：403。
+    class _Fake:
+        client_address = ("10.0.0.5", 1234)
+        def __init__(self):
+            self.status = None
+            self.wfile = io.BytesIO()
+        def send_response(self, code):
+            self.status = code
+        def send_header(self, *_a):
+            pass
+        def end_headers(self):
+            pass
+    fake = _Fake()
+    web_server._resource_route(fake, None, "GET", "/api/resources", {})
+    if fake.status != 403 or prompt_secret.encode() in fake.wfile.getvalue():
+        fail("非本机请求没有被拒")
+
+    # 复用：模型只见句柄。
+    d = _fresh_session(base)
+    status, body = request("POST", base + "/api/resources/reuse", {"id": prompt_id, "session_id": d})
+    reused = json.loads(body)
+    if status != 200 or prompt_secret in body or reused["handle"] not in reused["snippet"]:
+        fail(f"复用没有只返回句柄：{status}")
+    if sessions.content_text(d, reused["handle"]) != prompt_secret:
+        fail("复用后当前会话里没有这段本地正文")
+    provider.mode = "ok"
+    sent = len(provider.requests)
+    _speak(base, d, reused["snippet"])
+    blobs = [_provider_blob(item) for item in provider.requests[sent:]]
+    if not blobs or not any(reused["handle"] in x for x in blobs) or any(prompt_secret in x for x in blobs):
+        fail("复用后模型请求里没有句柄，或者出现了正文")
+    status, body = request("POST", base + "/api/resources/reuse", {"id": att_b, "session_id": d})
+    if status != 400:
+        fail("附件不该能复用成本地内容")
+
+    # 运行中拒删。
+    path = os.path.join(directory, "sessions", a + ".json")
+    with open(path, encoding="utf-8") as handle:
+        saved = json.load(handle)
+    running = json.loads(json.dumps(saved))
+    running["messages"].append({"message_id": "m_" + "1" * 32, "role": "assistant", "text": "",
+                                "status": "running", "run_id": "r_" + "1" * 32})
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(running, handle)
+    status, body = request("POST", base + "/api/resources/delete", {"ids": [text_id], "confirm": True})
+    result = json.loads(body)
+    if status != 200 or result["deleted"] or [r["id"] for r in result["refused"]] != [text_id]:
+        fail(f"运行中的会话里的资源被删了：{status} {body}")
+    if sessions.content_text(a, text_rec["handle"]) != text_secret:
+        fail("拒删时内容丢了")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(saved, handle)
+
+    # 共享字节：要确认；删一条后字节留着，另一会话仍能读；两条都删后字节消失。
+    blob_path = sessions.artifacts.path_for(hashlib.sha256(shared).hexdigest())
+    status, body = request("POST", base + "/api/resources/delete", {"ids": [att_b]})
+    if status != 409 or json.loads(body).get("code") != "needs_confirm" or not json.loads(body).get("warnings"):
+        fail(f"共享字节的删除没有要求确认：{status}")
+    status, body = request("POST", base + "/api/resources/delete", {"ids": [att_b], "confirm": True})
+    if status != 200 or json.loads(body)["deleted"] != [att_b]:
+        fail(f"确认后没删掉：{status} {body}")
+    if not os.path.exists(blob_path) or sessions.attachment_bytes(c, handles[c]) != shared:
+        fail("删一个会话的附件误删了共用字节")
+    status, body = request("POST", base + "/api/resources/delete", {"ids": [att_c], "confirm": True})
+    if status != 200 or os.path.exists(blob_path):
+        fail("最后一个引用删掉后附件字节还在")
+
+    # 批量删本地提示词、文字和生成文件：磁盘、会话、轨迹里都没了。
+    art_file = None
+    import image_run
+    art_file = image_run.artifact_store().file_for(a, art["artifact_id"])
+    status, body = request("POST", base + "/api/resources/delete",
+                           {"ids": [prompt_id, text_id, art_id], "confirm": True})
+    result = json.loads(body)
+    if status != 200 or sorted(result["deleted"]) != sorted([prompt_id, text_id, art_id]):
+        fail(f"批量删除不对：{status} {body}")
+    if art_file and os.path.exists(art_file):
+        fail("删除后生成文件还在磁盘上")
+    status, _raw = request_bytes("GET", base + art["url"])
+    if status != 404:
+        fail("删除后生成文件还能打开")
+    session_raw = open(path, encoding="utf-8").read()
+    if art["artifact_id"] in session_raw:
+        fail("删除后会话里还留着生成文件的事件")
+    for folder, _dirs, files in os.walk(directory):
+        for name in files:
+            full = os.path.join(folder, name)
+            if d in name:
+                continue  # 复用到的会话本来就留着一份
+            with open(full, "rb") as handle:
+                data = handle.read()
+            for secret in (prompt_secret, text_secret):
+                if secret.encode("utf-8") in data:
+                    fail(f"删除后正文还在磁盘上：{os.path.relpath(full, directory)}")
+    index = Exporter(directory).load_index()
+    if any(h in json.dumps(index["sessions"].get(a, {})) for h in (text_rec["handle"],)):
+        fail("轨迹索引还记着删掉的句柄")
+    status, body = request("GET", base + "/api/resources")
+    if any(rid in body for rid in (prompt_id, text_id, art_id, att_b, att_c)):
+        fail("删除后列表里还有")
+
+    status, page = request("GET", base + "/")
+    status_js, script = request("GET", base + "/static/resources.js")
+    if 'id="open-resources"' not in page or "resources.js" not in page or status_js != 200:
+        fail("页面没有本地资源入口")
+    if _unsafe_inner_html(script) or "innerHTML" in script:
+        fail("资源面板用了 innerHTML")
+    print(f"resources {len(listing['items'])} items, {listing['total']['bytes']} bytes")
 
 
 def _delete_session_case(base: str, directory: str) -> None:

@@ -15,6 +15,7 @@
       </div>
       <p id="user-line" class="hint">本机用户</p>
       <ul id="session-list"></ul>
+      <button type="button" class="ghost" id="open-resources">本地资源</button>
     </aside>
     <main>
       <header class="top">
@@ -125,7 +126,36 @@
       </details>
     </form>
   </dialog>
+  <dialog id="resources" aria-labelledby="resources-title">
+    <div id="resources-form">
+      <h2 id="resources-title">本地资源</h2>
+      <p class="hint">只在本机：列表和预览只给这个浏览器看，不会发给模型。工具和 Agent 在「工具」里管理。</p>
+      <p id="res-total" class="hint"></p>
+      <div class="res-filters">
+        <select id="res-type" aria-label="类型">
+          <option value="">全部类型</option>
+          <option value="prompt">本地提示词</option>
+          <option value="text">本地文字</option>
+          <option value="file">本地文件</option>
+          <option value="attachment">附件</option>
+          <option value="artifact">生成文件</option>
+        </select>
+        <select id="res-session" aria-label="会话"><option value="">全部会话</option></select>
+        <input id="res-q" type="search" placeholder="搜标签、文件名、句柄" aria-label="搜索">
+      </div>
+      <ul id="res-list" class="res-list"></ul>
+      <div id="res-preview" class="res-preview" hidden></div>
+      <p id="res-note" class="note" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="res-select-all" class="ghost">全选</button>
+        <button type="button" id="res-delete-selected">删除所选</button>
+        <button type="button" id="res-tools" class="ghost">管理工具和 Agent</button>
+        <button type="button" id="close-resources">关闭</button>
+      </div>
+    </div>
+  </dialog>
   <script src="/static/markdown.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/resources.js"></script>
 </body>
 </html>
