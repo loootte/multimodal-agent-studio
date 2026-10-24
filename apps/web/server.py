@@ -42,6 +42,7 @@ _RUN_CONFIRM = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/confirm$")
 _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
+    "markdown.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
@@ -176,6 +177,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         if path.startswith("/api/toolpacks"):
             _toolpack_route(handler, app, method, path)
             return
+        if path == "/api/agents" or path.startswith("/api/agents/"):
+            _agent_route(handler, method, path)
+            return
         if path.startswith("/api/tools/"):
             parts = path[len("/api/tools/"):].split("/")
             name = urllib.parse.unquote(parts[0]) if parts else ""
@@ -217,7 +221,7 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         if matched and method == "POST":
             session = _owned_session(app, matched.group(1))
             body = _read_json(handler)
-            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"))
+            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"), body.get("mode"))
             _send_sse(handler, run, 0)
             return
         matched = _SESSION_STOP.fullmatch(path)
@@ -362,6 +366,44 @@ def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str
     except packs.PackError as exc:
         status = 404 if exc.code == "not_found" else 400
         _send_json(handler, status, exc.payload())
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
+def _agent_route(handler: BaseHTTPRequestHandler, method: str, path: str) -> None:
+    """Agent（ADR 0005）：列出 / 检查 / 安装 / 卸载 / 导出，和工具包同一套路。"""
+    from services.runtime import agents
+
+    try:
+        if path == "/api/agents" and method == "GET":
+            _send_json(handler, 200, {"agents": [agents.summary(a) for a in agents.discover()]})
+            return
+        if path == "/api/agents/inspect" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, agents.inspect(str(body.get("source") or "")))
+            return
+        if path == "/api/agents/install" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, {"ok": True, "installed": agents.install(str(body.get("source") or ""))})
+            return
+        parts = path[len("/api/agents/"):].split("/")
+        name = urllib.parse.unquote(parts[0]) if parts and parts[0] else ""
+        if name and parts[1:] == ["uninstall"] and method == "POST":
+            agents.uninstall(name)
+            _send_json(handler, 200, {"ok": True, "removed": name})
+            return
+        if name and parts[1:] == ["export"] and method == "GET":
+            raw = agents.export(name)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/zip")
+            handler.send_header("Content-Disposition", f'attachment; filename="{name}.zip"')
+            handler.send_header("Content-Length", str(len(raw)))
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.end_headers()
+            handler.wfile.write(raw)
+            return
+    except agents.AgentError as exc:
+        _send_json(handler, 404 if exc.code == "not_found" else 400, exc.payload())
         return
     _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
 

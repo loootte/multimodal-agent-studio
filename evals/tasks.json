@@ -107,6 +107,24 @@
       "category": "security",
       "kind": "injection",
       "fake_only": true
+    },
+    {
+      "id": "multi_agent.delegate_plan",
+      "category": "multi_agent",
+      "kind": "multi_agent_web",
+      "fake_only": true
+    },
+    {
+      "id": "multi_agent.child_tool_not_allowed",
+      "category": "multi_agent",
+      "kind": "multi_agent_guard",
+      "fake_only": true
+    },
+    {
+      "id": "multi_agent.text_outline_write_review",
+      "category": "multi_agent",
+      "kind": "multi_agent_text",
+      "fake_only": true
     }
   ]
 }

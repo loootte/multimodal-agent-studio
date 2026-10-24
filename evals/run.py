@@ -368,6 +368,57 @@ def run_injection(h: Harness, task: dict, live: bool) -> dict:
     return {"executed": executed}
 
 
+def run_multi_agent_web(h: Harness, task: dict, live: bool) -> dict:
+    """ADR 0005：勾多智能体时编排者委托 planner，结果回到同一条消息；本地正文不出本机；默认单 Agent 不变。"""
+    try:
+        check._multi_agent_turn(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "多智能体回合检查失败") from exc
+    return {"delegated": "planner"}
+
+
+def run_multi_agent_text(h: Harness, task: dict, live: bool) -> dict:
+    """勾多智能体的文字任务：planner → writer → reviewer，编排者汇总。"""
+    try:
+        check._multi_text_turn(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "多智能体文字任务检查失败") from exc
+    return {"chain": ["planner", "writer", "reviewer"]}
+
+
+def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
+    """子 Agent 越权调用（accept_local_content、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
+    import threading
+
+    from services.runtime import Budget, agents
+
+    secret = "评测用的本地正文壬癸"
+    executed = []
+    try:
+        adapter = _script("eval-agent", [
+            [{"type": "tool.requested", "name": "accept_local_content", "arguments": {"purpose": "x", "kind": "text"}}],
+            [{"type": "tool.requested", "name": "generate_image", "arguments": {"content_handle": "c_" + "ab" * 16}}],
+            [{"type": "message.delta", "text": "计划好了"}],
+        ])
+        out = agents.run_child(
+            agents.find("planner"), "规划两张", model="eval-agent", api_key=check.SECRET, base_url=None,
+            cancel=threading.Event(), budget=Budget(steps=6), run_id="r_eval_child", depth=1,
+            tool_source=[], execute=lambda name, args: executed.append(name) or {"ok": True, "tool": name},
+            mutating=lambda name, args=None: False, confirm=lambda name, args: True,
+            local_bodies={"c_" + "ab" * 16: secret}, timeout_sec=5,
+        )
+    finally:
+        _restore_gateway()
+    expect(not executed, f"越权工具被执行了：{executed}")
+    expect(out["status"] == "completed", f"子 Agent 没有正常收尾：{out}")
+    blob = json.dumps(adapter.calls, ensure_ascii=False)
+    expect(blob.count("tool_not_allowed") >= 2, "越权调用没有返回 tool_not_allowed")
+    expect(secret not in blob, "子 Agent 请求里出现了本地正文")
+    names = [agents._contract_name(item) for item in adapter.calls[0].get("tools") or []]
+    expect("accept_local_content" not in names and "delegate" not in names, f"子 Agent 拿到了不该有的工具：{names}")
+    return {"refused": ["accept_local_content", "generate_image"]}
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -378,6 +429,9 @@ RUNNERS = {
     "confirm_web": run_confirm_web,
     "confirm_runtime": run_confirm_runtime,
     "injection": run_injection,
+    "multi_agent_web": run_multi_agent_web,
+    "multi_agent_guard": run_multi_agent_guard,
+    "multi_agent_text": run_multi_agent_text,
 }
 
 
