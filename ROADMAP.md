@@ -165,8 +165,8 @@
 按顺序：
 
 0. （前置，已完成）[#38](https://github.com/loootte/multimodal-agent-studio/issues/38) 多智能体：研究类和长文字任务必须走委托，为挖掘提供真实的多 Agent 轨迹。
-1. （进行中）[#39](https://github.com/loootte/multimodal-agent-studio/issues/39) 轨迹导出与索引：规范化的 `mas.trajectory/1`，来源为会话事件和 `telemetry.jsonl`，本地内容、密钥和路径不进轨迹。已实现于 `issue-39` 分支：ADR 0006、`services/meta/`、`GET /api/trajectories`，说明见 [docs/trajectory.md](docs/trajectory.md)。
-2. [#40](https://github.com/loootte/multimodal-agent-studio/issues/40) 技能挖掘：统计重复子流程，生成带证据（run_id、次数、成功率）的技能候选，不写 `skills/`。
+1. （已完成）[#39](https://github.com/loootte/multimodal-agent-studio/issues/39) 轨迹导出与索引：规范化的 `mas.trajectory/1`，来源为会话事件和 `telemetry.jsonl`，本地内容、密钥和路径不进轨迹。ADR 0006、`services/meta/`、`GET /api/trajectories`，说明见 [docs/trajectory.md](docs/trajectory.md)。
+2. （进行中）[#40](https://github.com/loootte/multimodal-agent-studio/issues/40) 技能挖掘：统计重复子流程，生成带证据（run_id、次数、成功率）的技能候选，不写 `skills/`。已实现于 `issue-40` 分支：ADR 0007、`services/meta/mine.py`、`POST /api/meta/mine`，说明见 [docs/mining.md](docs/mining.md)。
 3. [#41](https://github.com/loootte/multimodal-agent-studio/issues/41) 记忆巩固：合并、重写、淘汰技能的提议，附 diff 和证据；用户批准才写入，可回滚。
 4. [#42](https://github.com/loootte/multimodal-agent-studio/issues/42) 工具化评估：起草 `mas.tool/1` 清单、桩代码和测试；用户批准后才走工具包安装。
 5. [#43](https://github.com/loootte/multimodal-agent-studio/issues/43) Meta-Agent 定义、手动和定时入口、报告界面（#36 的六段输出格式）。

@@ -209,6 +209,10 @@ Agent 运行时
 
 `services/meta/`：把会话事件和 `telemetry.jsonl` 规范化成 `mas.trajectory/1`，一次运行一条，写到 `<data_dir>/trajectories/`，并维护按工具、Agent、技能、结果、时间查询的索引。增量幂等，导出前脱敏（本地内容只留句柄、密钥和路径替换、最后断言）。入口是 `python -m services.meta.export [query ...]` 和只接受本机的 `GET /api/trajectories`。字段、隐私规则和示例见 [trajectory.md](trajectory.md)，决策见 [ADR 0006](adr/0006-trajectories.md)。
 
+### 技能挖掘（#40）
+
+`services/meta/mine.py`：只读轨迹，用工具 / Agent 序列 n-gram 统计重复子流程，产出 `mas.skill-candidate/1`，写到 `<data_dir>/meta/skill-candidates.json`。达到次数和会话门槛的才成候选；短 n-gram 若被更长达标序列覆盖则丢弃。可选 `--model` 归纳（默认关）。**不写** `skills/`。入口：`python -m services.meta.mine`、本机 `POST /api/meta/mine` 与 `GET /api/meta/candidates`。说明见 [mining.md](mining.md)，决策见 [ADR 0007](adr/0007-skill-mining.md)。
+
 ### 检查
 
 | 文件 | 做什么 |
