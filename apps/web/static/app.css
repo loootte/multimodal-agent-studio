@@ -516,3 +516,16 @@ dialog select { font: inherit; padding: 0.35rem; }
 .confirm-notice { flex-basis: 100%; margin: 0; color: var(--muted, #666); font-size: 0.9em; }
 .confirm-row { flex-wrap: wrap; }
 .image-config { margin: 0.4rem 0 0; color: var(--muted, #666); font-size: 0.85em; }
+
+/* 本地资源面板（issue #51） */
+#open-resources { margin-top: 0.6rem; width: 100%; }
+#resources { max-width: 48rem; width: 92vw; }
+.res-filters { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.res-filters input { flex: 1; min-width: 10rem; }
+.res-list { list-style: none; padding: 0; margin: 0; max-height: 45vh; overflow: auto; }
+.res-item { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.45rem 0; border-bottom: 1px solid #ddd; }
+.res-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.res-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.res-preview { margin-top: 0.6rem; max-height: 35vh; overflow: auto; }
+.res-preview img, .res-preview video { max-width: 100%; }
+.res-text { white-space: pre-wrap; }
