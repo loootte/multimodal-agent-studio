@@ -134,11 +134,31 @@
 
 状态：已完成。规范见 [docs/tool-packs.md](docs/tool-packs.md)。延后：沙箱隔离、MCP 投影字段、市场和签名、上传安装。
 
+## 8. 多智能体
+
+[issue #34](https://github.com/loootte/multimodal-agent-studio/issues/34)。建立在第 7 阶段（[issue #31](https://github.com/loootte/multimodal-agent-studio/issues/31)）的工具清单、安装和权限之上。开工前先写 ADR 0005，说明把“多 Agent 互相委托”从明确延后提前到这一阶段。
+
+范围：
+
+- Agent 按清单（`mas.agent/1`）定义：角色、系统指令、模型、允许的工具和技能、预算。内置 Agent 由清单注册，能像工具包一样从目录安装和分享。
+- 编排 Agent 通过内置委托工具把子任务交给子 Agent（首批 planner、image、reviewer），子 Agent 复用运行时循环。委托有深度上限，禁止环。
+- Agent 之间只传任务说明、句柄和摘要。本地内容照旧不进任何供应商请求。本地内容对话框只由编排者发起。
+- 分层预算、有限并行、停止向下传播。子 Agent 的确认请求冒泡到界面并标明是哪个 Agent。
+- 界面按 Agent 分组显示进度。遥测按 Agent 出 span。评测覆盖委托、并行、预算、取消、越权和泄露。
+
+完成标准：
+
+- “规划 → 出图 → 检查”的多图任务由编排者委托完成，结果回到同一条助手消息。
+- 子 Agent 越权调用工具被运行时拒绝。任何子 Agent 的请求里都没有本地正文或文件字节。
+- 单 Agent 路径行为不变，现有检查和评测全部通过。
+
+状态：未开始。
+
 ## 明确延后
 
 这些不进前六个阶段：
 
-- 多 Agent 互相委托
+- 多 Agent 互相委托（已由第 8 阶段 / issue #34 提前，需 ADR 0005）
 - 桌面或移动客户端
 - 自训练模型
 - 插件市场
