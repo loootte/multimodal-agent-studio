@@ -49,15 +49,15 @@ def validate_arguments(name: str, arguments) -> dict | None:
     return tool_error(name, "unknown_tool", "没有已注册的工具。", executed=False)
 
 
-def tool_mutates(name: str) -> bool:
+def tool_mutates(name: str, arguments=None) -> bool:
+    """按清单的确认策略：always 要确认，never 不要，by_args 看是否带了 confirm_args 里的参数。"""
     _ensure()
-    from tools.registry import audience_tools
+    from tools import packs
 
-    for audience in ("internal", "external"):
-        for item in audience_tools(audience):
-            if item.name == name and item.mutating:
-                return True
-    return False
+    pack = packs.find(name)
+    if pack is None:
+        return False
+    return packs.needs_confirm(pack, arguments)
 
 
 def openai_tools() -> list[dict]:

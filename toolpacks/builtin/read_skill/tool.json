@@ -1,0 +1,38 @@
+{
+  "schema": "mas.tool/1",
+  "name": "read_skill",
+  "version": "1.0.0",
+  "description": "读取已安装技能的做法。只返回做法，不返回本机正文、字节或路径。",
+  "order": 60,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "name"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "description": "已安装技能的名字。这一刀是 anatomy。"
+      }
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {
+    "kind": "python",
+    "module": "poc/tools/internal/skill.py"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": false,
+    "network": false,
+    "write_files": false,
+    "send_local_to_model": false
+  }
+}

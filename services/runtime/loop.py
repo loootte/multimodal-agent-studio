@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
 import uuid
 
@@ -165,6 +166,15 @@ def run(
             return
 
 
+def _asks_confirm(mutating, name, arguments) -> bool:
+    """确认回调可以只收工具名，也可以再收参数（清单 confirm=by_args 要看参数）。"""
+    try:
+        count = len(inspect.signature(mutating).parameters)
+    except (TypeError, ValueError):
+        count = 1
+    return bool(mutating(name, arguments) if count >= 2 else mutating(name))
+
+
 def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mutating, take=None):
     name = tool_call.get("name") or ""
     arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
@@ -175,7 +185,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         "arguments": arguments,
         "call_id": tool_call.get("call_id"),
     }
-    if mutating(name):
+    if _asks_confirm(mutating, name, arguments):
         yield {
             "type": EVENT_TOOL_CONFIRM,
             "run_id": run_id,
