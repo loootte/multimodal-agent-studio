@@ -42,6 +42,7 @@ _RUN_CONFIRM = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/confirm$")
 _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
+    "markdown.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000

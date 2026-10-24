@@ -441,6 +441,14 @@ function renderRuntime() {
   log.scrollTop = log.scrollHeight;
 }
 
+// markdown.js 只产出转义后的白名单 HTML；万一没加载，退回纯文本转义。
+function markdownHtml(source) {
+  if (typeof window.renderMarkdown === "function") return window.renderMarkdown(source);
+  const div = document.createElement("div");
+  div.textContent = source;
+  return div.innerHTML.replace(/\n/g, "<br>");
+}
+
 // 多智能体：编排者 → 子 Agent → 工具调用，按 parent_run_id 挂成一棵树。
 function agentTree(assistant) {
   const events = (assistant && assistant.events) || [];
@@ -464,6 +472,16 @@ function agentTree(assistant) {
       const ms = node.ms != null ? ` · ${node.ms}ms` : "";
       li.textContent = `${node.agent}（${node.role || ""}）· ${label}${ms}`;
       const calls = events.filter((item) => item.type === "tool_call" && item.agent_run_id === node.run_id);
+      if (node.summary) {
+        const details = document.createElement("details");
+        const title = document.createElement("summary");
+        title.textContent = "子 Agent 摘要";
+        const body = document.createElement("div");
+        body.className = "markdown";
+        body.innerHTML = markdownHtml(node.summary);
+        details.append(title, body);
+        li.append(details);
+      }
       if (calls.length) {
         const sub = document.createElement("ul");
         for (const call of calls) {
@@ -626,9 +644,16 @@ function bubble(message) {
   const who = document.createElement("span");
   who.className = "who";
   who.textContent = message.role === "user" ? "你" : "助手";
-  const text = document.createElement("p");
+  // 助手回复按 Markdown 渲染（流式时每次整段重渲染）；用户消息保持纯文本，原样显示。
+  const text = document.createElement("div");
   text.className = "body";
-  text.textContent = message.text || "";
+  if (message.role === "user") {
+    text.classList.add("plain");
+    text.textContent = message.text || "";
+  } else {
+    text.classList.add("markdown");
+    text.innerHTML = markdownHtml(message.text || "");
+  }
   item.append(who, text);
   for (const attachment of message.attachments || []) {
     item.append(attachmentView(attachment));
