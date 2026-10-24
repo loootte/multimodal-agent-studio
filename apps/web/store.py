@@ -550,29 +550,104 @@ class SessionStore:
                         checksums.add(item["checksum"])
             os.remove(self._path(session_id))
             shutil.rmtree(os.path.join(self.root, session_id), ignore_errors=True)
-            for name in os.listdir(self.root):
-                if not name.endswith(".json"):
-                    continue
-                other = self._load_path(os.path.join(self.root, name))
-                if other is None:
-                    continue
-                for key in ("attachments", "contents"):
-                    for item in other.get(key) or []:
-                        if isinstance(item, dict):
-                            checksums.discard(item.get("checksum"))
-            removed = 0
-            for checksum in checksums:
-                try:
-                    path = self.artifacts.path_for(checksum)
-                except Exception:
-                    path = None
-                if path and os.path.exists(path):
-                    try:
-                        os.remove(path)
-                        removed += 1
-                    except OSError:
-                        pass
+            removed = self._gc_blobs(checksums)
         return {"ok": True, "session_id": session_id, "blobs_removed": removed}
+
+    def _gc_blobs(self, checksums: set) -> int:
+        """删掉没有任何会话再引用的字节。调用方持锁。"""
+        checksums = {c for c in checksums if isinstance(c, str) and c}
+        if not checksums:
+            return 0
+        for other in self.all_sessions():
+            for key in ("attachments", "contents"):
+                for item in other.get(key) or []:
+                    if isinstance(item, dict):
+                        checksums.discard(item.get("checksum"))
+        removed = 0
+        for checksum in checksums:
+            try:
+                path = self.artifacts.path_for(checksum)
+            except Exception:
+                path = None
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    def all_sessions(self) -> list[dict]:
+        """本机所有会话的原始记录（含本地正文）。只给本机资源面板用，不进模型。"""
+        found = []
+        with self._lock:
+            for name in sorted(os.listdir(self.root)):
+                if name.endswith(".json"):
+                    session = self._load_path(os.path.join(self.root, name))
+                    if session is not None:
+                        found.append(session)
+        return found
+
+    def set_label(self, session_id: str, handle: str, label: str) -> bool:
+        """给本地内容或附件起个标签。标签只在本机面板显示。"""
+        check_id(session_id, "会话")
+        label = re.sub(r"[\x00-\x1f]", " ", str(label or "")).strip()[:80]
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return False
+            for key in ("contents", "attachments"):
+                for item in session.get(key) or []:
+                    if isinstance(item, dict) and item.get("handle") == handle:
+                        if label:
+                            item["label"] = label
+                        else:
+                            item.pop("label", None)
+                        self._write(session)
+                        return True
+        return False
+
+    def forget_attachment(self, session_id: str, handle: str) -> str:
+        """删掉一个附件：记录、消息里的引用，以及没人再用的字节。"""
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return "absent"
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return "absent"
+            items = session.get("attachments") or []
+            found = [i for i in items if isinstance(i, dict) and i.get("handle") == handle]
+            if not found:
+                return "absent"
+            session["attachments"] = [i for i in items if not (isinstance(i, dict) and i.get("handle") == handle)]
+            for message in session.get("messages") or []:
+                if isinstance(message.get("attachments"), list):
+                    message["attachments"] = [a for a in message["attachments"]
+                                              if not (isinstance(a, dict) and a.get("handle") == handle)]
+            session["updated_at"] = _now()
+            self._write(session)
+            self._gc_blobs({found[0].get("checksum")})
+        return "forgotten"
+
+    def drop_artifact_events(self, session_id: str, artifact_id: str) -> int:
+        """生成文件删掉后，会话里不再留它的展示事件。"""
+        check_id(session_id, "会话")
+        dropped = 0
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return 0
+            for message in session.get("messages") or []:
+                events = message.get("events")
+                if isinstance(events, list):
+                    kept = [e for e in events if not (isinstance(e, dict) and e.get("artifact_id") == artifact_id)]
+                    dropped += len(events) - len(kept)
+                    message["events"] = kept
+            if dropped:
+                session["updated_at"] = _now()
+                self._write(session)
+        return dropped
 
     def belongs_to(self, session: dict, user_id: str) -> bool:
         owner = session.get("user_id")
@@ -668,6 +743,7 @@ class SessionStore:
                 "purpose": "image_prompt",
                 "text": text,
                 "message_id": message_id,
+                "created_at": _now(),
             }
             contents.append(record)
             session["updated_at"] = _now()
@@ -699,6 +775,7 @@ class SessionStore:
                 "purpose": purpose,
                 "text": text,
                 "message_id": "",
+                "created_at": _now(),
             }
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
@@ -740,6 +817,7 @@ class SessionStore:
                 "purpose": purpose,
                 "checksum": digest,
                 "message_id": "",
+                "created_at": _now(),
             }
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
@@ -773,6 +851,7 @@ class SessionStore:
                 "size": len(data),
                 "name": clean_filename(name),
                 "checksum": digest,
+                "created_at": _now(),
             }
             session.setdefault("attachments", []).append(record)
             session["updated_at"] = _now()
@@ -855,6 +934,8 @@ class SessionStore:
             session["contents"] = kept
             session["updated_at"] = _now()
             self._write(session)
+            if kind == "file":
+                self._gc_blobs({found.get("checksum")})
         if kind == "file":
             try:
                 os.remove(self._file_path(session_id, handle))

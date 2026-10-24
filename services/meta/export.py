@@ -560,6 +560,22 @@ class Exporter:
             return {"written": written, "removed": removed, "dropped": dropped, "sessions_skipped": skipped,
                     "total": len(index["runs"]), "path": os.path.relpath(self.jsonl, self.data_dir)}
 
+    def forget_session(self, session_id: str) -> dict:
+        """丢掉一个会话已导出的轨迹，再增量导出一次：本地资源删掉后轨迹按新会话重建。"""
+        with _lock:
+            index = self.load_index()
+            stale = {rid for rid, e in index["runs"].items() if e["session_id"] == session_id}
+            if stale and os.path.isfile(self.jsonl):
+                self._rewrite(lambda r: r["run_id"] not in stale)
+            for rid in stale:
+                index["runs"].pop(rid, None)
+            index["sessions"].pop(session_id, None)
+            if os.path.isdir(self.out_dir):
+                self._save_index(index)
+        stats = self.export()
+        stats["forgotten"] = len(stale)
+        return stats
+
     def _build_safe(self, session_id, session, telemetry):
         try:
             return self.build_session(session_id, session, telemetry)
