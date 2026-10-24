@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 
+import character
 import image_run
 import skill_page
 import store
@@ -71,6 +72,8 @@ SYSTEM = (
     "写好后调用 stage_prompt（source=model）；拿到句柄后再 generate_image。用户没这么说时仍走本地提示词（accept_local_content）。"
     "出图后端：用户要第三方、云端或在线模型出图时 generate_image 的 backend 填 remote；否则不填，用本机 ComfyUI。"
     "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
+    "用户要画一个角色/人物（说到性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）时，调用 character_image，"
+    "只填用户说到的字段，其余用默认值；拿到句柄后再 generate_image（多张先 plan_images）。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
 _DRAFT_MARKERS = ("提示词", "内容是", "画面是", "画面：", "画面:")
@@ -123,6 +126,7 @@ _WEB_TOOLS = (
     "plan_images",
     "build_skill_page",
     "stage_prompt",
+    "character_image",
 )
 EVENT_AGENT = "agent"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
@@ -134,6 +138,7 @@ _SKILL_MARKERS = ("等距", "等轴测", "isometric")
 _OPEN_MARKERS = (
     "优化提示词", "优化一下提示词", "润色", "扩写", "帮我写提示词", "帮我写个提示词", "你来写提示词", "写个提示词",
     "直接用这句", "直接用这段", "原样", "按原话", "用我刚才说的", "用刚才说的", "用上面说的", "就用这句话",
+    "角色", "人物立绘", "character",
     "第三方", "云端", "在线模型", "远程模型", "openai", "dall-e", "dall·e", "gpt-image",
 )
 EVENT_IMAGE_CONFIG = "image_config"
@@ -1196,6 +1201,8 @@ def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict
         return _execute_stage_prompt(app, session_id, run, arguments)
     if name == "plan_images":
         return _execute_plan_images(run, arguments)
+    if name == "character_image":
+        return _execute_character(app, session_id, run, arguments)
     if name == "generate_image":
         return _execute_generate_image(app, session_id, message_id, run, arguments)
     tool_call = {"name": name, "arguments": arguments if isinstance(arguments, dict) else {}}
@@ -1274,6 +1281,151 @@ def _execute_stage_prompt(app, session_id, run, arguments) -> dict:
     print(f"stage {run.run_id} {handle} {source} {len(text)}", file=sys.stderr)
     return {"ok": True, "tool": "stage_prompt", "content_handle": handle, "source": source,
             "next": f"调用 generate_image，content_handle 填 {handle}。"}
+
+
+def _stage(run, text: str, source: str) -> str:
+    staged = getattr(run, "_staged", None)
+    if staged is None:
+        staged = run._staged = {}
+    for handle, item in staged.items():
+        if item["text"] == text and item["source"] == source:
+            return handle
+    handle = new_id("c_")
+    staged[handle] = {"text": text, "source": source}
+    return handle
+
+
+def _character_config(app) -> dict:
+    try:
+        return app.tools.effective(character.TOOL)
+    except KeyError:
+        return {}
+
+
+def _execute_character(app, session_id, run, arguments) -> dict:
+    """#53：模型从对话里填角色字段（没说的用默认值），拼成提示词登记成本轮句柄（1.1/1.2），再交给 generate_image。"""
+    args = dict(arguments) if isinstance(arguments, dict) else {}
+    source = args.pop("mode", None) or "model"
+    if source not in ("chat", "model"):
+        return {"ok": False, "tool": "character_image",
+                "error": {"code": "invalid_parameter", "message": "mode 只能是 chat 或 model。"}}
+    for body in app.sessions.local_bodies(session_id):
+        for value in args.values():
+            if isinstance(value, str) and len(body) >= 8 and (body in value or (len(value) >= 8 and value in body)):
+                return {"ok": False, "tool": "character_image",
+                        "error": {"code": "local_content", "message": "字段里有本地内容，只能用它的本地句柄出图。"}}
+    try:
+        composed = character.compose(args, _character_config(app))
+    except character.CharacterError as exc:
+        return {"ok": False, "tool": "character_image", "executed": False, "error": exc.public()}
+    handle = _stage(run, composed["prompt"], source)
+    print(f"character {run.run_id} {handle} {source} {len(composed['prompt'])}", file=sys.stderr)
+    return {"ok": True, "tool": "character_image", "content_handle": handle, "source": source,
+            "summary": composed["summary"], "used_defaults": composed["used_defaults"], "prompt": composed["prompt"],
+            "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
+
+
+def start_character(app, session_id: str, body) -> Run:
+    """#53 网页表单：不经过对话模型，直接按字段拼提示词、报张数、逐张 generate_image。
+    privacy=chat：字段是用户自己写在页面上的文字（1.1），会作为聊天消息保存；
+    privacy=local：拼好的提示词存成本地内容（1.3），消息里只写“本地提示词”，第三方出图按 remote_local_prompt。"""
+    body = body if isinstance(body, dict) else {}
+    privacy = body.get("privacy") or "chat"
+    if privacy not in ("chat", "local"):
+        raise RequestError(400, "invalid_parameter", "privacy 只能是 chat 或 local。")
+    backend = body.get("backend") or "local"
+    if backend not in ("local", "remote"):
+        raise RequestError(400, "invalid_parameter", "backend 只能是 local 或 remote。")
+    count = body.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+        raise RequestError(400, "invalid_parameter", "张数要是 1 到 20 的整数。")
+    aspect = body.get("aspect_ratio") or "1:1"
+    if aspect not in _ASPECTS:
+        raise RequestError(400, "invalid_parameter", "画幅只能是 1:1、16:9、9:16。")
+    seed = body.get("seed")
+    if seed is not None and not (isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0):
+        raise RequestError(400, "invalid_parameter", "seed 要是非负整数。")
+    try:
+        composed = character.compose(body.get("fields") or {}, _character_config(app))
+    except character.CharacterError as exc:
+        raise RequestError(400, exc.code, exc.message) from exc
+    where = "本机 ComfyUI" if backend == "local" else "第三方出图"
+    if privacy == "local":
+        text = f"定制角色出图（本地提示词，{count} 张，{where}）"
+    else:
+        text = f"定制角色出图（{count} 张，{where}）：{composed['summary']}"
+    message_id = new_id("m_")
+    run = Run(session_id, message_id)
+    run.agent_mode = "single"
+    try:
+        assistant = app.sessions.append_turn(session_id, text, run.run_id, [])
+    except StoreError as exc:
+        if exc.message == "busy":
+            raise RequestError(409, "busy", "这一会话还在回答，先停止再发送。") from exc
+        raise RequestError(404, "not_found", "找不到这个会话。") from exc
+    run.message_id = assistant["message_id"]
+    app.runs.add(run)
+    run.push({"type": EVENT_RUN_STARTED, "run_id": run.run_id, "message_id": run.message_id, "session_id": session_id})
+    telemetry.record("web.request", trace_id=run.run_id, method="POST",
+                     path=f"/api/sessions/{session_id}/character", session_id=session_id,
+                     message_id=run.message_id, modalities=["text"])
+    plan = {"prompt": composed["prompt"], "privacy": privacy, "backend": backend, "count": count,
+            "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body}
+    threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
+    return run
+
+
+def _character_run(app, session_id, message_id, run, plan) -> None:
+    started = time.monotonic()
+    status = "failed"
+    try:
+        if plan["privacy"] == "local":
+            record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
+            handle, source = record["handle"], "local"
+        else:
+            handle, source = _stage(run, plan["prompt"], "chat"), "chat"
+        run._image_plan = {"count": plan["count"], "items": []}
+        last = None
+        for index in range(plan["count"]):
+            if run.cancel.is_set():
+                break
+            arguments = {"content_handle": handle, "aspect_ratio": plan["aspect"]}
+            if plan["seed"] is not None:
+                arguments["seed"] = plan["seed"] + index
+            tool_call = {"name": "generate_image", "arguments": arguments}
+            if source == "local":
+                bound = _bind_image(app, session_id, "", tool_call, False)
+            else:
+                bound = _bind_submitted(plan["prompt"], tool_call)
+            last = _generate_bound(app, session_id, message_id, run, handle, bound, source,
+                                   plan["backend"], plan["explicit_backend"])
+            if not last.get("ok"):
+                break
+        done = int(getattr(run, "_images_done", 0) or 0)
+        if run.cancel.is_set():
+            _fail(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]),
+                  app.sessions.message_text(session_id, message_id))
+            status = "cancelled"
+        elif done >= plan["count"]:
+            _complete(app, session_id, message_id, run, f"已生成 {done} 张角色图。")
+            status = "completed"
+        else:
+            error = (last or {}).get("error") or {}
+            message = str(error.get("message") or "生成失败。")
+            if error.get("hint"):
+                message += " 建议：" + str(error["hint"])
+            if done:
+                message = f"已生成 {done}/{plan['count']} 张，后面的失败了：" + message
+            _fail(app, session_id, message_id, run, GatewayError(str(error.get("code") or "comfyui_error"), message),
+                  app.sessions.message_text(session_id, message_id))
+    except Exception as exc:
+        _fail(app, session_id, message_id, run, GatewayError("provider_error", HUMAN["provider_error"]),
+              app.sessions.message_text(session_id, message_id))
+        print(f"character run failed {type(exc).__name__}", file=sys.stderr)
+    finally:
+        telemetry.record("run", trace_id=run.run_id, status=status, ok=status == "completed",
+                         ms=int((time.monotonic() - started) * 1000), error_code=None if status == "completed" else status,
+                         session_id=session_id)
 
 
 def _image_error(handle: str, code: str, message: str, hint: str = "", backend: str = "") -> dict:

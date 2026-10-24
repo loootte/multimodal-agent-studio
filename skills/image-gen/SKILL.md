@@ -16,6 +16,7 @@ description: 可配置的出图流程。用户要生成图片时，按三个维�
 | | 1.3 本地提示词 | **默认**。调用 `accept_local_content`（`purpose=image_prompt`，`kind=text`），正文留在用户本机，你只拿到句柄。 |
 | 出图后端 | 2.1 本机 ComfyUI | **默认**。`generate_image` 不填 `backend`（或填 `local`）。 |
 | | 2.2 第三方图片 API | 用户要“第三方/云端/在线模型/OpenAI/gpt-image”出图时，`backend=remote`。 |
+| 角色定制 | 画一个角色/人物 | 用户描述角色（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）时调用 `character_image`，只填说到的字段，其余用默认值（年轻女性）；返回的 `content_handle` 再交给 `generate_image`。见 [character-image](../../docs/character-image.md)。 |
 | 张数 | 默认 1 | 用户说了几张就先 `plan_images`（`count`）；没说就出 1 张。张数只由 `plan_images` 决定，每次 `generate_image` 只出一张。 |
 
 ## 2. 歧义怎么处理
