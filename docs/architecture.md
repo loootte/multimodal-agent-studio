@@ -111,7 +111,11 @@ Agent 运行时
 | `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
 | `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
 | `services/runtime/skills.py` | 扫描 `skills/*/SKILL.md`。系统指令只带技能名字和短描述。模型调用 `read_skill` 之后，这一轮才带上正文 |
+| `services/runtime/agents.py` | 多智能体（ADR 0005）：`mas.agent/1` 清单校验、发现、安装导出；`delegate` 工具（层数 ≤2、禁止成环、只传句柄）；按清单裁剪工具并在运行时拒绝越权（`tool_not_allowed`）；树预算池、并行上限 2、同一后端串行；子 Agent 复用 `loop.run`，追踪写 `type: agent` 的 span（带 `parent_run_id`），遥测 `agent.run` |
+| `agents/builtin/*/agent.json` | 内置 orchestrator、planner、image、reviewer |
 | `poc/tools/internal/demo.py`、`toolpacks/builtin/lookup_demo/tool.json` | 只读演示 `lookup_demo` |
+
+输入框旁勾上「多智能体」时，`chat_run.py` 把这一轮交给编排者：系统指令和工具换成编排者清单，`delegate` 起子 Agent；子 Agent 的工具调用、确认卡和 `agent` 节点事件都标出 Agent 名和 `agent_run_id`，界面右侧画成「编排者 → 子 Agent → 工具调用」的树。`accept_local_content` 只给编排者。不勾时路径不变。见 [agents.md](agents.md)。
 
 现在一轮回答仍放在网页进程里：
 

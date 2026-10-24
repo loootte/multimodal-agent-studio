@@ -152,7 +152,7 @@
 - 子 Agent 越权调用工具被运行时拒绝。任何子 Agent 的请求里都没有本地正文或文件字节。
 - 单 Agent 路径行为不变，现有检查和评测全部通过。
 
-状态：未开始。
+状态：进行中（分支 issue-34，见 [ADR 0005](docs/adr/0005-multi-agent.md) 和 [docs/agents.md](docs/agents.md)）。清单与校验、四个内置 Agent、delegate、越权拒绝、分层预算、有限并行与后端串行、停止传播、确认冒泡、界面 Agent 树、agent span、检查和评测已完成；待用户试用后合并。
 
 ## 明确延后
 

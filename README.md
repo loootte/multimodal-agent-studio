@@ -29,6 +29,7 @@
 | [docs/adr/0001-bootstrap-without-code.md](docs/adr/0001-bootstrap-without-code.md) | 为什么先只提交文档 |
 | [docs/adr/0002-implementation-stack.md](docs/adr/0002-implementation-stack.md) | 文字聊天这一刀的语言和进程 |
 | [docs/adr/0003-local-data-isolation.md](docs/adr/0003-local-data-isolation.md) | 本地数据隔离：第三方只见工具契约 |
+| [docs/agents.md](docs/agents.md) | 多智能体：Agent 清单（mas.agent/1）怎么写、安装导出、运行时边界 |
 | [docs/tool-pack-guide.md](docs/tool-pack-guide.md) | 工具包使用和编写指南：能装什么、入口函数、安装配置导出、常见错误 |
 | [docs/tool-packs.md](docs/tool-packs.md) | 工具包规范：`tool.json` 清单、后端、权限、安装导出 |
 | [docs/adr/0004-tool-governance.md](docs/adr/0004-tool-governance.md) | 工具规范：`poc/tools` 自注册，MCP 是进程内投影 |
