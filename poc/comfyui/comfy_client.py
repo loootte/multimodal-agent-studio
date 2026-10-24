@@ -18,6 +18,19 @@ import urllib.parse
 import urllib.request
 import uuid
 
+try:  # 网页和运行时里有统一遥测；单独跑 PoC 时没有也不影响
+    from services import telemetry as _telemetry
+except ImportError:  # pragma: no cover
+    _telemetry = None
+
+
+def _note(kind: str, **fields) -> None:
+    if _telemetry is not None:
+        try:
+            _telemetry.record(kind, **fields)
+        except Exception:
+            pass
+
 
 DEFAULT_BASE = "http://127.0.0.1:8188"
 
@@ -293,8 +306,10 @@ class ComfyClient:
         prompt_id = result.get("prompt_id")
         if node_errors or not prompt_id:
             text = original_error_text(result) or "ComfyUI 拒绝了这张工作流。"
+            _note("comfyui.submit", ok=False, error_code="comfy_rejected", base=self.base)
             raise ComfyFailure(text, result, prompt_id if isinstance(prompt_id, str) else None)
         self._track(str(prompt_id))
+        _note("comfyui.submit", ok=True, prompt_id=str(prompt_id), base=self.base)
         return str(prompt_id)
 
     def events(self, prompt_id: str) -> list[dict]:
@@ -671,18 +686,31 @@ def run_isolated(lane: str, client: ComfyClient, workflow: dict, timeout: int, o
         raise ComfyFailure("队列只分图片和视频。")
     LANES.acquire(lane)
     prompt_id = None
+    started = time.monotonic()
+    outcome = {"ok": False, "error_code": "comfy_failed"}
     try:
         prompt_id = client.submit(workflow)
         LANES.remember(lane, prompt_id)
         if on_submitted is not None:
             on_submitted(prompt_id)
         try:
-            return client.wait(prompt_id, timeout, on_event=on_event)
+            result = client.wait(prompt_id, timeout, on_event=on_event)
+            outcome = {"ok": True}
+            return result
         except ComfyFailure as exc:
+            if "等待超时" in (exc.message or ""):
+                outcome = {"ok": False, "error_code": "timeout"}
             if lane == "video" and prompt_id and "等待超时" in (exc.message or ""):
                 client.cancel(prompt_id, interrupt=client.running(prompt_id))
             raise
     finally:
+        _note(
+            "comfyui.run",
+            lane=lane,
+            prompt_id=prompt_id,
+            ms=int((time.monotonic() - started) * 1000),
+            **outcome,
+        )
         if prompt_id is not None:
             LANES.forget(lane, prompt_id)
         LANES.release(lane)

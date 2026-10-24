@@ -79,6 +79,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if mode == "ok":
             self._piece(_delta(content="你"))
             self._piece(_delta(content="好"))
+            usage = {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}
+            self._piece(f"data: {json.dumps(usage)}\n\n".encode("utf-8"))
             self._done()
             return
         if mode == "hang":
@@ -2267,6 +2269,12 @@ def _image_text_only(base: str, session_id: str, provider, box: ComfyState) -> N
     events = _speak(base, session_id, "只聊天")
     if _assistant_text(events) != "你好" or len(box.prompts) != before:
         fail("纯文字回答仍然调用了 ComfyUI")
+    trace = _telemetry_of(base, events)
+    providers = [item for item in trace["events"] if item.get("kind") == "provider"]
+    if not providers or providers[-1].get("usage", {}).get("total_tokens") != 12:
+        fail(f"遥测没有记下供应商返回的用量：{providers}")
+    if trace["summary"]["kinds"].get("provider", {}).get("tokens") != 12:
+        fail("遥测汇总的 token 不对")
 
 
 def _image_success(base: str, session_id: str, provider, box: ComfyState, workflow_path: str, directory: str) -> None:
@@ -2315,6 +2323,53 @@ def _image_success(base: str, session_id: str, provider, box: ComfyState, workfl
     missing, _ = request("GET", base + f"/sessions/{session_id}/artifacts/art_{'ab' * 16}")
     if missing != 404:
         fail("不存在的图片没有返回 404")
+    _telemetry_image(base, events, box)
+
+
+def _telemetry_of(base: str, events: list[dict], attempts: int = 40) -> dict:
+    run_id = next((event.get("run_id") for event in events if event.get("run_id")), "")
+    if not run_id:
+        fail("事件里没有 run_id，遥测无从关联")
+    for _ in range(attempts):
+        status, raw = request("GET", base + f"/api/telemetry/{run_id}")
+        if status != 200:
+            fail(f"遥测接口返回 {status}")
+        body = json.loads(raw)
+        if any(item.get("kind") == "run" for item in body["events"]):
+            break
+        time.sleep(0.05)
+    else:
+        fail("遥测里没有这次运行的结束记录")
+    if any(item.get("trace_id") != run_id for item in body["events"]):
+        fail("遥测按 trace_id 查询混进了别的运行")
+    blob = json.dumps(body, ensure_ascii=False)
+    if SECRET in blob:
+        fail("遥测里出现了密钥")
+    return body
+
+
+def _telemetry_image(base: str, events: list[dict], box: ComfyState) -> None:
+    trace = _telemetry_of(base, events)
+    kinds = [item.get("kind") for item in trace["events"]]
+    for wanted in ("web.request", "provider", "tool", "comfyui.submit", "comfyui.run", "run"):
+        if wanted not in kinds:
+            fail(f"同一个 trace 缺少 {wanted}：{kinds}")
+    if kinds[0] != "web.request" or kinds[-1] != "run":
+        fail(f"遥测顺序不对：{kinds}")
+    submitted = [item.get("prompt_id") for item in trace["events"] if item.get("kind") == "comfyui.submit"]
+    if not submitted or not submitted[-1] or submitted[-1] not in box.ids:
+        fail(f"遥测里的 ComfyUI prompt_id 对不上：{submitted}")
+    if "画一只茶壶" in json.dumps(trace, ensure_ascii=False):
+        fail("画面描述写进了遥测")
+    end = trace["events"][-1]
+    if end.get("ok") is not True or not isinstance(end.get("ms"), int):
+        fail(f"运行结束记录不对：{end}")
+    status, raw = request("GET", base + "/api/telemetry?limit=5")
+    if status != 200 or len(json.loads(raw)["events"]) > 5:
+        fail("遥测列表接口不对")
+    status, _ = request("GET", base + "/api/telemetry/..%2Fx")
+    if status not in (400, 404):
+        fail("不合法的 trace_id 没有被拒绝")
 
 
 def _image_fields(workflow_path: str) -> dict:

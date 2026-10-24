@@ -35,6 +35,7 @@ from packages.contracts.events import (
     RETRYABLE,
     TERMINAL_EVENTS,
 )
+from services import telemetry
 from services.gateway import GatewayError, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
 from services.runtime.tools import tool_mutates
@@ -306,6 +307,15 @@ def start(app, session_id: str, text, attachments) -> Run:
         "message_id": run.message_id,
         "session_id": session_id,
     })
+    telemetry.record(
+        "web.request",
+        trace_id=run.run_id,
+        method="POST",
+        path=f"/api/sessions/{session_id}/messages",
+        session_id=session_id,
+        message_id=run.message_id,
+        modalities=["text"] * bool(text) + sorted({str(item.get("kind") or "file") for item in records}),
+    )
     provider = app.provider.resolve()
     problem = None
     if not provider["api_key"]:
@@ -315,9 +325,10 @@ def start(app, session_id: str, text, attachments) -> Run:
     if problem is not None:
         _fail(app, session_id, run.message_id, run, problem, "")
         _log(session_id, provider["model"], "failed", 0.0)
+        telemetry.record("run", trace_id=run.run_id, status="failed", ok=False, ms=0, error_code=problem.code)
         return run
     threading.Thread(
-        target=_generate,
+        target=_traced_generate,
         args=(app, session_id, run.message_id, run, provider),
         daemon=True,
     ).start()
@@ -463,6 +474,44 @@ def stop(app, session_id: str) -> dict:
     if run is not None:
         run.stop()
     return {"ok": True, "running": True}
+
+
+def _run_error_code(app, session_id: str, message_id: str) -> str | None:
+    try:
+        for message in (app.sessions.get(session_id) or {}).get("messages") or []:
+            if message.get("message_id") == message_id:
+                error = message.get("error")
+                return error.get("code") if isinstance(error, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def _traced_generate(app, session_id: str, message_id: str, run: Run, provider: dict) -> None:
+    telemetry.bind(run.run_id, owner="web")
+    started = time.monotonic()
+    try:
+        _generate(app, session_id, message_id, run, provider)
+    finally:
+        status, code = "failed", None
+        try:
+            for message in (app.sessions.get(session_id) or {}).get("messages") or []:
+                if message.get("message_id") == message_id:
+                    status = str(message.get("status") or "failed")
+                    error = message.get("error") if isinstance(message.get("error"), dict) else {}
+                    code = error.get("code")
+        except Exception:
+            pass
+        telemetry.record(
+            "run",
+            status=status,
+            ok=status == "completed",
+            ms=int((time.monotonic() - started) * 1000),
+            error_code=None if status == "completed" else (code or status),
+            model=provider.get("model"),
+            session_id=session_id,
+        )
+        telemetry.bind(None)
 
 
 def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -> None:
@@ -867,6 +916,7 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         result = execute_tool(name, arguments)
     else:
         return None
+    telemetry.record("tool", name=name, ms=0, ok=True, via="web")
     _emit_runtime(
         app, session_id, message_id, run,
         {"kind": "tool", "name": name, "ms": 0, "ok": True},
@@ -1012,6 +1062,17 @@ def _fail(app, session_id: str, message_id: str, run: Run, error: GatewayError, 
 
 
 def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, tool_call: dict) -> str:
+    name = (tool_call.get("name") if isinstance(tool_call, dict) else "") or "generate_image"
+    with telemetry.span("tool", name=name, via="web") as fields:
+        status = _finish_image_inner(app, session_id, message_id, run, text, tool_call)
+        fields["status"] = status
+        fields["ok"] = status not in ("failed", "cancelled")
+        if not fields["ok"]:
+            fields["error_code"] = _run_error_code(app, session_id, message_id) or status
+        return status
+
+
+def _finish_image_inner(app, session_id: str, message_id: str, run: Run, text: str, tool_call: dict) -> str:
     name = tool_call.get("name") if isinstance(tool_call.get("name"), str) else ""
     arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
     _push_saved(app, session_id, message_id, run, {
@@ -1229,6 +1290,17 @@ def _public_generate_result(result: dict, handle: str) -> dict:
 
 
 def _finish_skill_page(app, session_id: str, message_id: str, run: Run, text: str, tool_call: dict) -> str:
+    name = 'build_skill_page'
+    with telemetry.span("tool", name=name, via="web") as fields:
+        status = _finish_skill_page_inner(app, session_id, message_id, run, text, tool_call)
+        fields["status"] = status
+        fields["ok"] = status not in ("failed", "cancelled")
+        if not fields["ok"]:
+            fields["error_code"] = _run_error_code(app, session_id, message_id) or status
+        return status
+
+
+def _finish_skill_page_inner(app, session_id: str, message_id: str, run: Run, text: str, tool_call: dict) -> str:
     arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
     _push_saved(app, session_id, message_id, run, {
         "type": EVENT_TOOL_CALL,

@@ -183,7 +183,7 @@ def run_chat(h: Harness, task: dict, live: bool) -> dict:
     status = _status(events)
     outgoing = h.provider.requests[sent:]
     artifacts = [event for event in events if event.get("type") == "artifact"]
-    detail = {"status": status, "events": len(events), "artifacts": len(artifacts)}
+    detail = {"status": status, "events": len(events), "artifacts": len(artifacts), "telemetry": _trace_summary(h, events)}
     if "status" in want:
         expect(status == want["status"], f"状态是 {status}，应为 {want['status']}")
     if "text_equals" in want:
@@ -207,6 +207,20 @@ def run_chat(h: Harness, task: dict, live: bool) -> dict:
     return detail
 
 
+def _trace_summary(h: Harness, events: list[dict]) -> dict | None:
+    run_id = next((event.get("run_id") for event in events if event.get("run_id")), "")
+    if not run_id:
+        return None
+    status, raw = check.request("GET", h.base + f"/api/telemetry/{run_id}")
+    if status != 200:
+        return None
+    summary = json.loads(raw).get("summary") or {}
+    return {
+        kind: {"count": item.get("count"), "avg_ms": item.get("avg_ms"), "tokens": item.get("tokens")}
+        for kind, item in (summary.get("kinds") or {}).items()
+    }
+
+
 def run_local_content(h: Harness, task: dict, live: bool) -> dict:
     """本地内容（画面描述、要记下的文字）只在本机；任何一次供应商请求里都不能出现。"""
     marker = task.get("marker") or "LOCAL-ONLY-7f3a"
@@ -227,6 +241,10 @@ def run_local_content(h: Harness, task: dict, live: bool) -> dict:
         expect(outgoing, f"{case['fake_mode']}：没有供应商请求，无从判断")
         blob = json.dumps([item["body"] for item in outgoing], ensure_ascii=False)
         expect(marker not in blob, f"{case['fake_mode']}：本地内容进入了供应商请求")
+        telemetry_path = os.path.join(h.directory, "telemetry.jsonl")
+        if os.path.isfile(telemetry_path):
+            with open(telemetry_path, encoding="utf-8") as handle:
+                expect(marker not in handle.read(), f"{case['fake_mode']}：本地内容写进了遥测")
         checked.append(case["fake_mode"])
         check.release(h.provider)
     return {"cases": checked}

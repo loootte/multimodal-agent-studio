@@ -189,6 +189,19 @@ Agent 运行时
 
 本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
 
+### 遥测
+
+`services/telemetry.py`。一次运行一个 trace_id（就是网页运行的 `run_id`），绑定在运行线程上，
+依次记下 `web.request` → `provider`（模型、耗时、供应商返回的 `usage`，没有时按字数估算 `tokens_estimated`）
+→ `tool`（名称、耗时、成败）→ `comfyui.submit` / `comfyui.run`（带 ComfyUI `prompt_id`）→ `run`（最终状态、总耗时）。
+失败带 `error_code` 和归类 `failure_class`（cancelled、timeout、budget、config、auth、policy、validation、provider、backend、tool）。
+只记元数据，不记提示词、回答和密钥。
+
+写到 `<data_dir>/telemetry.jsonl`。接口：
+
+- `GET /api/telemetry?trace_id=&limit=`：最近的记录和按种类的汇总（次数、失败率、平均/最大耗时、token）；
+- `GET /api/telemetry/{trace_id}`：一次运行的整条链路。
+
 ### 检查
 
 | 文件 | 做什么 |
