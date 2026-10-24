@@ -47,8 +47,14 @@ def run(
     base_url=None,
     run_id: str | None = None,
     validate=None,
+    choose=None,
 ):
-    """产出统一事件。模型文本里说已经执行，不算执行。"""
+    """产出统一事件。模型文本里说已经执行，不算执行。
+
+    choose(messages) 可选：每一步之前返回 {"tool_choice": ..., "note": ...}，用来在运行时层面
+    强制这一步调用某个工具（例如多智能体模式下编排者必须先 delegate）。供应商不接受强制时，
+    这一步自动退回 auto 重试一次，之后不再强制。
+    """
     req = normalize(request)
     run_id = run_id or new_run_id()
     clock = Clock(budget if isinstance(budget, Budget) else Budget())
@@ -74,6 +80,7 @@ def run(
     except GatewayError as exc:
         yield _failed(run_id, exc.code, exc.message)
         return
+    forcing = callable(choose)
     while True:
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
@@ -91,7 +98,14 @@ def run(
             "temperature": req.get("temperature"),
             "max_output": req.get("max_output"),
             "stop": req.get("stop"),
+            "tool_choice": req.get("tool_choice"),
         }
+        policy = choose(messages) if forcing else None
+        if isinstance(policy, dict):
+            if policy.get("tool_choice") is not None:
+                step["tool_choice"] = policy["tool_choice"]
+            if policy.get("note"):
+                step["system"] = ((step.get("system") or "") + " " + policy["note"]).strip()
         modalities = _modalities(messages)
         started = time.monotonic()
         tool_call = None
@@ -123,6 +137,13 @@ def run(
                 elif kind == EVENT_MESSAGE_COMPLETED:
                     continue
         except GatewayError as exc:
+            forced = isinstance(policy, dict) and policy.get("tool_choice") not in (None, "auto")
+            if forced and not text_parts and tool_call is None and exc.code not in ("cancelled", "timeout"):
+                # 有的供应商（或推理模型）不接受强制 tool_choice：这一步退回 auto 重来，之后只靠调用方的续写提醒。
+                forcing = False
+                clock.steps_used -= 1
+                telemetry.record("policy.fallback", reason="tool_choice", code=exc.code)
+                continue
             yield _failed(run_id, exc.code, exc.message)
             return
         elapsed = int((time.monotonic() - started) * 1000)

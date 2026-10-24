@@ -11,7 +11,7 @@ FILE = "file"
 INPUT_MODALITIES = (TEXT, IMAGE, AUDIO, VIDEO, FILE)
 OUTPUT_MODALITIES = (TEXT,)
 ROLES = ("system", "user", "assistant")
-KNOWN_FIELDS = ("model", "system", "messages", "tools", "temperature", "max_output", "stop", "ignored_params")
+KNOWN_FIELDS = ("model", "system", "messages", "tools", "temperature", "max_output", "stop", "tool_choice", "ignored_params")
 
 
 def capabilities(
@@ -64,8 +64,18 @@ def normalize(raw: dict) -> dict:
         "temperature": raw.get("temperature"),
         "max_output": raw.get("max_output"),
         "stop": raw.get("stop"),
+        "tool_choice": clean_tool_choice(raw.get("tool_choice")),
         "ignored_params": ignored,
     }
+
+
+def clean_tool_choice(value):
+    """只认 auto / required / none，或者点名一个工具 {"name": "..."}；其余当没给。"""
+    if value in ("auto", "required", "none"):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("name"), str) and value["name"].strip():
+        return {"name": value["name"].strip()}
+    return None
 
 
 def message_parts(message: dict) -> list[dict]:
