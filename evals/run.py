@@ -386,6 +386,21 @@ def run_multi_agent_text(h: Harness, task: dict, live: bool) -> dict:
     return {"chain": ["planner", "writer", "reviewer"]}
 
 
+def run_multi_agent_forced(h: Harness, task: dict, live: bool) -> dict:
+    """#38：想一步答完的编排者被运行时强制委托；寒暄直接回答；单 Agent 仍是 tool_choice=auto；
+    供应商拒绝强制 tool_choice 时退回 auto 重试。"""
+    from services.gateway.openai_chat import _tool_choice
+    try:
+        check._forced_delegation(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "强制委托检查失败") from exc
+    tools = [{"name": "delegate"}]
+    expect(_tool_choice({"name": "delegate"}, tools) == {"type": "function", "function": {"name": "delegate"}}, "点名强制没映射")
+    expect(_tool_choice({"name": "nope"}, tools) == "auto", "点名不存在的工具应退回 auto")
+    expect(_tool_choice(None, tools) == "auto", "默认应是 auto")
+    return {"chain": ["planner", "writer", "reviewer"], "greeting": "direct"}
+
+
 def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     """子 Agent 越权调用（accept_local_content、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
     import threading
@@ -432,6 +447,7 @@ RUNNERS = {
     "multi_agent_web": run_multi_agent_web,
     "multi_agent_guard": run_multi_agent_guard,
     "multi_agent_text": run_multi_agent_text,
+    "multi_agent_forced": run_multi_agent_forced,
 }
 
 

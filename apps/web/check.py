@@ -316,6 +316,29 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._piece(_delta(content="不该被调用"))
             self._done()
             return
+        if mode == "lazy":
+            # 想一步答完的编排者：只有被 tool_choice 点名强制时才委托，委托谁听运行时的提示。
+            body = self.server.requests[-1]["body"]
+            messages = body.get("messages") or [{}]
+            system = _user_text(messages[0].get("content")) if messages[0].get("role") == "system" else ""
+            if "你是编排者" in system:
+                forced = (body.get("tool_choice") or {}) if isinstance(body.get("tool_choice"), dict) else {}
+                hint = re.search(r"下一步委托 (\w+)", system)
+                if forced.get("function", {}).get("name") == "delegate" and hint:
+                    self._emit_tool("delegate", {"tasks": [{"agent": hint.group(1), "task": "城市骑行：" + hint.group(1)}]})
+                    return
+                self._piece(_delta(content="我直接回答：骑行很好。" if "你好" not in self._last_user() else "你好！"))
+                self._done()
+                return
+            reply = {"你是规划 Agent": "- 提纲一", "你是写作 Agent": "## 草稿", "你是检查 Agent": "通过"}
+            for marker, text in reply.items():
+                if marker in system:
+                    self._piece(_delta(content=text))
+                    self._done()
+                    return
+            self._piece(_delta(content="不该被调用"))
+            self._done()
+            return
         if mode == "demo":
             user = self._last_user()
             if "工具结果" in user or "studio-demo" in user:
@@ -1563,6 +1586,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _skill_turn(base, provider)
     _multi_agent_turn(base, provider)
     _multi_text_turn(base, provider)
+    _forced_delegation(base, provider)
     _markdown_checks(base)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
@@ -1702,6 +1726,31 @@ def _multi_text_turn(base: str, provider) -> None:
         fail("编排者的系统指令里没有文字任务的委托规则")
     if not any(n.get("agent") == "writer" and n.get("summary") for n in nodes):
         fail("Agent 树的节点没有带子 Agent 摘要")
+
+
+def _forced_delegation(base: str, provider) -> None:
+    """#38：编排者想一步答完也会被运行时强制委托（planner → writer → reviewer）；寒暄照常直接回答；单 Agent 仍是 auto。"""
+    session_id = _fresh_session(base)
+    provider.mode = "lazy"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "讨论一下城市骑行对通勤的影响，给出你的看法", timeout=30, mode="multi")
+    nodes = [e.get("agent") for e in events if e.get("type") == "agent" and e.get("status") != "running"]
+    if nodes != ["planner", "writer", "reviewer"]:
+        fail(f"编排者一步答完没有被强制委托：{nodes}")
+    first = provider.requests[sent]["body"]
+    if first.get("tool_choice") != {"type": "function", "function": {"name": "delegate"}}:
+        fail(f"多智能体文字任务第一步没有强制 delegate：{first.get('tool_choice')}")
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "你好", timeout=30, mode="multi")
+    if _assistant_text(events) != "你好！" or any(e.get("type") == "agent" for e in events):
+        fail(f"寒暄不该委托：{_assistant_text(events)}")
+    if any(r["body"].get("tool_choice") != "auto" for r in provider.requests[sent:]):
+        fail("寒暄回合被强制了 tool_choice")
+    sent = len(provider.requests)
+    _speak(base, _fresh_session(base), "讨论一下城市骑行", timeout=30)
+    single = provider.requests[sent:]
+    if not single or any(r["body"].get("tool_choice") != "auto" for r in single):
+        fail("单 Agent 模式的 tool_choice 变了")
 
 
 def _unsafe_inner_html(script: str) -> bool:

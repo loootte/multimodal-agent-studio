@@ -69,3 +69,13 @@ Agent 写成 `mas.agent/1` 清单（`agent.json`），内置的放 `agents/built
 - planner 对文字任务输出提纲和分节；reviewer 能审 task 里给的草稿。
 - 编排者指令改为：除寒暄、一句话事实问答、对上一条回答的简短追问外，都要委托；文字任务按 planner → writer → reviewer → 编排者汇总。writer 写出的草稿是模型生成的内容，可以放进下一个 task；本地正文仍然只传句柄。
 - 单 Agent 路径不变。
+
+## 补充（#38）：委托在运行时强制执行
+
+实测（DeepSeek，`tool_choice: "auto"`）：系统指令和 `delegate` 工具都发出去了，但讨论、咨询类的长问题模型常常一步答完，研究类任务也会跳过 reviewer。只靠指令措辞不可靠，所以改成运行时规则：
+
+- 网关请求契约加 `tool_choice`（`auto` / `required` / `none` / `{"name": 工具名}`）；点名的工具不在本次 tools 里时退回 `auto`。单 Agent 路径永远发 `auto`。
+- `runtime.run` 新增 `choose(messages)` 钩子：每一步之前可以给出 `tool_choice` 和追加到系统指令末尾的 `note`。
+- 多智能体回合先用启发式分类（`chat_run.turn_kind`）：`chat`（寒暄、致谢，或 15 字以内且不含任务词的短问答/追问）不强制；`image` 在第一次委托前强制 `delegate`；`text` / `research` 在 planner、writer、reviewer 都委托过之前，每一步强制 `delegate`，并在 note 里点明下一个该委托谁（最多强制 6 步）。
+- 供应商拒绝强制 `tool_choice`（该步出错且没有任何输出）时，这一步退回 `auto` 重试且不计步数，记 `policy.fallback` 遥测；之后由续写提醒兜底：编排者想直接收尾而流程没走完时，提醒一次。
+- 每个多智能体回合记 `orchestrator.policy` 遥测（`turn_kind`）。
