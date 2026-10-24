@@ -168,6 +168,7 @@ Agent 运行时
 | `poc/comfyui/workflows/video_api.json`、`video.fields.json` | 文生视频模板。网页还没接 |
 | `poc/comfyui/workflows/video_i2v_api.json`、`video_i2v.fields.json` | 图生视频模板。网页还没接 |
 | `poc/comfyui/config.example.json` | 配置样例。本机的 `config.json` 不进 Git，也可用 `COMFY_*` 环境变量盖掉 |
+| `apps/web/tool_config.py` | 工具配置（issue #28 第 1 部分）。每个工具声明配置项（字段名、类型 string/int/enum/path/secret、默认值、必填、保密、说明）。用户改过的值存到数据目录的 `tools.json`（和 `provider.json` 同目录），保密字段只回掩码提示。优先级：`COMFY_*` 环境变量 > `tools.json` > `config.json`/`config.example.json` 迁来的默认值。`comfy_poc.load_config` 每次调用 `CONFIG_OVERLAY` 钩子现读，改完下一次运行生效。接口 `GET /api/tools`、`GET/PUT /api/tools/{name}/config`、`POST /api/tools/{name}/test`（`/system_stats` 或 `/queue` 判断能否连上，`/object_info` 核对所选工作流的节点） |
 | `poc/comfyui/chat.py` | 这张 POC 脚本自己的助手消息：`tool_call`、`progress`、`artifact` 或 `error`。网页的一轮回答不走这个文件 |
 | `poc/comfyui/README.md` | 命令、字段对照和各条 issue 的边界 |
 
@@ -187,6 +188,19 @@ Agent 运行时
 | `poc/comfyui/artifacts/` | 不进 Git。下面按会话分 `files/` 和 `records/` |
 
 本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
+
+### 遥测
+
+`services/telemetry.py`。一次运行一个 trace_id（就是网页运行的 `run_id`），绑定在运行线程上，
+依次记下 `web.request` → `provider`（模型、耗时、供应商返回的 `usage`，没有时按字数估算 `tokens_estimated`）
+→ `tool`（名称、耗时、成败）→ `comfyui.submit` / `comfyui.run`（带 ComfyUI `prompt_id`）→ `run`（最终状态、总耗时）。
+失败带 `error_code` 和归类 `failure_class`（cancelled、timeout、budget、config、auth、policy、validation、provider、backend、tool）。
+只记元数据，不记提示词、回答和密钥。
+
+写到 `<data_dir>/telemetry.jsonl`。接口：
+
+- `GET /api/telemetry?trace_id=&limit=`：最近的记录和按种类的汇总（次数、失败率、平均/最大耗时、token）；
+- `GET /api/telemetry/{trace_id}`：一次运行的整条链路。
 
 ### 检查
 

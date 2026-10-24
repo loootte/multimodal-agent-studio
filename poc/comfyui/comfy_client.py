@@ -18,6 +18,19 @@ import urllib.parse
 import urllib.request
 import uuid
 
+try:  # 网页和运行时里有统一遥测；单独跑 PoC 时没有也不影响
+    from services import telemetry as _telemetry
+except ImportError:  # pragma: no cover
+    _telemetry = None
+
+
+def _note(kind: str, **fields) -> None:
+    if _telemetry is not None:
+        try:
+            _telemetry.record(kind, **fields)
+        except Exception:
+            pass
+
 
 DEFAULT_BASE = "http://127.0.0.1:8188"
 
@@ -247,9 +260,25 @@ def job_state(entry: dict | None) -> str:
     return "running"
 
 
+# 网页工具配置可以装一个取令牌的函数；没装时读环境变量 COMFY_AUTH_TOKEN。
+TOKEN_SOURCE = None
+
+
+def current_token() -> str:
+    if TOKEN_SOURCE is not None:
+        try:
+            value = TOKEN_SOURCE()
+        except Exception:
+            value = None
+        if value:
+            return str(value)
+    return os.environ.get("COMFY_AUTH_TOKEN", "")
+
+
 class ComfyClient:
-    def __init__(self, base: str | None = None, client_id: str | None = None, urlopen=None, connect=None):
+    def __init__(self, base: str | None = None, client_id: str | None = None, urlopen=None, connect=None, token: str | None = None):
         self.base = (base or DEFAULT_BASE).rstrip("/")
+        self.token = current_token() if token is None else token
         self.client_id = client_id or str(uuid.uuid4())
         self._urlopen = urlopen or urllib.request.urlopen
         self._connect = connect
@@ -277,8 +306,10 @@ class ComfyClient:
         prompt_id = result.get("prompt_id")
         if node_errors or not prompt_id:
             text = original_error_text(result) or "ComfyUI 拒绝了这张工作流。"
+            _note("comfyui.submit", ok=False, error_code="comfy_rejected", base=self.base)
             raise ComfyFailure(text, result, prompt_id if isinstance(prompt_id, str) else None)
         self._track(str(prompt_id))
+        _note("comfyui.submit", ok=True, prompt_id=str(prompt_id), base=self.base)
         return str(prompt_id)
 
     def events(self, prompt_id: str) -> list[dict]:
@@ -375,7 +406,7 @@ class ComfyClient:
         relative = os.path.join(subfolder, filename) if subfolder else filename
         destination = os.path.join(output_dir, relative)
         os.makedirs(os.path.dirname(destination) or output_dir, exist_ok=True)
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, headers=self._auth(), method="GET")
         try:
             with self._urlopen(req, timeout=120) as response:
                 data = response.read()
@@ -448,7 +479,7 @@ class ComfyClient:
         req = urllib.request.Request(
             self.base + "/upload/image",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **self._auth()},
             method="POST",
         )
         try:
@@ -503,6 +534,9 @@ class ComfyClient:
             self._thread = threading.Thread(target=self._listen, name="comfy-ws", daemon=True)
             self._thread.start()
 
+    def _auth(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
     def _open_ws(self):
         if self._connect is not None:
             ws = self._connect(ws_url(self.base, self.client_id), self.client_id)
@@ -512,7 +546,7 @@ class ComfyClient:
             ws = create_connection(
                 ws_url(self.base, self.client_id),
                 timeout=10,
-                header=[f"Origin: {self.base}"],
+                header=[f"Origin: {self.base}"] + [f"{k}: {v}" for k, v in self._auth().items()],
             )
         if hasattr(ws, "settimeout"):
             ws.settimeout(1)
@@ -606,7 +640,7 @@ class ComfyClient:
 
     def _request_json(self, url: str, payload: dict | None = None, timeout: int = 120):
         data = None
-        headers = {}
+        headers = self._auth()
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -652,18 +686,31 @@ def run_isolated(lane: str, client: ComfyClient, workflow: dict, timeout: int, o
         raise ComfyFailure("队列只分图片和视频。")
     LANES.acquire(lane)
     prompt_id = None
+    started = time.monotonic()
+    outcome = {"ok": False, "error_code": "comfy_failed"}
     try:
         prompt_id = client.submit(workflow)
         LANES.remember(lane, prompt_id)
         if on_submitted is not None:
             on_submitted(prompt_id)
         try:
-            return client.wait(prompt_id, timeout, on_event=on_event)
+            result = client.wait(prompt_id, timeout, on_event=on_event)
+            outcome = {"ok": True}
+            return result
         except ComfyFailure as exc:
+            if "等待超时" in (exc.message or ""):
+                outcome = {"ok": False, "error_code": "timeout"}
             if lane == "video" and prompt_id and "等待超时" in (exc.message or ""):
                 client.cancel(prompt_id, interrupt=client.running(prompt_id))
             raise
     finally:
+        _note(
+            "comfyui.run",
+            lane=lane,
+            prompt_id=prompt_id,
+            ms=int((time.monotonic() - started) * 1000),
+            **outcome,
+        )
         if prompt_id is not None:
             LANES.forget(lane, prompt_id)
         LANES.release(lane)

@@ -20,6 +20,7 @@ from packages.contracts.request import message_parts, normalize
 from services.gateway import GatewayError, describe, stream as gateway_stream
 from services.gateway.openai_chat import reject_unsupported
 from services.runtime.budget import Budget, Clock
+from services import telemetry
 from services.runtime import trace
 from services.runtime.tools import execute_tool, openai_tools, tool_mutates, validate_arguments
 
@@ -57,6 +58,8 @@ def run(
         req["tools"] = openai_tools()
     messages = [dict(item) for item in req.get("messages") or []]
     trace.start(run_id)
+    if telemetry.owner() != "web":
+        telemetry.bind(run_id, owner="runtime")
     yield {
         "type": EVENT_RUN_STARTED,
         "run_id": run_id,
@@ -185,6 +188,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
             return True
+        telemetry.record("tool.confirm", name=name, allowed=allowed)
         if not allowed:
             result = {
                 "ok": False,
@@ -203,6 +207,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
     problem = validate_arguments(name, arguments)
     if problem:
         result = problem
+        telemetry.record("tool", name=name, ms=0, ok=False, error_code=_code_of(problem), executed=False)
     else:
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
@@ -216,12 +221,26 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
             "ms": int((time.monotonic() - started) * 1000),
             "ok": bool(result.get("ok")),
         })
+        telemetry.record(
+            "tool",
+            name=name,
+            ms=int((time.monotonic() - started) * 1000),
+            ok=bool(result.get("ok")),
+            error_code=None if result.get("ok") else _code_of(result),
+        )
     messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
     messages.append({
         "role": "user",
         "parts": [{"type": "text", "text": "工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)}],
     })
     return False
+
+
+def _code_of(result) -> str:
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict) and error.get("code"):
+        return str(error["code"])
+    return "tool_failed"
 
 
 def _failed(run_id: str, code: str, message: str) -> dict:

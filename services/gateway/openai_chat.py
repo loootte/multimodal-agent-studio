@@ -448,6 +448,10 @@ def _content(payload: str, api_key: str, calls: _ToolCalls):
     if error:
         message = _error_message(error)
         raise GatewayError("provider_error", _redact(message or HUMAN["provider_error"], api_key))
+    if isinstance(event.get("usage"), dict):
+        from services import telemetry
+
+        telemetry.note_usage(event["usage"])
     choices = event.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         return

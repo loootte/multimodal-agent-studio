@@ -25,7 +25,9 @@ if WEB_DIR not in sys.path:
 import chat_run
 import image_run
 import store
+import tool_config
 from packages.artifacts import ArtifactStore
+from services import telemetry
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
@@ -49,8 +51,11 @@ class App:
     def __init__(self, data_dir: str, timeout_sec: float = 120.0):
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
+        telemetry.configure(os.path.join(data_dir, "telemetry.jsonl"))
         self.timeout_sec = timeout_sec
         self.provider = store.ProviderStore(os.path.join(data_dir, "provider.json"))
+        self.tools = tool_config.ToolConfigStore(os.path.join(data_dir, "tools.json"))
+        tool_config.install(self.tools)
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
         self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
         self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts)
@@ -132,6 +137,19 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 return
             _send_file(handler, os.path.join(WEB_DIR, "static", name), _STATIC[name])
             return
+        if method == "GET" and (path == "/api/telemetry" or path.startswith("/api/telemetry/")):
+            query = urllib.parse.parse_qs(parsed.query)
+            trace_id = path[len("/api/telemetry/"):] if path.startswith("/api/telemetry/") else query.get("trace_id", [""])[0]
+            if trace_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", trace_id):
+                _send_json(handler, 400, {"code": "invalid_trace_id", "message": "trace_id 不合法。"})
+                return
+            try:
+                limit = max(1, min(5000, int(query.get("limit", ["500"])[0])))
+            except ValueError:
+                limit = 500
+            events = telemetry.read(trace_id or None, limit)
+            _send_json(handler, 200, {"trace_id": trace_id or None, "events": events, "summary": telemetry.summary(events)})
+            return
         if path == "/api/identity" and method == "GET":
             _send_json(handler, 200, app.identity.current())
             return
@@ -150,6 +168,37 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             except ValueError as exc:
                 raise chat_run.RequestError(400, "invalid_provider", str(exc)) from exc
             _send_json(handler, 200, view)
+            return
+        if path == "/api/tools" and method == "GET":
+            _send_json(handler, 200, app.tools.listing())
+            return
+        if path.startswith("/api/tools/"):
+            parts = path[len("/api/tools/"):].split("/")
+            name = urllib.parse.unquote(parts[0]) if parts else ""
+            if name not in tool_config.declarations():
+                _send_json(handler, 404, {"code": "not_found", "message": "没有这个工具。"})
+                return
+            if parts[1:] == ["config"] and method == "GET":
+                _send_json(handler, 200, app.tools.public(name))
+                return
+            if parts[1:] == ["config"] and method == "PUT":
+                body = _read_json(handler)
+                try:
+                    view = app.tools.update(
+                        name,
+                        body.get("values") or {},
+                        reset=bool(body.get("reset")),
+                        clear=body.get("clear") if isinstance(body.get("clear"), list) else None,
+                    )
+                except tool_config.ConfigError as exc:
+                    _send_json(handler, 400, {"code": "invalid_tool_config", "message": str(exc), "errors": exc.errors})
+                    return
+                _send_json(handler, 200, view)
+                return
+            if parts[1:] == ["test"] and method == "POST":
+                _send_json(handler, 200, tool_config.test_connection(app.tools, name))
+                return
+            _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
             return
         if path == "/api/sessions" and method == "GET":
             user = app.identity.current()

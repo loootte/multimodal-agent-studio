@@ -24,6 +24,7 @@
           <p id="modality-line">接受文字</p>
         </div>
         <button type="button" class="ghost" id="toggle-runtime">过程</button>
+        <button type="button" class="ghost" id="open-tools">工具</button>
         <button type="button" id="open-settings">设置</button>
       </header>
       <div id="transcript" role="log"></div>
@@ -74,6 +75,24 @@
         <button type="submit">保存</button>
         <button type="button" id="clear-key">清除本机密钥</button>
         <button type="button" id="close-settings">关闭</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="tool-settings">
+    <form id="tool-form" method="post" action="#">
+      <h2>工具配置</h2>
+      <label>
+        工具
+        <select id="tool-select"></select>
+      </label>
+      <p id="tool-description" class="hint"></p>
+      <div id="tool-fields" class="tool-fields"></div>
+      <p id="tool-note" class="note" hidden></p>
+      <div class="dialog-actions">
+        <button type="submit">保存</button>
+        <button type="button" id="tool-test">测试连接</button>
+        <button type="button" id="tool-reset">恢复默认值</button>
+        <button type="button" id="close-tools">关闭</button>
       </div>
     </form>
   </dialog>

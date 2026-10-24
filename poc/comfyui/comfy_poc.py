@@ -19,6 +19,8 @@ from comfy_client import ComfyFailure
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASPECTS = ("1:1", "16:9", "9:16")
+# 网页的工具配置（apps/web/tool_config.py）装上的覆盖钩子。每次 load_config 都调用，改完下一次运行就生效。
+CONFIG_OVERLAY = None
 _talk = True
 
 
@@ -68,6 +70,8 @@ def load_config() -> dict:
     path = os.environ.get("COMFY_CONFIG")
     if not path:
         path = os.path.join(SCRIPT_DIR, "config.json")
+    if not os.path.isfile(path) and CONFIG_OVERLAY is not None and CONFIG_OVERLAY():
+        path = os.path.join(SCRIPT_DIR, "config.example.json")
     if not os.path.isfile(path):
         fail(
             "找不到配置文件。把 config.example.json 复制为 config.json，"
@@ -76,6 +80,13 @@ def load_config() -> dict:
     config = load_json(path)
     base = os.path.dirname(os.path.abspath(path))
     config["_base"] = base
+    overlay = CONFIG_OVERLAY() if CONFIG_OVERLAY is not None else None
+    if isinstance(overlay, dict):
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                config[key] = {**config[key], **value}
+            else:
+                config[key] = value
     if os.environ.get("COMFY_URL"):
         config["comfy_url"] = os.environ["COMFY_URL"]
     if os.environ.get("COMFY_OUTPUT_DIR"):
@@ -96,6 +107,12 @@ def load_config() -> dict:
         fail("配置里没有 output_dir，也没有环境变量 COMFY_OUTPUT_DIR。")
     config["output_dir"] = resolve_path(base, output_dir)
     return config
+
+
+def run_defaults(config: dict) -> dict:
+    """网页工具配置里的默认值：画幅、步数、种子策略。没有配置时为空。"""
+    defaults = config.get("defaults")
+    return dict(defaults) if isinstance(defaults, dict) else {}
 
 
 def preview_enabled(config: dict, kind: str) -> bool:

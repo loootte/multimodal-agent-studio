@@ -60,19 +60,25 @@ def generate(arguments: dict) -> dict:
     aspect, problem = common.parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
     if problem:
         return problem
+    config = comfy_poc.load_config()
+    defaults = comfy_poc.run_defaults(config)
+    if arguments.get("seed") is None and defaults.get("seed_policy") == "fixed":
+        arguments = {**arguments, "seed": int(defaults.get("seed") or 0)}
     seed, problem = common.parse_seed(tool, arguments)
     if problem:
         return problem
     style, problem = common.parse_style(tool, arguments, styles)
     if problem:
         return problem
-    config = comfy_poc.load_config()
     template, fields, timeout = template_fill.load_job(config, "image")
     if aspect not in (fields.get("aspects") or {}):
         return common.tool_error(tool, "invalid_aspect_ratio", "这张文生图模板没有这个画幅。", "aspect_ratio")
     negative = styles[style] if style else None
     workflow = template_fill.copy_template(template)
     template_fill.fill_common(workflow, fields, arguments["prompt"], aspect, seed, negative)
+    steps = int(defaults.get("steps") or 0)
+    if steps > 0 and "steps" in fields:
+        comfy_poc.apply_steps(workflow, fields, steps)
     problem = common.values_match(tool, workflow, fields, arguments["prompt"], aspect, seed)
     if problem:
         problem["tool"] = tool
