@@ -176,6 +176,7 @@ async function sendMessage() {
       body: JSON.stringify({
         text,
         attachments: attachments.map((item) => ({ handle: item.handle })),
+        ...(document.querySelector("#multi-agent").checked ? { mode: "multi" } : {}),
       }),
     });
     if (!response.ok || !response.body) {
@@ -245,7 +246,8 @@ function onEvent(event) {
     event.type === "progress" ||
     event.type === "artifact" ||
     event.type === "error" ||
-    event.type === "content_request"
+    event.type === "content_request" ||
+    event.type === "agent"
   ) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
     if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
@@ -292,9 +294,18 @@ function resetAssistantForReplay() {
 function rememberAgentEvent(assistant, event) {
   const events = assistant.events || (assistant.events = []);
   if (event.type === "content_request" && events.some((item) => item.type === "content_request")) return;
+  if (event.type === "agent") {
+    const node = events.find((item) => item.type === "agent" && item.run_id === event.run_id);
+    if (node) {
+      Object.assign(node, event);
+      return;
+    }
+  }
   if (event.type === "tool_call") {
     const open = [...events].reverse().find(
-      (item) => item.type === "tool_call" && item.tool === event.tool && (item.status === "running" || item.status === "waiting_confirm"),
+      (item) => item.type === "tool_call" && item.tool === event.tool
+        && (item.agent_run_id || "") === (event.agent_run_id || "")
+        && (item.status === "running" || item.status === "waiting_confirm"),
     );
     if (open) {
       Object.assign(open, {
@@ -414,6 +425,8 @@ function renderRuntime() {
     return;
   }
   status.textContent = runtimeStatus(steps, state.sending);
+  const tree = agentTree(assistant);
+  if (tree) log.append(tree);
   for (const step of steps) {
     if (step.kind === "status") continue;
     const item = document.createElement("li");
@@ -426,6 +439,47 @@ function renderRuntime() {
     log.append(item);
   }
   log.scrollTop = log.scrollHeight;
+}
+
+// 多智能体：编排者 → 子 Agent → 工具调用，按 parent_run_id 挂成一棵树。
+function agentTree(assistant) {
+  const events = (assistant && assistant.events) || [];
+  const nodes = events.filter((item) => item.type === "agent");
+  if (!nodes.length) return null;
+  const root = document.createElement("li");
+  root.className = "agent-tree";
+  const head = document.createElement("span");
+  head.className = "kind";
+  head.textContent = "编排者";
+  root.append(head);
+  const byParent = {};
+  for (const node of nodes) (byParent[node.parent_run_id] = byParent[node.parent_run_id] || []).push(node);
+  const known = new Set(nodes.map((node) => node.run_id));
+  const tops = nodes.filter((node) => !known.has(node.parent_run_id));
+  const build = (list) => {
+    const ul = document.createElement("ul");
+    for (const node of list) {
+      const li = document.createElement("li");
+      const label = { running: "进行中", completed: "完成", failed: "失败", cancelled: "已停止" }[node.status] || node.status || "";
+      const ms = node.ms != null ? ` · ${node.ms}ms` : "";
+      li.textContent = `${node.agent}（${node.role || ""}）· ${label}${ms}`;
+      const calls = events.filter((item) => item.type === "tool_call" && item.agent_run_id === node.run_id);
+      if (calls.length) {
+        const sub = document.createElement("ul");
+        for (const call of calls) {
+          const row = document.createElement("li");
+          row.textContent = `${call.tool} · ${toolLine(call)}`;
+          sub.append(row);
+        }
+        li.append(sub);
+      }
+      if (byParent[node.run_id]) li.append(build(byParent[node.run_id]));
+      ul.append(li);
+    }
+    return ul;
+  };
+  root.append(build(tops));
+  return root;
 }
 
 function runtimeKind(step) {
@@ -762,7 +816,7 @@ function toolTimeline(message, calls) {
     const item = document.createElement("li");
     const name = document.createElement("div");
     name.className = "tool-name";
-    name.textContent = call.tool || "工具";
+    name.textContent = (call.agent ? `${call.agent} · ` : "") + (call.tool || "工具");
     const status = document.createElement("div");
     status.className = "tool-status";
     status.textContent = toolLine(call);
@@ -1159,6 +1213,12 @@ document.querySelector("#tool-select").addEventListener("change", (event) => loa
 document.querySelector("#tool-export").addEventListener("click", exportToolPack);
 document.querySelector("#tool-uninstall").addEventListener("click", uninstallToolPack);
 document.querySelector("#toolpack-install").addEventListener("click", installToolPack);
+document.querySelector("#agent-install").addEventListener("click", installAgent);
+(() => {
+  const box = document.querySelector("#multi-agent");
+  box.checked = localStorage.getItem("mas.multiAgent") === "1";
+  box.addEventListener("change", () => localStorage.setItem("mas.multiAgent", box.checked ? "1" : "0"));
+})();
 
 const SOURCE_LABEL = { env: "来自环境变量（优先，页面改不了）", saved: "已保存", default: "默认值" };
 
@@ -1210,10 +1270,64 @@ async function refreshToolList(selected) {
   }
 }
 
+async function refreshAgents() {
+  const list = document.querySelector("#agent-list");
+  const data = await api("GET", "/api/agents");
+  list.replaceChildren();
+  for (const agent of data.agents || []) {
+    const item = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = `${agent.name} ${agent.version} · ${agent.role} · ${agent.builtin ? "内置" : "已安装"} · 工具：${(agent.tools || []).join("、") || "无"}${agent.model ? ` · 模型 ${agent.model}` : ""}`;
+    item.append(text);
+    const link = document.createElement("a");
+    link.href = `/api/agents/${encodeURIComponent(agent.name)}/export`;
+    link.textContent = "导出";
+    item.append(" ", link);
+    if (!agent.builtin) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "卸载";
+      remove.addEventListener("click", async () => {
+        if (!window.confirm(`卸载 Agent ${agent.name}？`)) return;
+        try {
+          await api("POST", `/api/agents/${encodeURIComponent(agent.name)}/uninstall`);
+          await refreshAgents();
+        } catch (error) {
+          toolNote(error.message || "卸载失败。");
+        }
+      });
+      item.append(" ", remove);
+    }
+    list.append(item);
+  }
+}
+
+async function installAgent() {
+  const source = document.querySelector("#agent-source").value.trim();
+  if (!source) {
+    toolNote("先填 Agent 目录或 .zip 路径。");
+    return;
+  }
+  try {
+    const info = await api("POST", "/api/agents/inspect", { source });
+    if ((info.problems || []).length) {
+      toolNote(`Agent 不合格：${info.problems.join("；")}`);
+      return;
+    }
+    if (!window.confirm(`安装 Agent ${info.name} ${info.version}？\n${info.description}\n角色：${info.role}\n工具：${(info.tools || []).join("、") || "无"}`)) return;
+    await api("POST", "/api/agents/install", { source });
+    await refreshAgents();
+    toolNote(`已安装 Agent ${info.name}。`);
+  } catch (error) {
+    toolNote(error.message || "安装失败。");
+  }
+}
+
 async function openToolSettings() {
   toolNote("");
   try {
     await refreshToolList(state.toolView && state.toolView.name);
+    await refreshAgents().catch(() => {});
   } catch (error) {
     toolNote(error.message || "读不到工具配置。");
   }

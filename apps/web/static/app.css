@@ -488,3 +488,8 @@ dialog select { font: inherit; padding: 0.35rem; }
 
 .tool-meta p { margin: 0.2rem 0; }
 .tool-meta button { margin-left: 0.4rem; }
+
+.multi-toggle { display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; white-space: nowrap; }
+.agent-tree ul { margin: 0.25rem 0 0.25rem 1rem; padding: 0; list-style: disc; }
+.agent-list { padding-left: 1rem; font-size: 0.85rem; }
+.agent-list li { margin: 0.25rem 0; }

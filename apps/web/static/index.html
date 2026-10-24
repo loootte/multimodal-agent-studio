@@ -37,6 +37,9 @@
             <input id="file" type="file" accept="image/*,audio/*,video/*,*/*">
           </label>
           <textarea id="input" rows="2" placeholder="输入文字，或附上一张图片。要留下本机内容时直接说，文字或文件在对话框里提交。" aria-label="消息"></textarea>
+          <label class="multi-toggle" title="勾上后这一轮交给编排者，由它委托规划 / 出图 / 检查子 Agent">
+            <input type="checkbox" id="multi-agent"> 多智能体
+          </label>
           <button type="submit" id="send">发送</button>
           <button type="button" id="stop" disabled>停止</button>
         </div>
@@ -107,6 +110,18 @@
           <button type="button" id="toolpack-install">检查并安装</button>
         </div>
         <p class="hint">什么样的工具能装、怎么写：<a href="https://github.com/loootte/multimodal-agent-studio/blob/main/docs/tool-pack-guide.md" target="_blank" rel="noopener">工具包编写指南</a></p>
+      </details>
+      <details id="agent-box">
+        <summary>Agent（多智能体）</summary>
+        <ul id="agent-list" class="agent-list"></ul>
+        <label>
+          本机目录或 .zip 路径
+          <input id="agent-source" autocomplete="off" spellcheck="false" placeholder="D:\agents\count_checker">
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="agent-install">检查并安装</button>
+        </div>
+        <p class="hint">清单怎么写：<a href="https://github.com/loootte/multimodal-agent-studio/blob/main/docs/agents.md" target="_blank" rel="noopener">Agent 编写指南</a></p>
       </details>
     </form>
   </dialog>

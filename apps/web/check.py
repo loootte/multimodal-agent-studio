@@ -1641,6 +1641,13 @@ def _multi_agent_turn(base: str, provider) -> None:
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     if not any(e.get("type") == "agent" for e in stored["messages"][-1].get("events") or []):
         fail("刷新后子 Agent 树不在")
+    status, listing = request("GET", base + "/api/agents")
+    names = {item.get("name") for item in json.loads(listing).get("agents") or []}
+    if status != 200 or not {"orchestrator", "planner", "image", "reviewer"} <= names:
+        fail(f"/api/agents 没列出内置 Agent：{status} {listing[:200]}")
+    status, raw = request("POST", base + "/api/agents/planner/uninstall", {})
+    if status != 400:
+        fail("接口能卸载内置 Agent")
     provider.mode = "ok"
     sent = len(provider.requests)
     _speak(base, session_id, "普通一句")
