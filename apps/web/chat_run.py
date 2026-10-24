@@ -37,6 +37,7 @@ from packages.contracts.events import (
 )
 from services.gateway import GatewayError, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
+from services.runtime.tools import tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
@@ -523,6 +524,12 @@ def _generate_text_turn(
     def confirm(name, arguments):
         return run.wait_confirm()
 
+    def mutating(name):
+        # 收本机内容走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
+        if name == "accept_local_content":
+            return False
+        return tool_mutates(name)
+
     def execute(name, arguments):
         if name in _WEB_TOOLS and name not in take_tools:
             return _execute_web_tool(app, session_id, message_id, run, name, arguments)
@@ -557,6 +564,7 @@ def _generate_text_turn(
             take=take,
             confirm=confirm,
             execute=execute,
+            mutating=mutating,
             budget=Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),

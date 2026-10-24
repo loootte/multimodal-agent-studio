@@ -529,9 +529,11 @@ function bubble(message) {
   const item = document.createElement("article");
   item.className = `bubble ${message.role === "user" ? "user" : "assistant"}`;
   const events = message.events || [];
-  const pendingContent = events.find((entry) => entry.type === "content_request");
+  const askedAt = events.map((entry) => entry.type).lastIndexOf("content_request");
+  const pendingContent = askedAt >= 0 ? events[askedAt] : undefined;
   const artifacts = events.filter((entry) => entry.type === "artifact");
-  const collecting = !events.some((entry) => entry.type === "tool_call" || entry.type === "error");
+  // 只看收集请求之后的事件：之前的工具时间线（如 accept_local_content 本身）不该挡住输入框。
+  const collecting = askedAt >= 0 && !events.slice(askedAt + 1).some((entry) => entry.type === "tool_call" || entry.type === "error");
   const showEntry = pendingContent && !artifacts.length && message.status === "running" && collecting;
   if (message.status === "running" && !showEntry) item.classList.add("streaming");
   const who = document.createElement("span");

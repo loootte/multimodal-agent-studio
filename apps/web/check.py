@@ -2852,6 +2852,13 @@ def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path:
     if "content_request" not in kinds:
         fail(f"没有句柄时连续出图没有先询问本地提示词：{kinds}")
     asked = kinds.index("content_request")
+    if any(event.get("type") == "tool.confirm" and event.get("name") == "accept_local_content" for event in events):
+        fail("收集本地提示词还要先过工具确认，输入框会被挡住")
+    if any(event.get("status") == "waiting_confirm" for event in events[:asked]):
+        fail("收集本地提示词前留下了等待确认的工具调用")
+    script = request("GET", base + "/static/app.js")[1]
+    if 'lastIndexOf("content_request")' not in script or "events.slice(askedAt + 1)" not in script:
+        fail("页面的输入框条件还会被收集前的工具调用挡住")
     arts = [index for index, kind in enumerate(kinds) if kind == "artifact"]
     if len(arts) != 5 or arts[0] < asked:
         fail(f"收下本地提示词后没有连续五张成片：{len(arts)} {kinds}")
