@@ -199,12 +199,35 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "localplan":
+            # 文字里没有数字，张数由模型理解后用 plan_images 报出。
+            count = self._tool_result_count("generate_image")
+            if count >= 4:
+                self._piece(_delta(content="四季都好了"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 4, "items": ["春", "夏", "秋", "冬"]})
+                return
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            if count == 1 and self._last_user().startswith("工具结果 generate_image"):
+                self._piece(_delta(content="春天这张好了。"))
+                self._done()
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
         if mode == "localmulti":
             if self._tool_result_count("generate_image") >= 5:
                 self._piece(_delta(content="五张都好了"))
                 self._done()
                 return
             handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 5})
+                return
             if not handle:
                 self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
                 return
@@ -223,6 +246,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 self._done()
                 return
             handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 5})
+                return
             if not handle:
                 self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
                 return
@@ -2196,6 +2222,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _multi_image_case(base, provider, comfy.box, directory, workflow)
         _local_multi_image_case(base, provider, comfy.box, workflow)
         _local_early_stop_case(base, provider, comfy.box)
+        _local_plan_case(base, provider, comfy.box)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2923,7 +2950,7 @@ def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path:
         fail("收下本地提示词后没有等模型调度完再回答")
     if events[-1].get("type") != "message.completed":
         fail("收下本地提示词后连续出图没有正常结束")
-    if len(provider.requests) != sent + 7:
+    if len(provider.requests) != sent + 8:
         fail(f"收下本地提示词后供应商请求次数不对：{len(provider.requests) - sent}")
     for item in provider.requests[sent:]:
         if secret in _provider_blob(item):
@@ -2935,9 +2962,8 @@ def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path:
 def _local_early_stop_case(base: str, provider, box: ComfyState) -> None:
     import chat_run
 
-    for text, want in (("连续生成5张图片", 5), ("生成两张图", 2), ("画十张", 10), ("画一只猫", 0), ("来十二幅", 12)):
-        if chat_run._requested_count(text) != want:
-            fail(f"读不出要几张：{text} -> {chat_run._requested_count(text)}")
+    if hasattr(chat_run, "_requested_count"):
+        fail("张数不该由本地正则判断，应由模型调用 plan_images 报出")
     provider.mode = "localstop"
     box.set_mode("ok")
     session_id = _fresh_session(base)
@@ -2956,6 +2982,31 @@ def _local_early_stop_case(base: str, provider, box: ComfyState) -> None:
         fail("没有把进度和续写指令告诉模型")
     if secret in blob:
         fail("续写时把本地正文发给了模型")
+    if not any(event.get("type") == "tool_call" and event.get("tool") == "plan_images" for event in events):
+        fail("多张出图前没有走 plan_images")
+
+
+def _local_plan_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localplan"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "四季风景的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "来一组四季风景，先输入本地提示词", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    if "content_request" not in kinds:
+        fail(f"没有数字的多图请求没有先收本地提示词：{kinds}")
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 4 or len(box.prompts) != before + 4:
+        fail(f"模型计划四张时没有做满四张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed" or _assistant_text(events) != "四季都好了":
+        fail(f"按计划出图没有正常结束：{events[-1]} {_assistant_text(events)!r}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if "已生成 1/4 张" not in blob or 'images_total\\": 4' not in blob:
+        fail("没有按 plan_images 的张数报进度和续写")
+    if secret in blob:
+        fail("按计划出图时把本地正文发给了模型")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):

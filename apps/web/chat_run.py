@@ -55,7 +55,8 @@ SYSTEM = (
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
-    "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。用户要连续多张时，对每一张分别再调用一次。"
+    "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。"
+    "请求意味着多张图片时（不管有没有写出数字），先调用一次 plan_images 报出总张数，再对每一张分别调用一次 generate_image，直到做完计划的张数。只要一张时可以不调 plan_images。"
     "已经留下的本地提示词直接用句柄，不要再收集正文，也不要填写画面描述。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
@@ -107,6 +108,7 @@ _WEB_TOOLS = (
     "forget_local_content",
     "retrieve_local",
     "generate_image",
+    "plan_images",
     "build_skill_page",
 )
 _SKILL_MARKERS = ("等距", "等轴测", "isometric")
@@ -522,13 +524,12 @@ def _generate_text_turn(
         return True
 
     allowed: set[str] = set()
-    run._images_done = 0
-    run._images_total = _requested_count(user_text) if _wants_images("", user_text) or _requested_count(user_text) else 0
+    # 张数只认第三方模型调用 plan_images 报的计划（存在 run 上，收集本地提示词后重进循环也还在）；没有计划就不追。
     pushes = {"stalls": 0, "seen": 0, "handle": ""}
 
     def resume(text):
         # 用户要 N 张、模型做了 k 张就自己收尾时，服务端追一句续写指令；连续两次没进展就放弃，免得死循环。
-        total = int(getattr(run, "_images_total", 0) or 0)
+        total = _plan_total(run)
         done = int(getattr(run, "_images_done", 0) or 0)
         handle = pushes["handle"]
         if total <= 1 or done <= 0 or done >= total or not handle or run.cancel.is_set():
@@ -743,11 +744,16 @@ def _continue_after_content(
     print(f"content {session_id} {handle} {stored_kind} {record.get('size')}", file=sys.stderr)
     session = app.sessions.get(session_id)
     if not image and stored_kind == "text" and _wants_images(purpose, user_text):
+        ready_line = _ready_line(handle)
+        total = _plan_total(run)
+        if total:
+            ready_line += f"已有计划：共 {total} 张，还没开始。请逐张调用 generate_image。"
+
         # 刚收下的提示词要出图（可能连续多张）：回到运行时循环，让模型按句柄逐张调用 generate_image。
         # accept_local_content 不再被 take 截走，免得收完正文就结束这一轮。
         return _generate_text_turn(
             app, session_id, message_id, run, provider, session, user_text,
-            extra=[{"role": "user", "content": _ready_line(handle)}],
+            extra=[{"role": "user", "content": ready_line}],
             take_tools=("build_skill_page",),
         )
     ready = _ready_line(handle) if image else _kept_line(handle, stored_kind, record.get("size") or 0)
@@ -1015,6 +1021,8 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
 
 
 def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict:
+    if name == "plan_images":
+        return _execute_plan_images(run, arguments)
     if name == "generate_image":
         return _execute_generate_image(app, session_id, message_id, run, arguments)
     tool_call = {"name": name, "arguments": arguments if isinstance(arguments, dict) else {}}
@@ -1037,6 +1045,35 @@ def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict
             parsed.setdefault("tool", name)
             return parsed
     return {"ok": True, "tool": name}
+
+
+def _plan_total(run) -> int:
+    plan = getattr(run, "_image_plan", None)
+    return int(plan.get("count") or 0) if isinstance(plan, dict) else 0
+
+
+def _execute_plan_images(run, arguments) -> dict:
+    args = arguments if isinstance(arguments, dict) else {}
+    count = args.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+        return {
+            "ok": False,
+            "tool": "plan_images",
+            "executed": False,
+            "error": {"code": "invalid_parameter", "message": "count 要是 1 到 20 的整数。"},
+        }
+    items = [str(item)[:200] for item in (args.get("items") or []) if isinstance(item, str)][:20]
+    run._image_plan = {"count": count, "items": items}
+    done = int(getattr(run, "_images_done", 0) or 0)
+    print(f"plan {run.run_id} {count}", file=sys.stderr)
+    return {
+        "ok": True,
+        "tool": "plan_images",
+        "images_total": count,
+        "images_done": done,
+        "images_remaining": max(0, count - done),
+        "items": items,
+    }
 
 
 def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict:
@@ -1073,7 +1110,7 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     if public.get("ok"):
         run._images_done = getattr(run, "_images_done", 0) + 1
         public["images_done_this_turn"] = run._images_done
-        total = int(getattr(run, "_images_total", 0) or 0)
+        total = _plan_total(run)
         if total:
             public["images_total"] = total
             public["images_remaining"] = max(0, total - run._images_done)
@@ -1330,28 +1367,6 @@ def _skill_figure(text: str) -> bool:
 
 def _handle_line(handle: str) -> str:
     return f"本地内容句柄 {handle}。正文留在本机。"
-
-
-_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-
-
-def _cn_number(text: str) -> int:
-    if text.isdigit():
-        return int(text)
-    if "十" in text:
-        head, _, tail = text.partition("十")
-        tens = _CN_DIGITS.get(head, 0) if head else 1
-        return tens * 10 + (_CN_DIGITS.get(tail, 0) if tail else 0)
-    return _CN_DIGITS.get(text, 0)
-
-
-def _requested_count(user_text: str) -> int:
-    """从“连续生成5张”“生成两幅”“三张图”里读出要几张；读不出或超过 20 返回 0。"""
-    match = re.search(r"(\d+|[零一二两三四五六七八九十]+)\s*(?:张|幅|个图|副)", user_text or "")
-    if not match:
-        return 0
-    count = _cn_number(match.group(1))
-    return count if 1 <= count <= 20 else 0
 
 
 def _continue_line(done: int, total: int, handle: str) -> str:

@@ -34,6 +34,13 @@ def _property(name: str, key: str, schema: dict, value) -> dict | None:
     minimum = schema.get("minimum")
     if minimum is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and value < minimum:
         return tool_error(name, "invalid_parameter", f"{key} 小于允许的最小值。", key, executed=False)
+    maximum = schema.get("maximum")
+    if maximum is not None and isinstance(value, (int, float)) and not isinstance(value, bool) and value > maximum:
+        return tool_error(name, "invalid_parameter", f"{key} 大于允许的最大值。", key, executed=False)
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for item in value:
+            if not _type_ok(item, schema["items"].get("type") or ""):
+                return tool_error(name, "invalid_parameter", f"{key} 里有类型不对的项。", key, executed=False)
     return None
 
 
@@ -48,4 +55,6 @@ def _type_ok(value, expected: str) -> bool:
         return isinstance(value, bool)
     if expected == "object":
         return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
     return True
