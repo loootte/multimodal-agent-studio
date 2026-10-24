@@ -1,0 +1,43 @@
+{
+  "schema": "mas.tool/1",
+  "name": "build_skill_page",
+  "version": "1.0.0",
+  "description": "按已安装技能做一张可打开的等距页面。不调用 generate_image。",
+  "order": 70,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "name",
+      "subject"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "description": "已安装技能的名字。这一刀是 anatomy。"
+      },
+      "subject": {
+        "type": "string",
+        "minLength": 1,
+        "description": "要说明的机制，短名称。不是画面描述，也不是技能正文。"
+      }
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": false,
+    "network": false,
+    "write_files": true,
+    "send_local_to_model": false
+  }
+}

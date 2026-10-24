@@ -34,6 +34,7 @@ _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
 _SESSION_CONTENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/contents/(c_[0-9a-f]{32})$")
+_SESSION_DELETE = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/delete$")
 _SESSION = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})$")
 _RUN_EVENTS = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/events$")
 _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
@@ -172,10 +173,13 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         if path == "/api/tools" and method == "GET":
             _send_json(handler, 200, app.tools.listing())
             return
+        if path.startswith("/api/toolpacks"):
+            _toolpack_route(handler, app, method, path)
+            return
         if path.startswith("/api/tools/"):
             parts = path[len("/api/tools/"):].split("/")
             name = urllib.parse.unquote(parts[0]) if parts else ""
-            if name not in tool_config.declarations():
+            if name not in tool_config.declarations():  # 工具名或后端名
                 _send_json(handler, 404, {"code": "not_found", "message": "没有这个工具。"})
                 return
             if parts[1:] == ["config"] and method == "GET":
@@ -221,6 +225,12 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             session = _owned_session(app, matched.group(1))
             _read_json(handler)
             _send_json(handler, 200, chat_run.stop(app, session["session_id"]))
+            return
+        matched = _SESSION_DELETE.fullmatch(path)
+        if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
+            _read_json(handler)
+            _send_json(handler, 200, chat_run.delete_session(app, session["session_id"]))
             return
         matched = _SESSION_ATTACHMENTS.fullmatch(path)
         if matched and method == "POST":
@@ -318,6 +328,42 @@ def _owned_session(app: App, session_id: str) -> dict:
     if not app.sessions.belongs_to(session, user["user_id"]):
         raise chat_run.RequestError(404, "not_found", "找不到这个会话。")
     return session
+
+
+def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str) -> None:
+    """工具包：检查 / 安装 / 卸载 / 导出。source 是本机目录或 .zip 路径（服务只听 127.0.0.1）。"""
+    packs = tool_config._packs()
+    try:
+        if path == "/api/toolpacks/inspect" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, packs.inspect(str(body.get("source") or "")))
+            return
+        if path == "/api/toolpacks/install" and method == "POST":
+            body = _read_json(handler)
+            summary = packs.install(str(body.get("source") or ""), body.get("accept_permissions"))
+            _send_json(handler, 200, {"ok": True, "installed": summary})
+            return
+        parts = path[len("/api/toolpacks/"):].split("/")
+        name = urllib.parse.unquote(parts[0]) if parts and parts[0] else ""
+        if name and parts[1:] == ["uninstall"] and method == "POST":
+            packs.uninstall(name)
+            _send_json(handler, 200, {"ok": True, "removed": name})
+            return
+        if name and parts[1:] == ["export"] and method == "GET":
+            raw = packs.export(name)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/zip")
+            handler.send_header("Content-Disposition", f'attachment; filename="{name}.zip"')
+            handler.send_header("Content-Length", str(len(raw)))
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.end_headers()
+            handler.wfile.write(raw)
+            return
+    except packs.PackError as exc:
+        status = 404 if exc.code == "not_found" else 400
+        _send_json(handler, status, exc.payload())
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
 
 
 def _read_json(handler: BaseHTTPRequestHandler, max_body: int = _MAX_BODY) -> dict:

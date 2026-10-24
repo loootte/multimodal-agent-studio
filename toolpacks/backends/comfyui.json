@@ -1,0 +1,8 @@
+{
+  "schema": "mas.backend/1",
+  "name": "comfyui",
+  "title": "ComfyUI",
+  "description": "本机出图（文生图、图生图、视频）用的 ComfyUI。地址、令牌、工作流在这里配一次，依赖它的工具共用。",
+  "config": "builtin:comfyui",
+  "testable": true
+}

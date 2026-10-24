@@ -1,0 +1,38 @@
+{
+  "schema": "mas.tool/1",
+  "name": "lookup_demo",
+  "version": "1.0.0",
+  "description": "只读演示。按主题返回一条固定说明。不改任何外部状态。",
+  "order": 50,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "topic"
+    ],
+    "properties": {
+      "topic": {
+        "type": "string",
+        "minLength": 1,
+        "description": "要查询的主题。"
+      }
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {
+    "kind": "python",
+    "module": "poc/tools/internal/demo.py"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": false,
+    "network": false,
+    "write_files": false,
+    "send_local_to_model": false
+  }
+}

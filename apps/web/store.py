@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import re
 import threading
 import time
@@ -451,6 +452,10 @@ def _message(role: str, text: str, status: str, message_id: str, run_id: str | N
     }
 
 
+class SessionRunning(StoreError):
+    pass
+
+
 class SessionStore:
     def __init__(self, root: str, artifacts: ArtifactStore | None = None):
         self.root = root
@@ -527,6 +532,47 @@ class SessionStore:
             "updated_at": viewed["updated_at"],
             "running": viewed["running"],
         }
+
+    def delete(self, session_id: str) -> dict:
+        """删掉会话文件、会话目录，以及别的会话不再引用的附件和内容字节。
+        还在回答的会话拒绝删除，抛 SessionRunning。"""
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                raise StoreError("找不到这个会话。")
+            if self.view(session)["running"]:
+                raise SessionRunning("这个会话还在回答，先停下再删。")
+            checksums = set()
+            for key in ("attachments", "contents"):
+                for item in session.get(key) or []:
+                    if isinstance(item, dict) and isinstance(item.get("checksum"), str) and item["checksum"]:
+                        checksums.add(item["checksum"])
+            os.remove(self._path(session_id))
+            shutil.rmtree(os.path.join(self.root, session_id), ignore_errors=True)
+            for name in os.listdir(self.root):
+                if not name.endswith(".json"):
+                    continue
+                other = self._load_path(os.path.join(self.root, name))
+                if other is None:
+                    continue
+                for key in ("attachments", "contents"):
+                    for item in other.get(key) or []:
+                        if isinstance(item, dict):
+                            checksums.discard(item.get("checksum"))
+            removed = 0
+            for checksum in checksums:
+                try:
+                    path = self.artifacts.path_for(checksum)
+                except Exception:
+                    path = None
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        removed += 1
+                    except OSError:
+                        pass
+        return {"ok": True, "session_id": session_id, "blobs_removed": removed}
 
     def belongs_to(self, session: dict, user_id: str) -> bool:
         owner = session.get("user_id")

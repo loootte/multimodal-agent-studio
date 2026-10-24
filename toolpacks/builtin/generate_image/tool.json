@@ -1,0 +1,60 @@
+{
+  "schema": "mas.tool/1",
+  "name": "generate_image",
+  "version": "1.0.0",
+  "description": "用本机会话中的文字句柄生成一张图片。一次调用只出一张。要连续多张时分别再调用。不要填写画面描述。文件句柄不能用来出图。",
+  "order": 40,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "content_handle"
+    ],
+    "properties": {
+      "content_handle": {
+        "type": "string",
+        "description": "本会话本地内容的句柄。"
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "enum": [
+          "1:1",
+          "16:9",
+          "9:16"
+        ],
+        "description": "画幅。"
+      },
+      "seed": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "可选。不传则由本机生成。"
+      },
+      "style": {
+        "type": "string",
+        "description": "可选。只能是白名单里的名字。"
+      }
+    }
+  },
+  "mutating": true,
+  "confirm": "always",
+  "entry": {
+    "kind": "python",
+    "module": "poc/tools/internal/image.py"
+  },
+  "config": [],
+  "requires": {
+    "backends": [
+      "comfyui"
+    ],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": true,
+    "network": true,
+    "write_files": true,
+    "send_local_to_model": false
+  },
+  "parameter_sources": {
+    "style": "comfyui.styles"
+  }
+}

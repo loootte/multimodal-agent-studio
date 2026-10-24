@@ -1,4 +1,4 @@
-"""扫描 poc/tools/internal 和 poc/tools/external。符合规范的文件自动可用。"""
+"""从 toolpacks/ 的清单注册工具（见 tools/packs.py）。load_modules/collect 留给目录探测用。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from tools.schema import check as check_schema
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKED_EXTERNAL = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
-_modules = {}
 
 
 def tool_names(audience: str = "internal") -> tuple[str, ...]:
@@ -129,15 +128,79 @@ def collect(modules: list, audience: str) -> list[Tool]:
 
 
 def audience_tools(audience: str) -> list[Tool]:
+    """只从工具包清单注册（toolpacks/）。external 给模型看，internal 是本机实现。"""
     if audience not in ("internal", "external"):
         raise ToolSpecError(f"没有这个受众：{audience}。")
-    if audience not in _modules:
-        from tools._support import ensure_comfy_path
+    from tools import packs
+    from tools._support import ensure_comfy_path
 
-        ensure_comfy_path()
-        folder = os.path.join(HERE, audience)
-        _modules[audience] = load_modules(folder, f"tools.{audience}")
-    return collect(_modules[audience], audience)
+    ensure_comfy_path()
+    try:
+        found = packs.discover()
+    except packs.PackError as exc:
+        raise ToolSpecError(exc.message) from exc
+    items = []
+    for pack in found:
+        tool = _external(pack) if audience == "external" else _internal(pack)
+        if tool is None:
+            continue
+        _require_tool(tool, f"toolpacks/{pack.name}", audience)
+        items.append(tool)
+    items.sort(key=lambda item: (item.order, item.name))
+    return items
+
+
+def _external(pack) -> Tool | None:
+    from tools import packs
+
+    parameters = packs.resolve_parameters(pack)
+    if parameters is None:
+        return None
+    tool = Tool(name=pack.name, description=pack.manifest["description"], parameters=parameters,
+                order=pack.manifest.get("order", 1000), mutating=pack.manifest["mutating"])
+    tool.pack = pack
+    return tool
+
+
+def _internal(pack) -> Tool | None:
+    from tools import packs
+
+    if pack.manifest["entry"]["kind"] != "python":
+        return None
+    module = packs.load_module(pack)
+    if pack.builtin:
+        for item in module.tools():
+            if isinstance(item, Tool) and item.name == pack.name:
+                item.pack = pack
+                return item
+        raise ToolSpecError(f"{pack.module_path()} 没有导出 {pack.name}。")
+    call = getattr(module, "call", None)
+    if not callable(call):
+        raise ToolSpecError(f"工具包 {pack.name} 的入口没有 call(arguments, config)。")
+    parameters = packs.resolve_parameters(pack)
+
+    def validate(arguments, _pack=pack, _parameters=parameters):
+        return packs.gate(_pack) or check_schema(_pack.name, _parameters, arguments)
+
+    def run(arguments, _pack=pack, _call=call, _validate=validate):
+        problem = _validate(arguments)
+        if problem:
+            return problem
+        try:
+            result = _call(dict(arguments), packs.config_for(_pack))
+        except Exception as exc:  # 第三方工具包出错不拖垮整轮对话
+            return tool_error(_pack.name, "tool_error", f"工具运行出错（{type(exc).__name__}）。")
+        if not isinstance(result, dict):
+            return tool_error(_pack.name, "tool_error", "工具没有返回对象。")
+        result.setdefault("tool", _pack.name)
+        result.setdefault("ok", True)
+        return result
+
+    tool = Tool(name=pack.name, description=pack.manifest["description"], parameters=parameters,
+                order=pack.manifest.get("order", 1000), mutating=pack.manifest["mutating"],
+                validate=validate, call=run)
+    tool.pack = pack
+    return tool
 
 
 def _find(audience: str, name: str) -> Tool | None:

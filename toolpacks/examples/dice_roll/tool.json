@@ -1,0 +1,26 @@
+{
+  "schema": "mas.tool/1",
+  "name": "dice_roll",
+  "version": "0.1.0",
+  "description": "示例工具包：掷骰子。只读，不碰本机内容，不联网。用来演示工具包怎么写、安装和分享。",
+  "order": 900,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sides": {"type": "integer", "minimum": 2, "maximum": 1000, "description": "可选。骰子面数，不填用配置里的默认面数。"},
+      "times": {"type": "integer", "minimum": 1, "maximum": 20, "description": "可选。掷几次，默认 1。"}
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {"kind": "python", "module": "tool.py"},
+  "config": [
+    {"name": "default_sides", "type": "int", "default": 6, "required": true, "secret": false, "min": 2, "max": 1000,
+     "description": "不传 sides 时用的面数。"},
+    {"name": "api_key", "type": "secret", "default": "", "required": false, "secret": true,
+     "description": "演示密钥字段：只存在本机 tools.json，导出工具包时不会带走。"}
+  ],
+  "requires": {"backends": [], "python": []},
+  "permissions": {"read_local_content": false, "network": false, "write_files": false, "send_local_to_model": false}
+}

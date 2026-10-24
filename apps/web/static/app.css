@@ -111,6 +111,22 @@ button.primary, #send, #settings-form button[type="submit"] {
   margin-bottom: 0.35rem;
 }
 
+.session-item { position: relative; list-style: none; }
+.session-item .session { padding-right: 2rem; }
+.session-delete {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border-radius: 8px;
+  line-height: 1;
+  opacity: 0;
+}
+.session-item:hover .session-delete, .session-delete:focus { opacity: 1; }
+.session-delete:disabled { opacity: 0.3; cursor: not-allowed; }
+
 .session.active { background: #fff; border-color: #fff; }
 
 .session .title {
@@ -469,3 +485,6 @@ dialog input {
 #tool-settings { max-width: 40rem; }
 .tool-fields { max-height: 60vh; overflow-y: auto; padding-right: 0.3rem; }
 dialog select { font: inherit; padding: 0.35rem; }
+
+.tool-meta p { margin: 0.2rem 0; }
+.tool-meta button { margin-left: 0.4rem; }
