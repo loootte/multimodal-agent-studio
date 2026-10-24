@@ -484,9 +484,42 @@ function renderSessions() {
     button.addEventListener("click", () => {
       openSession(session.session_id).catch(() => showNote("打不开这个会话。"));
     });
-    item.append(button);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "session-delete";
+    remove.title = "删除这个对话";
+    remove.setAttribute("aria-label", "删除这个对话");
+    remove.textContent = "×";
+    remove.disabled = Boolean(session.running);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteSession(session).catch((error) => showNote(error.message || "没能删除这个对话。"));
+    });
+    item.className = "session-item";
+    item.append(button, remove);
     list.append(item);
   }
+}
+
+// 删除对话：先确认；还在回答的会话由服务端拒绝（409 session_running），这里只提示先停下。
+async function deleteSession(session) {
+  if (session.running) {
+    showNote("这个对话还在回答，先停下再删。");
+    return;
+  }
+  const name = session.title || "新对话";
+  if (!window.confirm(`删除“${name}”？对话记录、附件和生成的图片都会删掉，不能恢复。`)) return;
+  await api("POST", `/api/sessions/${session.session_id}/delete`, {});
+  const wasCurrent = session.session_id === state.currentId;
+  await loadSessions();
+  if (wasCurrent) {
+    state.currentId = null;
+    state.session = null;
+    try { localStorage.removeItem("mas.session"); } catch (error) { /* 忽略 */ }
+    await createSession(false);
+    return;
+  }
+  render();
 }
 
 function renderChrome() {

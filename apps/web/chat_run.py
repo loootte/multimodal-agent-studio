@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -474,6 +476,30 @@ def stop(app, session_id: str) -> dict:
     if run is not None:
         run.stop()
     return {"ok": True, "running": True}
+
+
+def delete_session(app, session_id: str) -> dict:
+    """删除会话。还在回答的会话一律拒绝（409 session_running），不替用户停。"""
+    try:
+        result = app.sessions.delete(session_id)
+    except store.SessionRunning as exc:
+        raise RequestError(409, "session_running", "这个会话还在回答，先停下再删。") from exc
+    except StoreError as exc:
+        raise RequestError(404, "not_found", "找不到这个会话。") from exc
+    result["artifacts_removed"] = _drop_generated(session_id)
+    return result
+
+
+def _drop_generated(session_id: str) -> bool:
+    try:
+        artifacts = image_run.artifact_store()
+        folder = artifacts._session_dir(session_id)
+    except Exception:
+        return False
+    if not os.path.isdir(folder):
+        return False
+    shutil.rmtree(folder, ignore_errors=True)
+    return True
 
 
 def _run_error_code(app, session_id: str, message_id: str) -> str | None:

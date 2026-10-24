@@ -34,6 +34,7 @@ _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
 _SESSION_CONTENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/contents/(c_[0-9a-f]{32})$")
+_SESSION_DELETE = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/delete$")
 _SESSION = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})$")
 _RUN_EVENTS = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/events$")
 _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
@@ -224,6 +225,12 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             session = _owned_session(app, matched.group(1))
             _read_json(handler)
             _send_json(handler, 200, chat_run.stop(app, session["session_id"]))
+            return
+        matched = _SESSION_DELETE.fullmatch(path)
+        if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
+            _read_json(handler)
+            _send_json(handler, 200, chat_run.delete_session(app, session["session_id"]))
             return
         matched = _SESSION_ATTACHMENTS.fullmatch(path)
         if matched and method == "POST":

@@ -2254,6 +2254,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _batch_stop_case(base, provider, comfy.box)
         _tool_config_case(base, provider, comfy.box, directory, port)
         _toolpack_http_case(base, directory)
+        _delete_session_case(base, directory)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -3623,6 +3624,83 @@ def _toolpack_cases() -> None:
         shutil.rmtree(source, ignore_errors=True)
     if set(item["function"]["name"] for item in openai_tools()) != BUILTIN_TOOLS - {"generate_video"}:
         fail("测试装的工具包没有清干净")
+
+
+def _delete_session_case(base: str, directory: str) -> None:
+    """删除对话：确认后删会话、附件字节；还在回答的拒绝；别的会话共用的字节留着；页面有删除按钮。"""
+    sessions_dir = os.path.join(directory, "sessions")
+
+    def make() -> str:
+        status, body = request("POST", base + "/api/sessions", {})
+        if status != 200:
+            fail(f"建会话失败：{status}")
+        return json.loads(body)["session_id"]
+
+    def attach(session_id: str, raw: bytes) -> str:
+        status, body = request("POST", base + f"/api/sessions/{session_id}/attachments", {
+            "file": base64.b64encode(raw).decode("ascii"), "media_type": "audio/wav", "name": "d.wav",
+        })
+        if status != 200:
+            fail(f"删除用例的附件没收下：{status} {body}")
+        return json.loads(body)["handle"]
+
+    victim = make()
+    keeper = make()
+    own = b"RIFF....WAVEfmt delete-only"
+    shared = b"RIFF....WAVEfmt delete-shared"
+    attach(victim, own)
+    attach(victim, shared)
+    keep_handle = attach(keeper, shared)
+    from packages.artifacts import ArtifactStore
+    blobs = ArtifactStore(os.path.join(directory, "artifacts"))
+    own_path = blobs.path_for(hashlib.sha256(own).hexdigest())
+    if not own_path or not os.path.exists(own_path):
+        fail("附件字节没有落盘")
+    os.makedirs(os.path.join(sessions_dir, victim, "files"), exist_ok=True)
+
+    # 还在回答：拒绝，不替用户停。
+    path = os.path.join(sessions_dir, keeper + ".json")
+    with open(path, encoding="utf-8") as handle:
+        saved = json.load(handle)
+    running = json.loads(json.dumps(saved))
+    running["messages"].append({"message_id": "m_" + "0" * 32, "role": "assistant", "text": "",
+                                "status": "running", "run_id": "r_" + "0" * 32})
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(running, handle)
+    status, body = request("POST", base + f"/api/sessions/{keeper}/delete", {})
+    if status != 409 or json.loads(body).get("code") != "session_running":
+        fail(f"还在回答的会话被删了：{status} {body}")
+    if not os.path.exists(path):
+        fail("拒绝删除时会话文件丢了")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(saved, handle)
+
+    status, body = request("POST", base + f"/api/sessions/{victim}/delete", {})
+    if status != 200 or not json.loads(body).get("ok"):
+        fail(f"删除会话失败：{status} {body}")
+    if os.path.exists(os.path.join(sessions_dir, victim + ".json")) or os.path.exists(os.path.join(sessions_dir, victim)):
+        fail("删除后会话文件或目录还在")
+    if os.path.exists(own_path):
+        fail("删除后只属于这个会话的附件字节还在")
+    status, _body = request("GET", base + f"/api/sessions/{keeper}/attachments/{keep_handle}")
+    if status != 200:
+        fail("删除一个会话误删了别的会话共用的附件")
+    status, body = request("GET", base + "/api/sessions")
+    if victim in [item["session_id"] for item in json.loads(body)["sessions"]]:
+        fail("删除后会话还在列表里")
+    status, _body = request("GET", base + f"/api/sessions/{victim}")
+    if status != 404:
+        fail("删除后还能打开会话")
+    status, _body = request("POST", base + f"/api/sessions/{victim}/delete", {})
+    if status != 404:
+        fail("重复删除没有返回 404")
+    status, _body = request("POST", base + f"/api/sessions/{keeper}/delete", {})
+    if status != 200:
+        fail("停下以后的会话删不掉")
+    script = open(os.path.join(ROOT, "apps", "web", "static", "app.js"), encoding="utf-8").read()
+    for needle in ("session-delete", "window.confirm", "/delete`", "await createSession(false)"):
+        if needle not in script:
+            fail(f"页面缺少删除对话的部分：{needle}")
 
 
 def _toolpack_http_case(base: str, directory: str) -> None:
