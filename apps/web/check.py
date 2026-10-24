@@ -199,6 +199,69 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "localplan":
+            # 文字里没有数字，张数由模型理解后用 plan_images 报出。
+            count = self._tool_result_count("generate_image")
+            if count >= 4:
+                self._piece(_delta(content="四季都好了"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 4, "items": ["春", "夏", "秋", "冬"]})
+                return
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            if count == 1 and self._last_user().startswith("工具结果 generate_image"):
+                self._piece(_delta(content="春天这张好了。"))
+                self._done()
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
+        if mode == "localask":
+            # 复现真实模型：第一步只回文字，让用户把提示词贴进聊天，还追问变体。
+            body = json.dumps(self.server.requests[-1]["body"], ensure_ascii=False)
+            if "这是出图请求" not in body and self._tool_result_count("plan_images") == 0 and not _content_handle(body):
+                self._piece(_delta(content="请把提示词直接发给我，我会先用 accept_local_content 留在本机。要同一提示词还是变体？"))
+                self._done()
+                return
+            mode = "localmulti"
+        if mode == "localmulti":
+            if self._tool_result_count("generate_image") >= 5:
+                self._piece(_delta(content="五张都好了"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 5})
+                return
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
+        if mode == "localstop":
+            # 像真实模型一样：出了一两张就用文字收尾，靠服务端续写指令接着做。
+            count = self._tool_result_count("generate_image")
+            if count >= 5:
+                self._piece(_delta(content="五张都好了"))
+                self._done()
+                return
+            last = self._last_user()
+            if count in (1, 2) and last.startswith("工具结果 generate_image"):
+                self._piece(_delta(content=f"已生成第 {count} 张。继续生成第 {count + 1} 张。"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle and self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": 5})
+                return
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
         if mode == "fileimage":
             if not self._ready():
                 self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
@@ -930,6 +993,7 @@ def _runtime_cases() -> None:
         _runtime_clock()
         _runtime_demo(registry, runtime_run, traces_for)
         _runtime_budget(registry, runtime_run, traces_for)
+        _runtime_slow_tools(registry, runtime_run)
         _runtime_confirm(registry, runtime_run)
         _runtime_cancel(registry, runtime_run)
         _runtime_invalid_schema(registry, runtime_run)
@@ -1003,6 +1067,34 @@ def _runtime_budget(registry, runtime_run, traces_for) -> None:
     items = traces_for(events[0]["run_id"])
     if [item.get("type") for item in items] != ["model", "tool", "model", "tool"]:
         fail(f"步数预算用尽时追踪不对：{[item.get('type') for item in items]}")
+
+
+def _runtime_slow_tools(registry, runtime_run) -> None:
+    from services.runtime import Budget
+
+    calls = {"n": 0}
+    adapter = _ScriptAdapter(None)
+
+    def script(request, **kwargs):
+        adapter.calls.append(request)
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            yield {"type": "tool.requested", "name": "lookup_demo", "arguments": {"topic": "slow"}}
+        else:
+            yield {"type": "message.delta", "text": "五张都好了"}
+
+    adapter.stream = script
+    _install_script(registry, "runtime-slow", adapter)
+
+    def execute(name, arguments):
+        time.sleep(0.3)
+        return {"ok": True, "tool": name}
+
+    events = _runtime_collect(
+        runtime_run, "runtime-slow", "连续出五张", execute=execute, budget=Budget(steps=24, time_sec=1.0),
+    )
+    if events[-1].get("type") != "message.completed" or _gateway_text_of(events) != "五张都好了":
+        fail(f"慢工具（出图）把时间预算吃光，连续出图做到一半停下：{events[-1]}")
 
 
 def _runtime_confirm(registry, runtime_run) -> None:
@@ -1925,6 +2017,7 @@ class ComfyState:
         self.deletes = []
         self.history_hits = {}
         self.release = threading.Event()
+        self.hold_after = None
 
     def set_mode(self, mode: str) -> None:
         with self.cv:
@@ -1982,6 +2075,10 @@ class ComfyState:
             return _history_entry("error")
         if interrupted:
             return _history_entry("interrupted")
+        with self.cv:
+            held = self.hold_after is not None and prompt_id in self.ids and self.ids.index(prompt_id) >= self.hold_after
+        if held:
+            return _history_entry("running")
         if mode in ("hold", "interrupt") and not released:
             return _history_entry("running")
         if not sent or hits < 2:
@@ -2136,6 +2233,11 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_file_image(base, provider, comfy.box)
         _egress_file(provider)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
+        _local_multi_image_case(base, provider, comfy.box, workflow)
+        _local_early_stop_case(base, provider, comfy.box)
+        _local_plan_case(base, provider, comfy.box)
+        _local_ask_case(base, provider, comfy.box)
+        _batch_stop_case(base, provider, comfy.box)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2826,6 +2928,192 @@ def _multi_image_case(base: str, provider, box: ComfyState, directory: str, work
                 break
         else:
             fail("连续出图没有把文字句柄交给模型")
+
+
+def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path: str) -> None:
+    provider.mode = "localmulti"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "当场留下的连续出图提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "用本地提示词连续生成5张图片", timeout=25, content=secret)
+    kinds = [event.get("type") for event in events]
+    if "content_request" not in kinds:
+        fail(f"没有句柄时连续出图没有先询问本地提示词：{kinds}")
+    asked = kinds.index("content_request")
+    if any(event.get("type") == "tool.confirm" and event.get("name") == "accept_local_content" for event in events):
+        fail("收集本地提示词还要先过工具确认，输入框会被挡住")
+    if any(event.get("status") == "waiting_confirm" for event in events[:asked]):
+        fail("收集本地提示词前留下了等待确认的工具调用")
+    script = request("GET", base + "/static/app.js")[1]
+    if 'lastIndexOf("content_request")' not in script or "events.slice(askedAt + 1)" not in script:
+        fail("页面的输入框条件还会被收集前的工具调用挡住")
+    arts = [index for index, kind in enumerate(kinds) if kind == "artifact"]
+    if len(arts) != 5 or arts[0] < asked:
+        fail(f"收下本地提示词后没有连续五张成片：{len(arts)} {kinds}")
+    if len(box.prompts) != before + 5:
+        fail("收下本地提示词后没有恰好提交五次")
+    confirms = [event for event in events if event.get("type") == "tool.confirm" and event.get("name") == "generate_image"]
+    if len(confirms) > 1:
+        fail(f"连续出图每张都要确认，第二张会卡在等待确认：{len(confirms)}")
+    if 'includes(entry.type));' not in script:
+        fail("成片之后页面还会显示上一张的旧进度")
+    for submitted in box.prompts[before:]:
+        _assert_whitelist(submitted, workflow_path, secret)
+    if _assistant_text(events) != "五张都好了":
+        fail("收下本地提示词后没有等模型调度完再回答")
+    if events[-1].get("type") != "message.completed":
+        fail("收下本地提示词后连续出图没有正常结束")
+    if len(provider.requests) != sent + 8:
+        fail(f"收下本地提示词后供应商请求次数不对：{len(provider.requests) - sent}")
+    for item in provider.requests[sent:]:
+        if secret in _provider_blob(item):
+            fail("收下本地提示词后把正文发给了模型")
+    if secret in json.dumps(events, ensure_ascii=False):
+        fail("收下本地提示词后把正文写进了页面")
+
+
+def _local_early_stop_case(base: str, provider, box: ComfyState) -> None:
+    import chat_run
+
+    if hasattr(chat_run, "_requested_count"):
+        fail("张数不该由本地正则判断，应由模型调用 plan_images 报出")
+    provider.mode = "localstop"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "模型半路收尾的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我连续生成5张图片，先输入本地提示词然后生成", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 5 or len(box.prompts) != before + 5:
+        fail(f"模型出一两张就收尾时没有续到五张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed":
+        fail(f"模型半路收尾后连续出图没有正常结束：{events[-1]}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if "已生成 1/5 张" not in blob or "images_remaining" not in blob:
+        fail("没有把进度和续写指令告诉模型")
+    if secret in blob:
+        fail("续写时把本地正文发给了模型")
+    if not any(event.get("type") == "tool_call" and event.get("tool") == "plan_images" for event in events):
+        fail("多张出图前没有走 plan_images")
+
+
+def _local_ask_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localask"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "模型先追问时的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我连续生成5张图片", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    order = [
+        event.get("tool") if event.get("type") == "tool_call" else event.get("type")
+        for event in events
+        if (event.get("type") == "tool_call" and event.get("status") == "running") or event.get("type") == "content_request"
+    ]
+    if order[:3] != ["plan_images", "accept_local_content", "content_request"]:
+        fail(f"模型先回文字追问后，没有被纠正成 plan_images → 收集提示词：{order}")
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 5 or len(box.prompts) != before + 5:
+        fail(f"纠正后没有做满五张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed":
+        fail(f"纠正后连续出图没有正常结束：{events[-1]}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if blob.count("这是出图请求") < 1 or secret in blob:
+        fail("纠正指令没有发给模型，或者把本地正文发给了模型")
+    tools = json.dumps(provider.requests[sent].get("body", {}).get("tools") or [], ensure_ascii=False)
+    if "弹出输入框" not in tools or "绝不要让用户把提示词贴到聊天里" not in tools:
+        fail("accept_local_content 的说明没有讲清楚是本机输入框")
+
+
+def _batch_stop_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localmulti"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    before = len(box.prompts)
+    box.hold_after = before + 2
+    arts = []
+    caught = {}
+
+    def watch(event):
+        if event.get("type") == "tool.confirm":
+            _post_confirm(base, event.get("run_id") or "", True)
+        if event.get("type") == "content_request":
+            _post_content(base, event.get("run_id") or "", "批量中断用的本地提示词")
+        if event.get("type") == "artifact":
+            arts.append(event)
+
+    def run():
+        caught["events"] = read_sse(
+            site_port(base), f"/api/sessions/{session_id}/messages",
+            {"text": "用本地提示词连续生成5张图片"}, on_event=watch, timeout=20,
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and len(box.prompts) < before + 3:
+        time.sleep(0.05)
+    try:
+        if len(box.prompts) < before + 3 or len(arts) != 2:
+            fail(f"批量中断没有等到第三张在画：{len(box.prompts) - before} {len(arts)}")
+        third = box.ids[before + 2]
+        asked = len(provider.requests)
+        status, _body = request("POST", base + f"/api/sessions/{session_id}/stop", {})
+        if status != 200:
+            fail("批量中断的停止请求失败")
+        worker.join(10)
+    finally:
+        box.hold_after = None
+    events = caught.get("events", (0, "", []))[2]
+    if not events or events[-1].get("type") != "run.failed" or events[-1].get("code") != "cancelled":
+        fail(f"批量中断没有以取消结束：{events[-1] if events else ''}")
+    if "已停止，完成 2/5 张" not in (events[-1].get("message") or ""):
+        fail(f"批量中断的状态行不对：{events[-1].get('message')}")
+    if len([event for event in events if event.get("type") == "artifact"]) != 2:
+        fail("批量中断后保留的成片不是两张")
+    if third not in box.interrupts or not any(isinstance(item, list) and third in item for item in box.deletes):
+        fail("批量中断没有取消 ComfyUI 里正在画的第三张")
+    time.sleep(0.5)
+    if len(box.prompts) != before + 3:
+        fail(f"批量中断后还在提交：{len(box.prompts) - before}")
+    if len(provider.requests) > asked + 1:
+        fail(f"批量中断后还在追问模型（续写）：{len(provider.requests) - asked}")
+    status, saved = request("GET", base + f"/api/sessions/{session_id}")
+    data = json.loads(saved) if isinstance(saved, (str, bytes)) else saved
+    last = (data.get("messages") or [])[-1]
+    if last.get("status") != "cancelled" or len([e for e in last.get("events") or [] if e.get("type") == "artifact"]) != 2:
+        fail(f"批量中断后保存的消息不对：{last.get('status')}")
+    script = request("GET", base + "/static/app.js")[1]
+    if 'failure.code === "cancelled")) {' not in script:
+        fail("有成片时页面不显示已停止的状态行")
+
+
+def _local_plan_case(base: str, provider, box: ComfyState) -> None:
+    provider.mode = "localplan"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "四季风景的本地提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "来一组四季风景，先输入本地提示词", timeout=30, content=secret)
+    kinds = [event.get("type") for event in events]
+    if "content_request" not in kinds:
+        fail(f"没有数字的多图请求没有先收本地提示词：{kinds}")
+    arts = [kind for kind in kinds if kind == "artifact"]
+    if len(arts) != 4 or len(box.prompts) != before + 4:
+        fail(f"模型计划四张时没有做满四张：{len(arts)} {len(box.prompts) - before} {kinds}")
+    if events[-1].get("type") != "message.completed" or _assistant_text(events) != "四季都好了":
+        fail(f"按计划出图没有正常结束：{events[-1]} {_assistant_text(events)!r}")
+    blob = json.dumps([item.get("body") for item in provider.requests[sent:]], ensure_ascii=False)
+    if "已生成 1/4 张" not in blob or 'images_total\\": 4' not in blob:
+        fail("没有按 plan_images 的张数报进度和续写")
+    if secret in blob:
+        fail("按计划出图时把本地正文发给了模型")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):

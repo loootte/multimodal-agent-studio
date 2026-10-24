@@ -9,7 +9,11 @@ def tools() -> list[Tool]:
     return [
         Tool(
             name="accept_local_content",
-            description="向用户收集一条留在本机的内容。可以是文字或文件。不要填写正文、字节、路径或文件名。",
+            description=(
+                "在用户本机界面弹出输入框（或文件选择），用户在框里填写；正文不经过模型，你只收到句柄。"
+                "要出图但还没有提示词句柄时调用它（purpose=image_prompt），绝不要让用户把提示词贴到聊天里。"
+                "多张出图时在 plan_images 之后调用。不要填写正文、字节、路径或文件名。"
+            ),
             order=10,
             mutating=True,
             parameters={

@@ -37,6 +37,7 @@ from packages.contracts.events import (
 )
 from services.gateway import GatewayError, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
+from services.runtime.tools import tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
@@ -47,14 +48,18 @@ SYSTEM = (
     "这一轮用户消息里已经带上的图片附件，你可以直接看图回答。"
     "用户要识别、描述图片，或根据图片编写提示词时，直接写出文字。"
     "不要为此调用 accept_local_content，也不要调用 generate_image。"
-    "用户要留下、附上、引用，或在后续任务里使用应留在本机的内容时，调用 accept_local_content。"
-    "purpose 只能是 image_prompt 或 keep。kind 只能是 text 或 file。不要填写正文、字节、路径或文件名。"
-    "只有用户明确要求生成一张新图时，purpose 才填 image_prompt，kind 填 text。"
+    "accept_local_content 会在用户本机界面弹出一个输入框，用户在框里输入，正文不经过你，你只拿到句柄。"
+    "用户要留下、附上、引用本机内容，或者要出图但还没有可用的提示词句柄时，直接调用它。"
+    "绝不要让用户把提示词贴到聊天里，也不要说“请把提示词发给我”。"
+    "出图收提示词时 purpose 填 image_prompt，kind 填 text；只留存时填 keep。不要填写正文、字节、路径或文件名。"
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
-    "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。用户要连续多张时，对每一张分别再调用一次。"
+    "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。"
+    "请求意味着多张图片时（不管有没有写出数字），第一步就调用 plan_images 报出总张数，"
+    "顺序是 plan_images → （没有提示词句柄时）accept_local_content → 逐张 generate_image，直到做完计划的张数。只要一张时可以不调 plan_images。"
+    "出图请求不要先追问细节：用户没说要变体时，默认每张用同一个提示词句柄、不同 seed。直接调用工具，不要只回复文字。"
     "已经留下的本地提示词直接用句柄，不要再收集正文，也不要填写画面描述。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
 )
@@ -106,6 +111,7 @@ _WEB_TOOLS = (
     "forget_local_content",
     "retrieve_local",
     "generate_image",
+    "plan_images",
     "build_skill_page",
 )
 _SKILL_MARKERS = ("等距", "等轴测", "isometric")
@@ -205,6 +211,13 @@ class Run:
         with self._state_lock:
             self.prompt_id = prompt_id
             self.comfy_base = base
+            late = self.cancel.is_set()
+        # 停止刚好落在两张图之间、新一张已经提交时，stop() 取消的是上一张；这里补取消新提交的这张。
+        if late:
+            try:
+                image_run.cancel(base, prompt_id)
+            except Exception as exc:
+                print(f"chat cancel {type(exc).__name__}", file=sys.stderr)
 
     def accept_progress(self, key: tuple) -> bool:
         with self._state_lock:
@@ -504,25 +517,73 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
     )
 
 
-def _generate_text_turn(app, session_id, message_id, run, provider, session, user_text) -> str:
-    request = _gateway_request(provider, _turn_messages(app, session_id, session))
+def _generate_text_turn(
+    app, session_id, message_id, run, provider, session, user_text, extra=None, take_tools=_TAKE_TOOLS,
+) -> str:
+    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra))
     spoken: list[str] = []
     seen = 0
     claimed: dict = {}
 
     def take(name, arguments):
-        if name not in _TAKE_TOOLS:
+        if name not in take_tools:
             return False
         claimed["name"] = name
         claimed["arguments"] = arguments
         claimed["spoken"] = "".join(spoken)
         return True
 
+    allowed: set[str] = set()
+    # 张数只认第三方模型调用 plan_images 报的计划（存在 run 上，收集本地提示词后重进循环也还在）；没有计划就不追。
+    pushes = {"stalls": 0, "seen": 0, "handle": "", "nudged": False, "tools": 0}
+    image_turn = _wants_images("", user_text) or _image_request(user_text)
+
+    def resume(text):
+        # 出图请求第一步就只回文字（追问提示词、追问变体）时，纠正一次，让它按 plan_images → accept_local_content 走。
+        if (
+            image_turn and not pushes["nudged"] and pushes["tools"] == 0
+            and not getattr(run, "_image_plan", None) and not int(getattr(run, "_images_done", 0) or 0)
+            and not run.cancel.is_set()
+        ):
+            pushes["nudged"] = True
+            print(f"nudge {run.run_id}", file=sys.stderr)
+            return _NUDGE_LINE
+        # 用户要 N 张、模型做了 k 张就自己收尾时，服务端追一句续写指令；连续两次没进展就放弃，免得死循环。
+        total = _plan_total(run)
+        done = int(getattr(run, "_images_done", 0) or 0)
+        handle = pushes["handle"]
+        if total <= 1 or done <= 0 or done >= total or not handle or run.cancel.is_set():
+            return None
+        if done == pushes["seen"]:
+            pushes["stalls"] += 1
+        else:
+            pushes["stalls"] = 0
+        pushes["seen"] = done
+        if pushes["stalls"] >= 2:
+            return None
+        print(f"resume {run.run_id} {done}/{total}", file=sys.stderr)
+        return _continue_line(done, total, handle)
+
     def confirm(name, arguments):
-        return run.wait_confirm()
+        ok = run.wait_confirm()
+        if ok:
+            allowed.add(name)
+        return ok
+
+    def mutating(name):
+        # 收本机内容走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
+        if name == "accept_local_content":
+            return False
+        # 同一轮里已经确认过的工具（如连续出图的 generate_image）不再逐次确认。
+        if name in allowed:
+            return False
+        return tool_mutates(name)
 
     def execute(name, arguments):
-        if name in _WEB_TOOLS and name not in _TAKE_TOOLS:
+        pushes["tools"] += 1
+        if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
+            pushes["handle"] = str(arguments.get("content_handle"))
+        if name in _WEB_TOOLS and name not in take_tools:
             return _execute_web_tool(app, session_id, message_id, run, name, arguments)
         return execute_tool(name, arguments)
 
@@ -553,8 +614,10 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
             cancel=run.cancel,
             timeout_sec=app.timeout_sec,
             take=take,
+            resume=resume,
             confirm=confirm,
             execute=execute,
+            mutating=mutating,
             budget=Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
@@ -618,6 +681,9 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
                 flush_traces()
                 code = str(event.get("code") or "provider_error")
                 message = str(event.get("message") or HUMAN.get(code) or HUMAN["provider_error"])
+                done = int(getattr(run, "_images_done", 0) or 0)
+                if code == "cancelled" and (done or _plan_total(run)):
+                    message = f"已停止，完成 {done}/{_plan_total(run) or done} 张。"
                 retryable = event.get("retryable")
                 error = GatewayError(code, message)
                 if retryable is not None:
@@ -701,6 +767,19 @@ def _continue_after_content(
     stored_kind = record.get("kind") or kind
     print(f"content {session_id} {handle} {stored_kind} {record.get('size')}", file=sys.stderr)
     session = app.sessions.get(session_id)
+    if not image and stored_kind == "text" and _wants_images(purpose, user_text):
+        ready_line = _ready_line(handle)
+        total = _plan_total(run)
+        if total:
+            ready_line += f"已有计划：共 {total} 张，还没开始。请逐张调用 generate_image。"
+
+        # 刚收下的提示词要出图（可能连续多张）：回到运行时循环，让模型按句柄逐张调用 generate_image。
+        # accept_local_content 不再被 take 截走，免得收完正文就结束这一轮。
+        return _generate_text_turn(
+            app, session_id, message_id, run, provider, session, user_text,
+            extra=[{"role": "user", "content": ready_line}],
+            take_tools=("build_skill_page",),
+        )
     ready = _ready_line(handle) if image else _kept_line(handle, stored_kind, record.get("size") or 0)
     messages = _turn_messages(
         app,
@@ -966,6 +1045,8 @@ def _finish_image(app, session_id: str, message_id: str, run: Run, text: str, to
 
 
 def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict:
+    if name == "plan_images":
+        return _execute_plan_images(run, arguments)
     if name == "generate_image":
         return _execute_generate_image(app, session_id, message_id, run, arguments)
     tool_call = {"name": name, "arguments": arguments if isinstance(arguments, dict) else {}}
@@ -988,6 +1069,35 @@ def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict
             parsed.setdefault("tool", name)
             return parsed
     return {"ok": True, "tool": name}
+
+
+def _plan_total(run) -> int:
+    plan = getattr(run, "_image_plan", None)
+    return int(plan.get("count") or 0) if isinstance(plan, dict) else 0
+
+
+def _execute_plan_images(run, arguments) -> dict:
+    args = arguments if isinstance(arguments, dict) else {}
+    count = args.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+        return {
+            "ok": False,
+            "tool": "plan_images",
+            "executed": False,
+            "error": {"code": "invalid_parameter", "message": "count 要是 1 到 20 的整数。"},
+        }
+    items = [str(item)[:200] for item in (args.get("items") or []) if isinstance(item, str)][:20]
+    run._image_plan = {"count": count, "items": items}
+    done = int(getattr(run, "_images_done", 0) or 0)
+    print(f"plan {run.run_id} {count}", file=sys.stderr)
+    return {
+        "ok": True,
+        "tool": "plan_images",
+        "images_total": count,
+        "images_done": done,
+        "images_remaining": max(0, count - done),
+        "items": items,
+    }
 
 
 def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict:
@@ -1022,6 +1132,12 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     result = _run_image(app, session_id, message_id, run, bound.get("arguments") or {})
     public = _public_generate_result(result, handle)
     if public.get("ok"):
+        run._images_done = getattr(run, "_images_done", 0) + 1
+        public["images_done_this_turn"] = run._images_done
+        total = _plan_total(run)
+        if total:
+            public["images_total"] = total
+            public["images_remaining"] = max(0, total - run._images_done)
         _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
         app.sessions.update_message(
             session_id, message_id, text=app.sessions.message_text(session_id, message_id), status="running", error=None,
@@ -1260,6 +1376,14 @@ def _image_request(text: str, attachments=None) -> bool:
     return any(marker in text for marker in _IMAGE_MARKERS)
 
 
+def _wants_images(purpose: str, user_text: str) -> bool:
+    if purpose == "image_prompt":
+        return True
+    return any(marker in user_text for marker in _SCHEDULE_MARKERS) and (
+        "图" in user_text or any(marker in user_text for marker in _IMAGE_MARKERS)
+    )
+
+
 def _skill_figure(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _SKILL_MARKERS)
@@ -1267,6 +1391,20 @@ def _skill_figure(text: str) -> bool:
 
 def _handle_line(handle: str) -> str:
     return f"本地内容句柄 {handle}。正文留在本机。"
+
+
+_NUDGE_LINE = (
+    "这是出图请求，请现在调用工具，不要只回复文字，不要让用户在聊天里贴提示词，也不要追问变体。"
+    "要多张时先调用 plan_images（count 按用户请求）；还没有提示词句柄时调用 accept_local_content"
+    "（purpose=image_prompt，kind=text），它会在用户本机弹出输入框，正文不经过你；拿到句柄后逐张调用 generate_image。"
+)
+
+
+def _continue_line(done: int, total: int, handle: str) -> str:
+    return (
+        f"已生成 {done}/{total} 张，还差 {total - done} 张。请继续调用 generate_image 生成第 {done + 1} 张，"
+        f"content_handle 用同一个本地句柄 {handle}，一次调用一张；全部完成后再回答。"
+    )
 
 
 def _ready_line(handle: str) -> str:

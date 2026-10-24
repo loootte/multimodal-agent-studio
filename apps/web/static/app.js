@@ -529,9 +529,11 @@ function bubble(message) {
   const item = document.createElement("article");
   item.className = `bubble ${message.role === "user" ? "user" : "assistant"}`;
   const events = message.events || [];
-  const pendingContent = events.find((entry) => entry.type === "content_request");
+  const askedAt = events.map((entry) => entry.type).lastIndexOf("content_request");
+  const pendingContent = askedAt >= 0 ? events[askedAt] : undefined;
   const artifacts = events.filter((entry) => entry.type === "artifact");
-  const collecting = !events.some((entry) => entry.type === "tool_call" || entry.type === "error");
+  // 只看收集请求之后的事件：之前的工具时间线（如 accept_local_content 本身）不该挡住输入框。
+  const collecting = askedAt >= 0 && !events.slice(askedAt + 1).some((entry) => entry.type === "tool_call" || entry.type === "error");
   const showEntry = pendingContent && !artifacts.length && message.status === "running" && collecting;
   if (message.status === "running" && !showEntry) item.classList.add("streaming");
   const who = document.createElement("span");
@@ -546,7 +548,9 @@ function bubble(message) {
   }
   const calls = events.filter((entry) => entry.type === "tool_call");
   if (calls.length) item.append(toolTimeline(message, calls));
-  const progress = [...events].reverse().find((entry) => entry.type === "progress");
+  // 只显示仍在进行中的进度：其后已有成片或新的工具调用时，旧进度不再显示。
+  const latest = [...events].reverse().find((entry) => ["progress", "artifact", "tool_call"].includes(entry.type));
+  const progress = latest && latest.type === "progress" ? latest : null;
   if (showEntry) item.append(localEntry(message, pendingContent));
   if (progress && message.status === "running") {
     const line = document.createElement("p");
@@ -563,7 +567,8 @@ function bubble(message) {
     image.src = src;
     item.append(image);
   }
-  if (artifact && artifact.media === "html") {
+  for (const artifact of artifacts) {
+    if (artifact.media !== "html") continue;
     const src = artifactSrc(artifact);
     if (src) {
       const link = document.createElement("a");
@@ -577,7 +582,7 @@ function bubble(message) {
   }
   const agentError = events.find((entry) => entry.type === "error");
   const failure = agentError || message.error;
-  if (failure && failure.message && !artifacts.length) {
+  if (failure && failure.message && (!artifacts.length || failure.code === "cancelled")) {
     const extra = document.createElement("p");
     extra.className = failure.code === "cancelled" ? "status-line" : "error";
     extra.textContent = failure.message;
