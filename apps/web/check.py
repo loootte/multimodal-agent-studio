@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1466,7 +1467,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面脚本没有接上流式事件")
     if "runtime.step" not in script or "renderRuntime" not in script:
         fail("页面脚本没有接上运行过程")
-    if "innerHTML" in script or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
+    if _unsafe_inner_html(script) or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "打开等距图" not in script:
         fail("页面没有等距图入口")
@@ -1562,6 +1563,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _skill_turn(base, provider)
     _multi_agent_turn(base, provider)
     _multi_text_turn(base, provider)
+    _markdown_checks(base)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
     _reject_key_case(base, session_id, provider, directory)
@@ -1698,6 +1700,80 @@ def _multi_text_turn(base: str, provider) -> None:
     lead = next(text for text in systems if "你是编排者" in text)
     if "writer" not in lead or "文字任务" not in lead:
         fail("编排者的系统指令里没有文字任务的委托规则")
+    if not any(n.get("agent") == "writer" and n.get("summary") for n in nodes):
+        fail("Agent 树的节点没有带子 Agent 摘要")
+
+
+def _unsafe_inner_html(script: str) -> bool:
+    """app.js 只允许把 markdownHtml(...) 的结果放进 innerHTML（以及兜底时读转义后的 innerHTML）。"""
+    allowed = (".innerHTML = markdownHtml(", "div.innerHTML.replace(")
+    rest = script
+    for pattern in allowed:
+        rest = rest.replace(pattern, "")
+    return "innerHTML" in rest
+
+
+_MD_CASES = [
+    # (输入, 必须出现, 不得出现)
+    ("# 标题\n\n## 二级", ["<h1>标题</h1>", "<h2>二级</h2>"], []),
+    ("**粗** *斜* `a<b`", ["<strong>粗</strong>", "<em>斜</em>", "<code>a&lt;b</code>"], []),
+    ("- 甲\n- 乙\n\n1. 一\n2. 二", ["<ul><li>甲</li><li>乙</li></ul>", "<ol><li>一</li><li>二</li></ol>"], []),
+    ("> 引用", ["<blockquote><p>引用</p></blockquote>"], []),
+    ("|a|b|\n|-|-|\n|1|2|", ["<table>", "<th>a</th>", "<td>2</td>"], []),
+    ("```py\nprint('<x>')\n```", ['<pre><code class="language-py">print(&#39;&lt;x&gt;&#39;)</code></pre>'], []),
+    ("```\n流式中未闭合", ["<pre><code>流式中未闭合</code></pre>"], []),
+    ("[官网](https://example.com/?a=1&b=2) [信](mailto:a@b.c)",
+     ['<a href="https://example.com/?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">官网</a>', 'href="mailto:a@b.c"'], []),
+    ("<script>alert(1)</script>", ["&lt;script&gt;"], ["<script"]),
+    ("<img src=x onerror=alert(1)>", ["&lt;img"], ["<img"]),
+    ("[x](javascript:alert(1))", [], ["href", "<a"]),
+    ("[x](JavaScript:alert`1`)", [], ["href"]),
+    ("[x](data:text/html,<b>1</b>)", [], ["href", "<b>"]),
+    ("[x](vbscript:msgbox)", [], ["href"]),
+    ('[x](https://e.com"onmouseover="alert(1))', [], ["onmouseover=\"", "href"]),
+    ("**<svg onload=alert(1)>**", ["<strong>&lt;svg"], ["<svg"]),
+    ("`<iframe>`", ["<code>&lt;iframe&gt;</code>"], ["<iframe"]),
+    ("| <b>x</b> | y |\n|---|---|\n| <i>1</i> | 2 |", ["&lt;b&gt;"], ["<b>", "<i>"]),
+    ("```js\n</code></pre><script>alert(1)</script>\n```", ["&lt;/code&gt;"], ["<script"]),
+    ("snake_case_name", ["snake_case_name"], ["<em>"]),
+]
+
+
+def _markdown_checks(base: str) -> None:
+    status, page = request("GET", base + "/")
+    if page.find("/static/markdown.js") < 0 or page.find("/static/markdown.js") > page.find("/static/app.js"):
+        fail("聊天页没有在 app.js 之前加载本地 Markdown 渲染器")
+    if "cdn" in page.lower() or "unpkg" in page.lower() or "jsdelivr" in page.lower():
+        fail("聊天页从 CDN 加载了脚本")
+    status, md = request("GET", base + "/static/markdown.js")
+    if status != 200 or "renderMarkdown" not in md:
+        fail("取不到 /static/markdown.js")
+    script = request("GET", base + "/static/app.js")[1]
+    if "markdownHtml(message.text" not in script or "markdownHtml(node.summary)" not in script:
+        fail("助手回复或子 Agent 摘要没有按 Markdown 渲染")
+    if 'message.role === "user"' not in script or "text.textContent = message.text" not in script:
+        fail("用户消息没有保持纯文本显示")
+    node = shutil.which("node")
+    if not node:
+        print("check: 跳过 Markdown 渲染用例（没有 node）")
+        return
+    path = os.path.join(WEB_DIR, "static", "markdown.js")
+    driver = (
+        "const {renderMarkdown}=require(process.argv[1]);"
+        "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{"
+        "process.stdout.write(JSON.stringify(JSON.parse(s).map(renderMarkdown)));});"
+    )
+    done = subprocess.run([node, "-e", driver, path], input=json.dumps([c[0] for c in _MD_CASES]),
+                          capture_output=True, text=True, encoding="utf-8", timeout=30)
+    if done.returncode != 0:
+        fail(f"Markdown 渲染器跑不起来：{done.stderr[-300:]}")
+    for (source, must, never), html in zip(_MD_CASES, json.loads(done.stdout)):
+        for piece in must:
+            if piece not in html:
+                fail(f"Markdown 渲染缺少 {piece!r}：{source!r} → {html!r}")
+        for piece in never:
+            if piece in html:
+                fail(f"Markdown 渲染不安全或不对，出现了 {piece!r}：{source!r} → {html!r}")
 
 
 def _skill_turn(base: str, provider) -> None:
