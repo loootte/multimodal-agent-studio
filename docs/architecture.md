@@ -91,6 +91,8 @@ Agent 运行时
 | `POST /api/sessions/{id}/messages` | `chat_run.start`，响应是 SSE。附件只带句柄 |
 | `POST /api/sessions/{id}/attachments`、`GET /api/sessions/{id}/attachments/{handle}` | 对话附件的上传和预览 |
 | `POST /api/sessions/{id}/stop` | `chat_run.stop` |
+| `POST /api/sessions/{id}/delete` | `chat_run.delete_session` → `SessionStore.delete`。删会话 JSON、会话目录、别的会话不再引用的附件和内容字节，以及 POC 工件库里这个会话的生成文件。会话还在回答时返回 409 `session_running`，不替用户停，页面提示先停下。删的是当前会话时页面新建一个空会话 |
+| `GET /api/tools`、`/api/toolpacks/*` | `tool_config.listing` 和工具包检查、安装、卸载、导出，见 [tool-packs.md](tool-packs.md) |
 | `POST /api/runs/{id}/content` | 文字走 `chat_run.submit_content`，文件走 `chat_run.submit_file`。响应只有 `ok`，不回正文、字节、路径或句柄 |
 | `POST /api/runs/{id}/confirm` | `chat_run.submit_confirm`。写操作的确认或拒绝 |
 | `GET /api/runs/{id}/events` | 接回同一次运行的 SSE |
@@ -182,7 +184,7 @@ Agent 运行时
 | `poc/comfyui/artifacts.py` | 按会话保存生成文件和记录。图片、视频，以及技能做成的 HTML 页面。对外只给 `artifact_id`。读文件必须会话和标识都对 |
 | `poc/comfyui/artifacts/` | 不进 Git。下面按会话分 `files/` 和 `records/` |
 
-本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
+本地文字在会话 JSON 的 `contents` 里。上传文件的字节在 `packages/artifacts`，JSON 里只留句柄、种类、媒体类型、大小、用途和校验和。生成图片在 POC 工件库里。这些都由网页进程在同一次运行里写，没有单独的数据库。删除会话时一起清掉；按校验和共用的字节只有在别的会话都不引用时才删。文件不会送进 ComfyUI。发给模型的近期对话附带会话记忆摘要和引用，不含本地正文。
 
 ### 遥测
 

@@ -69,7 +69,7 @@
 - 工具调用在回答旁边按时间出现，能看到名字、状态和失败原因。
 - 键盘能完成发送；上传失败有明确提示。
 
-状态：已完成。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20)。真正的账号留给第 6 阶段。
+状态：已完成。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20)。会话列表可删除对话，回答中的会话拒绝删除。真正的账号留给第 6 阶段。
 
 ## 4. 工件、记忆和检索
 
