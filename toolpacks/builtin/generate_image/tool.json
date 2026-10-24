@@ -2,7 +2,7 @@
   "schema": "mas.tool/1",
   "name": "generate_image",
   "version": "1.0.0",
-  "description": "用本机会话中的文字句柄生成一张图片。一次调用只出一张。要连续多张时分别再调用。不要填写画面描述。文件句柄不能用来出图。",
+  "description": "用内容句柄出一张图。一次调用只出一张，要多张时分别再调用。句柄来自 accept_local_content（本地提示词，1.3）或 stage_prompt（聊天原文 1.1 / 你写的提示词 1.2）。backend 不填或填 local 用本机 ComfyUI；用户要第三方/云端出图时填 remote。不要填写画面描述。文件句柄不能用来出图。",
   "order": 40,
   "parameters": {
     "type": "object",
@@ -32,6 +32,14 @@
       "style": {
         "type": "string",
         "description": "可选。只能是白名单里的名字。"
+      },
+      "backend": {
+        "type": "string",
+        "enum": [
+          "local",
+          "remote"
+        ],
+        "description": "出图后端。local：本机 ComfyUI（默认）；remote：配置好的第三方图片 API。"
       }
     }
   },
@@ -41,7 +49,57 @@
     "kind": "python",
     "module": "poc/tools/internal/image.py"
   },
-  "config": [],
+  "config": [
+    {
+      "name": "remote_base_url",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "secret": false,
+      "env": "MAS_IMAGE_API_BASE",
+      "description": "第三方出图（OpenAI 兼容 /images/generations）的地址，例如 https://api.openai.com/v1。"
+    },
+    {
+      "name": "remote_api_key",
+      "type": "secret",
+      "default": "",
+      "required": false,
+      "secret": true,
+      "env": "MAS_IMAGE_API_KEY",
+      "description": "第三方出图的 API key。只存本机 tools.json 或环境变量。"
+    },
+    {
+      "name": "remote_model",
+      "type": "string",
+      "default": "gpt-image-1",
+      "required": false,
+      "secret": false,
+      "env": "MAS_IMAGE_API_MODEL",
+      "description": "第三方出图的模型名。"
+    },
+    {
+      "name": "remote_local_prompt",
+      "type": "enum",
+      "choices": [
+        "refuse",
+        "confirm"
+      ],
+      "default": "refuse",
+      "required": false,
+      "secret": false,
+      "description": "本地提示词（1.3）能不能发给第三方出图服务。refuse：拒绝（默认）；confirm：每轮先弹确认，说明正文会发给出图服务、但不会发给对话模型。"
+    },
+    {
+      "name": "remote_timeout_sec",
+      "type": "int",
+      "default": 120,
+      "required": false,
+      "secret": false,
+      "min": 5,
+      "max": 600,
+      "description": "第三方出图一次请求的超时秒数。"
+    }
+  ],
   "requires": {
     "backends": [
       "comfyui"

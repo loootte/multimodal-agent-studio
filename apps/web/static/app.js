@@ -247,6 +247,7 @@ function onEvent(event) {
     event.type === "artifact" ||
     event.type === "error" ||
     event.type === "content_request" ||
+    event.type === "image_config" ||
     event.type === "agent"
   ) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
@@ -655,6 +656,13 @@ function bubble(message) {
     text.innerHTML = markdownHtml(message.text || "");
   }
   item.append(who, text);
+  const config = events.filter((entry) => entry.type === "image_config").pop();
+  if (config && config.summary) {
+    const line = document.createElement("p");
+    line.className = "image-config";
+    line.textContent = config.summary;
+    item.append(line);
+  }
   for (const attachment of message.attachments || []) {
     item.append(attachmentView(attachment));
   }
@@ -900,6 +908,12 @@ function confirmRow(message, call) {
   no.type = "button";
   no.textContent = "拒绝";
   no.addEventListener("click", () => submitConfirm(message, false, no));
+  if (call && call.notice) {
+    const notice = document.createElement("p");
+    notice.className = "confirm-notice";
+    notice.textContent = call.notice;
+    row.append(notice);
+  }
   row.append(yes, no);
   return row;
 }

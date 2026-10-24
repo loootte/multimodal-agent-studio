@@ -402,6 +402,15 @@ def run_multi_agent_forced(h: Harness, task: dict, live: bool) -> dict:
 
 
 
+def run_image_skill(h: Harness, task: dict, live: bool) -> dict:
+    """#49：来源 × 后端 × 张数矩阵、1.3 不进对话模型、默认拒绝发第三方、错误带建议、配置说明。"""
+    try:
+        check._image_skill_cases(h.base, h.provider, h.box, h.directory)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "出图技能检查失败") from exc
+    return {"sources": ["chat", "model", "local"], "backends": ["local", "remote"]}
+
+
 def run_skill_mining(h: Harness, task: dict, live: bool) -> dict:
     """#40：夹具轨迹挖出已知模式；噪声不成候选；无泄漏；skills/ 不变。"""
     from services.meta.mine import Miner
@@ -486,6 +495,7 @@ RUNNERS = {
     "multi_agent_forced": run_multi_agent_forced,
     "trajectory_export": run_trajectory_export,
     "skill_mining": run_skill_mining,
+    "image_skill": run_image_skill,
 }
 
 

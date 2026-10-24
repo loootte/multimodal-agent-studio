@@ -143,6 +143,12 @@
       "category": "meta",
       "kind": "skill_mining",
       "fake_only": true
+    },
+    {
+      "id": "image.skill_matrix",
+      "category": "image",
+      "kind": "image_skill",
+      "fake_only": true
     }
   ]
 }

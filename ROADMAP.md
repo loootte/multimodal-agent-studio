@@ -181,6 +181,10 @@
 
 状态：未开始。
 
+## 10. 可配置出图技能
+
+[#49](https://github.com/loootte/multimodal-agent-studio/issues/49)（进行中，`issue-49` 分支）：提示词来源（聊天原文 / 模型撰写 / 本地）× 后端（本机 ComfyUI / 第三方 OpenAI 兼容 API）× 张数（默认 1）。新增 `stage_prompt` 工具、`generate_image` 的 `backend` 参数和第三方配置、`skills/image-gen/SKILL.md`、[ADR 0008](docs/adr/0008-image-skill.md)、[docs/image-skill.md](docs/image-skill.md)。本地提示词始终不进对话模型；发第三方默认拒绝，可改为逐轮确认。
+
 ## 明确延后
 
 这些不进前六个阶段：

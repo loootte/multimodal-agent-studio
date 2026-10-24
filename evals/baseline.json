@@ -15,7 +15,8 @@
         "multi_agent.text_outline_write_review": true,
         "multi_agent.forced_delegation": true,
         "meta.trajectory_export": true,
-        "meta.skill_mining": true
+        "meta.skill_mining": true,
+        "image.skill_matrix": true
       }
     }
   }
