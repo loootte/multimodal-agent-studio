@@ -152,7 +152,34 @@
 - 子 Agent 越权调用工具被运行时拒绝。任何子 Agent 的请求里都没有本地正文或文件字节。
 - 单 Agent 路径行为不变，现有检查和评测全部通过。
 
-状态：进行中（分支 issue-34，见 [ADR 0005](docs/adr/0005-multi-agent.md) 和 [docs/agents.md](docs/agents.md)）。清单与校验、四个内置 Agent、delegate、越权拒绝、分层预算、有限并行与后端串行、停止传播、确认冒泡、界面 Agent 树、agent span、检查和评测已完成；待用户试用后合并。
+状态：已完成（PR #37）。设计见 [ADR 0005](docs/adr/0005-multi-agent.md) 和 [docs/agents.md](docs/agents.md)。交付：Agent 清单与校验、五个内置 Agent（编排者、planner、image、writer、reviewer）、delegate、越权拒绝、分层预算、有限并行与后端串行、停止传播、确认冒泡、Agent 树、agent span、Markdown 渲染、检查和评测。已知缺口：
+
+- 用真实模型时，多智能体模式下的文字任务仍可能一步答完；研究类任务还没有委托流程。见 [issue #38](https://github.com/loootte/multimodal-agent-studio/issues/38)。
+- reviewer 看不到图片内容；只有编排者和 planner 能读取技能全文。
+- 评测只用假的模型服务和假的 ComfyUI；生图编排在真实环境手动试过。
+
+## 9. Meta-Agent：轨迹挖掘、技能巩固与工具化
+
+[issue #36](https://github.com/loootte/multimodal-agent-studio/issues/36)。建立在第 7 阶段的工具清单（#31）和第 8 阶段的 Agent 清单、span（#34）之上。开工前先写 ADR 0006：Meta-Agent 只观察和提议，不执行业务任务，对技能、工具和 Agent 的任何改动都要用户批准。
+
+按顺序：
+
+0. （前置，建议先做）[#38](https://github.com/loootte/multimodal-agent-studio/issues/38) 多智能体：研究类和长文字任务必须走委托，为挖掘提供真实的多 Agent 轨迹。
+1. [#39](https://github.com/loootte/multimodal-agent-studio/issues/39) 轨迹导出与索引：规范化的 `mas.trajectory/1`，来源为会话事件和 `telemetry.jsonl`，本地内容、密钥和路径不进轨迹。
+2. [#40](https://github.com/loootte/multimodal-agent-studio/issues/40) 技能挖掘：统计重复子流程，生成带证据（run_id、次数、成功率）的技能候选，不写 `skills/`。
+3. [#41](https://github.com/loootte/multimodal-agent-studio/issues/41) 记忆巩固：合并、重写、淘汰技能的提议，附 diff 和证据；用户批准才写入，可回滚。
+4. [#42](https://github.com/loootte/multimodal-agent-studio/issues/42) 工具化评估：起草 `mas.tool/1` 清单、桩代码和测试；用户批准后才走工具包安装。
+5. [#43](https://github.com/loootte/multimodal-agent-studio/issues/43) Meta-Agent 定义、手动和定时入口、报告界面（#36 的六段输出格式）。
+6. [#44](https://github.com/loootte/multimodal-agent-studio/issues/44) 评测与发布门槛：挖掘召回、批准前零写入、隐私和越权的反向用例。
+
+完成标准：
+
+- 手动触发一次分析，得到 #36 格式的六段报告，事实条目能追溯到 run_id。
+- 任何供应商请求、轨迹和报告里都没有本地正文、文件字节和密钥。
+- 未经用户批准，`skills/`、已安装工具和 Agent 清单不变；批准的改动可以回滚。
+- 现有检查和评测全部通过。
+
+状态：未开始。
 
 ## 明确延后
 
