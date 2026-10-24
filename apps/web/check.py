@@ -941,6 +941,7 @@ def _runtime_cases() -> None:
         _runtime_clock()
         _runtime_demo(registry, runtime_run, traces_for)
         _runtime_budget(registry, runtime_run, traces_for)
+        _runtime_slow_tools(registry, runtime_run)
         _runtime_confirm(registry, runtime_run)
         _runtime_cancel(registry, runtime_run)
         _runtime_invalid_schema(registry, runtime_run)
@@ -1014,6 +1015,34 @@ def _runtime_budget(registry, runtime_run, traces_for) -> None:
     items = traces_for(events[0]["run_id"])
     if [item.get("type") for item in items] != ["model", "tool", "model", "tool"]:
         fail(f"步数预算用尽时追踪不对：{[item.get('type') for item in items]}")
+
+
+def _runtime_slow_tools(registry, runtime_run) -> None:
+    from services.runtime import Budget
+
+    calls = {"n": 0}
+    adapter = _ScriptAdapter(None)
+
+    def script(request, **kwargs):
+        adapter.calls.append(request)
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            yield {"type": "tool.requested", "name": "lookup_demo", "arguments": {"topic": "slow"}}
+        else:
+            yield {"type": "message.delta", "text": "五张都好了"}
+
+    adapter.stream = script
+    _install_script(registry, "runtime-slow", adapter)
+
+    def execute(name, arguments):
+        time.sleep(0.3)
+        return {"ok": True, "tool": name}
+
+    events = _runtime_collect(
+        runtime_run, "runtime-slow", "连续出五张", execute=execute, budget=Budget(steps=24, time_sec=1.0),
+    )
+    if events[-1].get("type") != "message.completed" or _gateway_text_of(events) != "五张都好了":
+        fail(f"慢工具（出图）把时间预算吃光，连续出图做到一半停下：{events[-1]}")
 
 
 def _runtime_confirm(registry, runtime_run) -> None:

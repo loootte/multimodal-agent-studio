@@ -134,6 +134,7 @@ def run(
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
             return
+        tool_started = time.monotonic()
         stopped = yield from _use_tool(
             run_id,
             messages,
@@ -145,6 +146,8 @@ def run(
             mutating,
             take,
         )
+        # 时间预算只算模型思考：等人确认和工具执行（如一张图一分钟）不计入，免得连续出图做到一半被掐断。
+        clock.started += time.monotonic() - tool_started
         if stopped:
             return
 

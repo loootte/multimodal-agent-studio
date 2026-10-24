@@ -1048,6 +1048,8 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     result = _run_image(app, session_id, message_id, run, bound.get("arguments") or {})
     public = _public_generate_result(result, handle)
     if public.get("ok"):
+        run._images_done = getattr(run, "_images_done", 0) + 1
+        public["images_done_this_turn"] = run._images_done
         _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
         app.sessions.update_message(
             session_id, message_id, text=app.sessions.message_text(session_id, message_id), status="running", error=None,
