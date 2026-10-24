@@ -401,6 +401,19 @@ def run_multi_agent_forced(h: Harness, task: dict, live: bool) -> dict:
     return {"chain": ["planner", "writer", "reviewer"], "greeting": "direct"}
 
 
+
+def run_skill_mining(h: Harness, task: dict, live: bool) -> dict:
+    """#40：夹具轨迹挖出已知模式；噪声不成候选；无泄漏；skills/ 不变。"""
+    from services.meta.mine import Miner
+
+    try:
+        check._mining_case(h.base, h.directory)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "技能挖掘检查失败") from exc
+    store = Miner(h.directory).load_store()
+    return {"candidates": len(store.get("candidates") or []), "mined_at": store.get("mined_at")}
+
+
 def run_trajectory_export(h: Harness, task: dict, live: bool) -> dict:
     """#39：多智能体文字回合之后导出轨迹：校验通过、幂等、委托树完整、没有密钥和数据目录路径。"""
     from services.meta.export import Exporter
@@ -472,6 +485,7 @@ RUNNERS = {
     "multi_agent_text": run_multi_agent_text,
     "multi_agent_forced": run_multi_agent_forced,
     "trajectory_export": run_trajectory_export,
+    "skill_mining": run_skill_mining,
 }
 
 
