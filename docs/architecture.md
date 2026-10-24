@@ -203,6 +203,12 @@ Agent 运行时
 - `GET /api/telemetry?trace_id=&limit=`：最近的记录和按种类的汇总（次数、失败率、平均/最大耗时、token）；
 - `GET /api/telemetry/{trace_id}`：一次运行的整条链路。
 
+每条遥测还带当前运行的 `run_id`（子 Agent 的工具和模型调用记到子运行上），工具记录带参数摘要 `args`（只有句柄、数字和键名）。
+
+### 轨迹（#39）
+
+`services/meta/`：把会话事件和 `telemetry.jsonl` 规范化成 `mas.trajectory/1`，一次运行一条，写到 `<data_dir>/trajectories/`，并维护按工具、Agent、技能、结果、时间查询的索引。增量幂等，导出前脱敏（本地内容只留句柄、密钥和路径替换、最后断言）。入口是 `python -m services.meta.export [query ...]` 和只接受本机的 `GET /api/trajectories`。字段、隐私规则和示例见 [trajectory.md](trajectory.md)，决策见 [ADR 0006](adr/0006-trajectories.md)。
+
 ### 检查
 
 | 文件 | 做什么 |

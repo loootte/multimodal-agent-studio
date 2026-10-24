@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import inspect
 import time
 import uuid
@@ -30,7 +31,17 @@ def new_run_id() -> str:
     return "r_" + uuid.uuid4().hex
 
 
-def run(
+def run(request, *args, run_id: str | None = None, **kwargs):
+    """见 _run。外层只负责在这次运行期间把 run_id 绑到遥测上（ADR 0006）。"""
+    run_id = run_id or new_run_id()
+    previous = telemetry.enter_run(run_id)
+    try:
+        yield from _run(request, *args, run_id=run_id, **kwargs)
+    finally:
+        telemetry.leave_run(previous)
+
+
+def _run(
     request,
     *,
     api_key: str,
@@ -241,7 +252,8 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
     problem = (validate or validate_arguments)(name, arguments)
     if problem:
         result = problem
-        telemetry.record("tool", name=name, ms=0, ok=False, error_code=_code_of(problem), executed=False)
+        telemetry.record("tool", name=name, ms=0, ok=False, error_code=_code_of(problem), executed=False,
+                         args=arg_digest(arguments))
     else:
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
@@ -261,6 +273,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
             ms=int((time.monotonic() - started) * 1000),
             ok=bool(result.get("ok")),
             error_code=None if result.get("ok") else _code_of(result),
+            args=arg_digest(arguments),
         )
     messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
     messages.append({
@@ -268,6 +281,30 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         "parts": [{"type": "text", "text": "工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)}],
     })
     return False
+
+
+_HANDLE = re.compile(r"(c|a|art|s|m|r)_[0-9a-f]{8,64}")
+
+
+def arg_digest(arguments) -> dict | None:
+    """工具参数摘要（ADR 0006）：句柄、数字、布尔原样；字符串只记长度；read_skill 等的 name 保留。不含正文。"""
+    if not isinstance(arguments, dict):
+        return None
+    out = {}
+    for key, value in list(arguments.items())[:20]:
+        key = str(key)[:40]
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            out[key] = value
+        elif isinstance(value, str):
+            if _HANDLE.fullmatch(value) or (key == "name" and re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", value)):
+                out[key] = value
+            else:
+                out[key] = {"chars": len(value)}
+        elif isinstance(value, list):
+            out[key] = {"items": len(value)}
+        elif isinstance(value, dict):
+            out[key] = {"keys": sorted(str(k)[:40] for k in value)[:10]}
+    return out
 
 
 def _code_of(result) -> str:

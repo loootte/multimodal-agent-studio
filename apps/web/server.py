@@ -125,6 +125,35 @@ def _handler(app: App):
     return Handler
 
 
+def _trajectories(handler, app, query) -> None:
+    """只读、仅本机：先增量导出，再按工具、Agent、技能、结局、时间查询（ADR 0006）。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        _send_json(handler, 403, {"code": "forbidden", "message": "轨迹只给本机看。"})
+        return
+    from services.meta.export import Exporter
+
+    def one(name):
+        value = (query.get(name) or [""])[0].strip()
+        return value[:80] or None
+
+    for name in ("tool", "agent", "skill", "outcome", "mode", "session"):
+        value = one(name)
+        if value and not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value):
+            _send_json(handler, 400, {"code": "invalid_query", "message": f"{name} 不合法。"})
+            return
+    try:
+        limit = max(1, min(1000, int(one("limit") or 100)))
+    except ValueError:
+        limit = 100
+    exporter = Exporter(app.data_dir)
+    stats = exporter.export()
+    items = exporter.query(tool=one("tool"), agent=one("agent"), skill=one("skill"), outcome=one("outcome"),
+                           mode=one("mode"), session=one("session"), since=one("since"), until=one("until"),
+                           limit=limit, full=one("brief") is None)
+    _send_json(handler, 200, {"schema": "mas.trajectory/1", "export": stats, "trajectories": items})
+
+
 def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
     try:
         parsed = urllib.parse.urlparse(handler.path)
@@ -138,6 +167,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
                 return
             _send_file(handler, os.path.join(WEB_DIR, "static", name), _STATIC[name])
+            return
+        if method == "GET" and path == "/api/trajectories":
+            _trajectories(handler, app, urllib.parse.parse_qs(parsed.query))
             return
         if method == "GET" and (path == "/api/telemetry" or path.startswith("/api/telemetry/")):
             query = urllib.parse.parse_qs(parsed.query)

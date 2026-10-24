@@ -69,6 +69,21 @@ def classify(code) -> str:
     return "tool"
 
 
+def enter_run(run_id: str | None):
+    """运行时在一次 loop.run 期间把 run_id 绑在线程上，让子 Agent 的模型和工具调用能归到子运行（ADR 0006）。返回之前的值。"""
+    previous = getattr(_local, "run_id", None)
+    _local.run_id = run_id
+    return previous
+
+
+def leave_run(previous) -> None:
+    _local.run_id = previous
+
+
+def current_run() -> str | None:
+    return getattr(_local, "run_id", None)
+
+
 def note_usage(usage) -> None:
     if isinstance(usage, dict):
         _local.usage = usage
@@ -91,6 +106,9 @@ def record(kind: str, trace_id: str | None = None, **fields) -> None:
     if not _path or not trace_id:
         return
     entry = {"ts": round(time.time(), 3), "trace_id": trace_id, "kind": kind}
+    run_id = current_run()
+    if run_id and "run_id" not in fields:
+        entry["run_id"] = run_id
     for key, value in fields.items():
         if value is not None:
             entry[key] = value
