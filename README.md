@@ -32,6 +32,7 @@
 | [docs/agents.md](docs/agents.md) | 多智能体：Agent 清单（mas.agent/1）怎么写、安装导出、运行时边界 |
 | [docs/tool-pack-guide.md](docs/tool-pack-guide.md) | 工具包使用和编写指南：能装什么、入口函数、安装配置导出、常见错误 |
 | [docs/tool-packs.md](docs/tool-packs.md) | 工具包规范：`tool.json` 清单、后端、权限、安装导出 |
+| [docs/local-resources.md](docs/local-resources.md) | 本地资源面板：查看、筛选、预览、标签、下载、复用、引用感知删除 |
 | [docs/adr/0004-tool-governance.md](docs/adr/0004-tool-governance.md) | 工具规范：`poc/tools` 自注册，MCP 是进程内投影 |
 
 ## 状态
