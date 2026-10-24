@@ -563,7 +563,8 @@ function bubble(message) {
     image.src = src;
     item.append(image);
   }
-  if (artifact && artifact.media === "html") {
+  for (const artifact of artifacts) {
+    if (artifact.media !== "html") continue;
     const src = artifactSrc(artifact);
     if (src) {
       const link = document.createElement("a");
