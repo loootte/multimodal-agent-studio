@@ -465,3 +465,7 @@ dialog input {
   .sidebar.open { display: flex; }
   .bubble { max-width: 92%; }
 }
+
+#tool-settings { max-width: 40rem; }
+.tool-fields { max-height: 60vh; overflow-y: auto; padding-right: 0.3rem; }
+dialog select { font: inherit; padding: 0.35rem; }

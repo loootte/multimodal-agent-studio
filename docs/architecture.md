@@ -168,6 +168,7 @@ Agent 运行时
 | `poc/comfyui/workflows/video_api.json`、`video.fields.json` | 文生视频模板。网页还没接 |
 | `poc/comfyui/workflows/video_i2v_api.json`、`video_i2v.fields.json` | 图生视频模板。网页还没接 |
 | `poc/comfyui/config.example.json` | 配置样例。本机的 `config.json` 不进 Git，也可用 `COMFY_*` 环境变量盖掉 |
+| `apps/web/tool_config.py` | 工具配置（issue #28 第 1 部分）。每个工具声明配置项（字段名、类型 string/int/enum/path/secret、默认值、必填、保密、说明）。用户改过的值存到数据目录的 `tools.json`（和 `provider.json` 同目录），保密字段只回掩码提示。优先级：`COMFY_*` 环境变量 > `tools.json` > `config.json`/`config.example.json` 迁来的默认值。`comfy_poc.load_config` 每次调用 `CONFIG_OVERLAY` 钩子现读，改完下一次运行生效。接口 `GET /api/tools`、`GET/PUT /api/tools/{name}/config`、`POST /api/tools/{name}/test`（`/system_stats` 或 `/queue` 判断能否连上，`/object_info` 核对所选工作流的节点） |
 | `poc/comfyui/chat.py` | 这张 POC 脚本自己的助手消息：`tool_call`、`progress`、`artifact` 或 `error`。网页的一轮回答不走这个文件 |
 | `poc/comfyui/README.md` | 命令、字段对照和各条 issue 的边界 |
 

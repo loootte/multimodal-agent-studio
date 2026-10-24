@@ -33,4 +33,6 @@
 
 ## 状态
 
+工具参数（ComfyUI 地址、工作流模板和字段对照、默认画幅、步数、种子策略、超时、输出目录）可以在网页右上角“工具”里配置，保存后下一次运行生效，不用重启；`COMFY_*` 环境变量仍然优先。见 [docs/architecture.md](docs/architecture.md) 里的 `apps/web/tool_config.py`。
+
 路线图第 0、1、2、3、4 阶段已完成。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 补齐工件库、检索和会话记忆。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐网页附件、工具时间线、确认和失败重试。issue #9 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天，issue #10 让同一页面调用已有的文生图工具。`poc/comfyui` 包含 issue #1 的提交脚本、issue #2 的 `generate_image` / `generate_video`、issue #3 的工作流模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。

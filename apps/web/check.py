@@ -2018,6 +2018,7 @@ class ComfyState:
         self.history_hits = {}
         self.release = threading.Event()
         self.hold_after = None
+        self.missing_nodes = set()
 
     def set_mode(self, mode: str) -> None:
         with self.cv:
@@ -2103,6 +2104,13 @@ class ComfyHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/queue":
             self._json({"queue_running": [], "queue_pending": []})
+            return
+        if parsed.path == "/system_stats":
+            self._json({"system": {"os": "fake"}, "devices": []})
+            return
+        if parsed.path == "/object_info":
+            box = self.server.box
+            self._json({name: {} for name in _workflow_classes() if name not in box.missing_nodes})
             return
         if parsed.path == "/view":
             self._bytes(_PNG, "image/png")
@@ -2238,6 +2246,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_plan_case(base, provider, comfy.box)
         _local_ask_case(base, provider, comfy.box)
         _batch_stop_case(base, provider, comfy.box)
+        _tool_config_case(base, provider, comfy.box, directory, port)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -3028,6 +3037,127 @@ def _local_ask_case(base: str, provider, box: ComfyState) -> None:
     tools = json.dumps(provider.requests[sent].get("body", {}).get("tools") or [], ensure_ascii=False)
     if "弹出输入框" not in tools or "绝不要让用户把提示词贴到聊天里" not in tools:
         fail("accept_local_content 的说明没有讲清楚是本机输入框")
+
+
+def _workflow_classes() -> set:
+    found = set()
+    folder = os.path.join(ROOT, "poc", "comfyui", "workflows")
+    for name in os.listdir(folder):
+        if name.endswith("_api.json"):
+            with open(os.path.join(folder, name), encoding="utf-8") as handle:
+                graph = json.load(handle)
+            found.update(node.get("class_type") for node in graph.values() if isinstance(node, dict))
+    return found
+
+
+def _tool_config_case(base: str, provider, box: ComfyState, directory: str, port: int) -> None:
+    import chat_run
+
+    tools_path = os.path.join(directory, "tools.json")
+    if not os.path.isfile(os.path.join(directory, "provider.json")):
+        fail("工具配置用例找不到 provider.json 的目录")
+    status, body = request("GET", base + "/api/tools")
+    listing = json.loads(body)
+    if status != 200 or [tool["name"] for tool in listing.get("tools") or []] != ["comfyui"]:
+        fail(f"工具列表不对：{body}")
+    view = json.loads(request("GET", base + "/api/tools/comfyui/config")[1])
+    fields = {field["name"]: field for field in view.get("fields") or []}
+    for name in ("base_url", "auth_token", "output_dir", "image_workflow", "image_fields", "video_i2v_workflow",
+                 "image_timeout_sec", "default_aspect_ratio", "steps", "seed_policy", "seed"):
+        if name not in fields:
+            fail(f"ComfyUI 配置声明缺 {name}")
+    for field in fields.values():
+        if field["type"] not in ("string", "int", "enum", "path", "secret") or not {"default", "required", "secret", "description"} <= set(field):
+            fail(f"配置声明格式不对：{field}")
+    if view["values"]["base_url"] != {"source": "env", "value": f"http://127.0.0.1:{port}"}:
+        fail(f"环境变量 COMFY_URL 没有标成 source=env：{view['values']['base_url']}")
+    if view["values"]["image_workflow"].get("source") != "default" or view["values"]["image_timeout_sec"].get("value") != 20:
+        fail(f"现有 poc 配置没有迁成默认值：{view['values']['image_workflow']} {view['values']['image_timeout_sec']}")
+    if os.path.exists(tools_path):
+        fail("没保存过就写出了 tools.json")
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {
+        "base_url": "ftp://nowhere", "steps": "many", "image_workflow": "workflows/none_api.json",
+        "seed_policy": "sometimes", "bogus": 1,
+    }})
+    errors = json.loads(body).get("errors") or {}
+    if status != 400 or set(errors) != {"base_url", "steps", "image_workflow", "seed_policy", "bogus"}:
+        fail(f"工具配置校验没有按字段报错：{status} {body}")
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {"image_fields": "workflows/video.fields.json"}})
+    if status != 400 or "image_fields" not in (json.loads(body).get("errors") or {}):
+        fail(f"模板和字段对照不匹配时没有拒绝：{body}")
+    if os.path.exists(tools_path):
+        fail("校验失败仍写了 tools.json")
+    token = "comfy-token-ABCD9876"
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {
+        "auth_token": token, "steps": 13, "base_url": "http://127.0.0.1:1",
+    }})
+    if status != 200 or token in body:
+        fail(f"保存工具配置失败或回传了保密原值：{status}")
+    saved = json.loads(body)
+    if saved["values"]["auth_token"] != {"source": "saved", "configured": True, "hint": "9876"}:
+        fail(f"保密字段没有掩码提示：{saved['values']['auth_token']}")
+    if saved["values"]["base_url"]["source"] != "env":
+        fail("保存的地址盖过了环境变量")
+    with open(tools_path, encoding="utf-8") as handle:
+        stored = json.load(handle)
+    if stored.get("comfyui", {}).get("auth_token") != token or stored["comfyui"].get("steps") != 13:
+        fail(f"tools.json 内容不对：{stored}")
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {"steps": 13}})
+    if status != 200 or json.loads(body)["values"]["auth_token"].get("configured") is not True:
+        fail("不带保密字段的保存把原值清掉了")
+    if token in request("GET", base + "/api/tools/comfyui/config")[1]:
+        fail("读取工具配置时回传了保密原值")
+    # 运行时每次现读：不重启，下一次出图就用新步数；地址仍以环境变量为准。
+    provider.mode = "image"
+    box.set_mode("ok")
+    fields_map = _image_fields(os.path.join(ROOT, "poc", "comfyui", "workflows", "image_api.json"))
+    session_id = _fresh_session(base)
+    before = len(box.prompts)
+    events = _speak(base, session_id, "画一只配置茶壶", timeout=12)
+    if events[-1].get("type") != "message.completed" or len(box.prompts) != before + 1:
+        fail(f"保存工具配置后出图失败：{events[-1]}")
+    if _field_input(box.prompts[-1]["prompt"], fields_map, "steps") != 13:
+        fail("出图没有用保存的步数")
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {"steps": 0}})
+    _speak(base, session_id, "画一只默认茶壶", timeout=12)
+    with open(os.path.join(ROOT, "poc", "comfyui", "workflows", "image_api.json"), encoding="utf-8") as handle:
+        template_steps = _field_input(json.load(handle), fields_map, "steps")
+    if _field_input(box.prompts[-1]["prompt"], fields_map, "steps") != template_steps:
+        fail("改回默认步数后下一次出图没有恢复模板值")
+    request("PUT", base + "/api/tools/comfyui/config", {"values": {"default_aspect_ratio": "16:9"}})
+    if chat_run._aspect_from_text("画一只猫") != "16:9":
+        fail("默认尺寸没有每次现读")
+    # 测试连接：能连上、缺节点、连不上。
+    status, body = request("POST", base + "/api/tools/comfyui/test")
+    result = json.loads(body)
+    if status != 200 or result.get("ok") is not True:
+        fail(f"测试连接没有通过：{body}")
+    box.missing_nodes = {"KSampler"}
+    try:
+        result = json.loads(request("POST", base + "/api/tools/comfyui/test")[1])
+    finally:
+        box.missing_nodes = set()
+    if result.get("code") != "missing_nodes" or "KSampler" not in result.get("missing", {}).get("image", []):
+        fail(f"测试连接没有指出缺少的节点：{result}")
+    saved_url = os.environ["COMFY_URL"]
+    os.environ["COMFY_URL"] = "http://127.0.0.1:1"
+    try:
+        result = json.loads(request("POST", base + "/api/tools/comfyui/test", timeout=10)[1])
+    finally:
+        os.environ["COMFY_URL"] = saved_url
+    if result.get("code") != "unreachable":
+        fail(f"测试连接没有区分连不上：{result}")
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"reset": True, "values": {}})
+    view = json.loads(body)
+    with open(tools_path, encoding="utf-8") as handle:
+        if "comfyui" in json.load(handle):
+            fail("恢复默认值后 tools.json 仍有保存值")
+    if view["values"]["steps"]["source"] != "default" or view["values"]["auth_token"].get("configured"):
+        fail("恢复默认值后视图不对")
+    script = request("GET", base + "/static/app.js")[1]
+    page = request("GET", base + "/")[1]
+    if "/api/tools/" not in script or 'id="tool-settings"' not in page or "恢复默认值" not in page or "测试连接" not in page:
+        fail("页面没有工具配置表单")
 
 
 def _batch_stop_case(base: str, provider, box: ComfyState) -> None:

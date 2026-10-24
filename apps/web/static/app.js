@@ -1058,6 +1058,7 @@ async function api(method, path, body) {
   if (!response.ok) {
     const error = new Error(payload.message || "请求失败。");
     error.code = payload.code;
+    error.errors = payload.errors || null;
     throw error;
   }
   return payload;
@@ -1112,4 +1113,154 @@ function rememberSession(sessionId) {
 
 function readSavedSession() {
   try { return localStorage.getItem("mas.session"); } catch (error) { return null; }
+}
+
+// ---- 工具配置：按工具声明自动生成表单 ----
+const toolDialog = document.querySelector("#tool-settings");
+document.querySelector("#open-tools").addEventListener("click", openToolSettings);
+document.querySelector("#close-tools").addEventListener("click", () => toolDialog.close());
+document.querySelector("#tool-form").addEventListener("submit", saveToolConfig);
+document.querySelector("#tool-reset").addEventListener("click", resetToolConfig);
+document.querySelector("#tool-test").addEventListener("click", testToolConfig);
+document.querySelector("#tool-select").addEventListener("change", (event) => loadToolConfig(event.target.value));
+
+const SOURCE_LABEL = { env: "来自环境变量（优先，页面改不了）", saved: "已保存", default: "默认值" };
+
+async function openToolSettings() {
+  toolNote("");
+  try {
+    const listing = await api("GET", "/api/tools");
+    const select = document.querySelector("#tool-select");
+    select.replaceChildren(...listing.tools.map((tool) => {
+      const option = document.createElement("option");
+      option.value = tool.name;
+      option.textContent = tool.complete ? tool.title : `${tool.title}（未配全）`;
+      return option;
+    }));
+    if (listing.tools.length) await loadToolConfig(listing.tools[0].name);
+  } catch (error) {
+    toolNote(error.message || "读不到工具配置。");
+  }
+  toolDialog.showModal();
+}
+
+async function loadToolConfig(name) {
+  state.toolView = await api("GET", `/api/tools/${encodeURIComponent(name)}/config`);
+  renderToolForm(state.toolView);
+}
+
+function renderToolForm(view, errors) {
+  const box = document.querySelector("#tool-fields");
+  document.querySelector("#tool-description").textContent = view.description || "";
+  document.querySelector("#tool-test").hidden = !view.testable;
+  box.replaceChildren();
+  for (const field of view.fields) {
+    const current = view.values[field.name] || {};
+    const label = document.createElement("label");
+    label.append(document.createTextNode(field.name + (field.required ? " *" : "")));
+    let control;
+    if (field.type === "enum") {
+      control = document.createElement("select");
+      for (const choice of field.choices || []) {
+        const option = document.createElement("option");
+        option.value = choice;
+        option.textContent = choice;
+        control.append(option);
+      }
+      control.value = current.value ?? field.default;
+    } else {
+      control = document.createElement("input");
+      control.autocomplete = "off";
+      control.spellcheck = false;
+      if (field.type === "int") control.type = "number";
+      if (field.type === "secret") {
+        control.type = "password";
+        control.placeholder = current.configured ? `已保存（…${current.hint || ""}），留空保持不变` : "未设置";
+      } else {
+        control.value = current.value ?? "";
+      }
+      if (field.type === "path" && field.choices && field.choices.length) {
+        const list = document.createElement("datalist");
+        list.id = `choices-${field.name}`;
+        for (const choice of field.choices) {
+          const option = document.createElement("option");
+          option.value = choice;
+          list.append(option);
+        }
+        label.append(list);
+        control.setAttribute("list", list.id);
+      }
+    }
+    control.name = field.name;
+    control.dataset.type = field.type;
+    if (current.source === "env") control.disabled = true;
+    label.append(control);
+    const hint = document.createElement("span");
+    hint.className = "hint";
+    hint.textContent = `${field.description || ""} ${SOURCE_LABEL[current.source] || ""}`.trim();
+    label.append(hint);
+    const problem = errors && errors[field.name];
+    if (problem) {
+      const bad = document.createElement("span");
+      bad.className = "note";
+      bad.textContent = problem;
+      label.append(bad);
+    }
+    box.append(label);
+  }
+}
+
+function toolFormValues() {
+  const values = {};
+  for (const control of document.querySelectorAll("#tool-fields [name]")) {
+    if (control.disabled) continue;
+    const type = control.dataset.type;
+    if (type === "secret" && !control.value) continue;
+    values[control.name] = type === "int" ? Number(control.value || 0) : control.value;
+  }
+  return values;
+}
+
+async function saveToolConfig(event) {
+  event.preventDefault();
+  const view = state.toolView;
+  if (!view) return;
+  try {
+    state.toolView = await api("PUT", `/api/tools/${encodeURIComponent(view.name)}/config`, { values: toolFormValues() });
+    renderToolForm(state.toolView);
+    toolNote("已保存，下一次运行就会用新配置。");
+  } catch (error) {
+    renderToolForm(view, error.errors);
+    toolNote(error.message || "保存失败。");
+  }
+}
+
+async function resetToolConfig() {
+  const view = state.toolView;
+  if (!view) return;
+  try {
+    state.toolView = await api("PUT", `/api/tools/${encodeURIComponent(view.name)}/config`, { reset: true, values: {} });
+    renderToolForm(state.toolView);
+    toolNote("已恢复默认值。");
+  } catch (error) {
+    toolNote(error.message || "恢复失败。");
+  }
+}
+
+async function testToolConfig() {
+  const view = state.toolView;
+  if (!view) return;
+  toolNote("正在测试连接…");
+  try {
+    const result = await api("POST", `/api/tools/${encodeURIComponent(view.name)}/test`);
+    toolNote(result.message || (result.ok ? "连接正常。" : "连接失败。"));
+  } catch (error) {
+    toolNote(error.message || "测试失败。");
+  }
+}
+
+function toolNote(message) {
+  const line = document.querySelector("#tool-note");
+  line.hidden = !message;
+  line.textContent = message || "";
 }

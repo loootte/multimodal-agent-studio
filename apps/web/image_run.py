@@ -50,6 +50,18 @@ def comfy_base() -> str | None:
     return base
 
 
+def default_aspect() -> str:
+    """用户没说画幅时用工具配置里的默认尺寸。每次现读。"""
+    _ensure_poc()
+    import comfy_poc
+
+    try:
+        value = comfy_poc.run_defaults(comfy_poc.load_config()).get("aspect_ratio")
+    except comfy_poc.ComfyFailure:
+        return "1:1"
+    return value if value in comfy_poc.ASPECTS else "1:1"
+
+
 def generate(session_id: str, arguments: dict, on_event) -> dict:
     """把这一会话收成 COMFY_SESSION，避免和别的页面跑混工件。"""
     _ensure_poc()

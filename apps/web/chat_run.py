@@ -1546,7 +1546,7 @@ def _aspect_from_text(text: str) -> str:
         if position >= 0:
             found.append((position, aspect))
     if not found:
-        return "1:1"
+        return image_run.default_aspect()
     found.sort()
     return found[0][1]
 
