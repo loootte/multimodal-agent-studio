@@ -13,7 +13,8 @@
         "multi_agent.delegate_plan": true,
         "multi_agent.child_tool_not_allowed": true,
         "multi_agent.text_outline_write_review": true,
-        "multi_agent.forced_delegation": true
+        "multi_agent.forced_delegation": true,
+        "meta.trajectory_export": true
       }
     }
   }

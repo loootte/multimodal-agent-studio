@@ -1603,6 +1603,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _busy_case(base, session_id, provider)
     _timeout_case(base, session_id, provider, app)
     _image_cases(base, provider, directory)
+    _trajectory_case(base, directory)
 
     status, cleared = request("PUT", base + "/api/provider", {
         "base_url": upstream,
@@ -1615,6 +1616,178 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     events = _speak(base, session_id, "清除后再问")
     if events[-1].get("code") != "missing_key" or len(provider.requests) != before:
         fail("清除密钥后仍向模型发了请求")
+
+
+def _check_secrets(directory: str) -> list[str]:
+    """这次检查留下的所有本地正文、文件和附件字节（文本和 base64）、密钥和数据目录路径。"""
+    import base64 as _b64
+    found = [SECRET, os.path.abspath(directory), ROOT]
+    with open(os.path.abspath(__file__), encoding="utf-8") as handle:
+        found += re.findall(r'secret = "([^"]{8,})"', handle.read())
+    sessions = os.path.join(directory, "sessions")
+    for name in os.listdir(sessions):
+        if not name.endswith(".json"):
+            continue
+        with open(os.path.join(sessions, name), encoding="utf-8") as handle:
+            data = json.load(handle)
+        for item in data.get("contents") or []:
+            if isinstance(item.get("text"), str) and len(item["text"]) >= 8:
+                found.append(item["text"])
+    for folder, _dirs, files in os.walk(directory):
+        if "trajectories" in folder:
+            continue
+        for name in files:
+            if name.endswith((".json", ".jsonl", ".tmp")):
+                continue
+            with open(os.path.join(folder, name), "rb") as handle:
+                data = handle.read()
+            if len(data) < 16:
+                continue
+            found.append(_b64.b64encode(data).decode("ascii")[:64])
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if len(text.strip()) >= 8:
+                found.append(text.strip()[:200])
+    return found
+
+
+def _trajectory_case(base: str, directory: str) -> None:
+    """#39 / ADR 0006：在存过本地正文和文件、跑过生图、多智能体、技能回合之后导出轨迹。
+    每条都通过 schema 校验；搜不到本地正文、文件字节、密钥和绝对路径；重复导出幂等；委托关系能还原成树。"""
+    from services.meta.export import Exporter
+    from services.meta.trajectory import build_tree, validate
+
+    exporter = Exporter(directory)
+    first = exporter.export()
+    if first["written"] <= 0 or first["dropped"]:
+        fail(f"轨迹导出不对：{first}")
+    second = exporter.export()
+    if second["written"] != 0 or second["total"] != first["total"]:
+        fail(f"重复导出不幂等：{first} → {second}")
+    path = os.path.join(directory, "trajectories", "trajectories.jsonl")
+    with open(path, encoding="utf-8") as handle:
+        lines = [line for line in handle if line.strip()]
+    records = [json.loads(line) for line in lines]
+    if len(records) != first["total"] or len({r["run_id"] for r in records}) != len(records):
+        fail("轨迹文件里有重复记录")
+    for record in records:
+        problems = validate(record)
+        if problems:
+            fail(f"轨迹没通过校验：{problems}")
+    blob = "".join(lines)
+    for secret in _check_secrets(directory):
+        if secret and secret in blob:
+            fail(f"轨迹里出现了本地内容、密钥或路径（{len(secret)} 字）")
+    if "D:\\" in blob or "/tmp/" in blob or "/home/" in blob:
+        fail("轨迹里出现了绝对路径")
+    modes = {r["mode"] for r in records}
+    if modes != {"single", "multi"}:
+        fail(f"单 Agent 和多智能体的运行没有都导出：{modes}")
+    children = [r for r in records if r["parent_run_id"]]
+    by_id = {r["run_id"]: r for r in records}
+    if not children or any(c["parent_run_id"] not in by_id for c in children):
+        fail("子 Agent 的轨迹找不到父运行")
+    roots = build_tree(records)
+    tree = next((n for n in roots if [c["run"]["agent"] for c in n["children"]] == ["planner", "writer", "reviewer"]), None)
+    if tree is None or tree["run"]["agent"] != "orchestrator" or len(tree["run"]["delegations"]) != 3:
+        fail("委托关系没能从 parent_run_id 还原成树")
+    if not any(s["kind"] == "model" for c in tree["children"] for s in c["run"]["steps"]):
+        fail("子 Agent 的模型调用没有归到子运行")
+    if not exporter.query(tool="generate_image") or not exporter.query(agent="writer"):
+        fail("按工具或 Agent 查不到轨迹")
+    if not exporter.query(skill="anatomy"):
+        fail("按技能查不到读过 anatomy 的轨迹")
+    if exporter.query(outcome="completed", until="2000-01-01") or not exporter.query(outcome="failed"):
+        fail("按结局和时间查询不对")
+    if not any(r["input"] and r["input"].get("local_handle") for r in records):
+        fail("本地正文的回合没有只留句柄")
+    status, body = request("GET", base + "/api/trajectories?agent=planner&limit=5")
+    data = json.loads(body)
+    if status != 200 or not data["trajectories"] or any(t["agent"] != "planner" for t in data["trajectories"]):
+        fail(f"轨迹接口不对：{status}")
+    if SECRET in body or os.path.abspath(directory) in body:
+        fail("轨迹接口带出了密钥或路径")
+    _trajectory_scrub_units()
+    _trajectory_doc_example()
+    print(f"trajectories {first['total']} runs, {len(children)} child runs, modes {sorted(modes)}")
+
+
+def _trajectory_doc_example() -> None:
+    """docs/trajectory.md 里的示例必须能通过 validate。"""
+    from services.meta.trajectory import validate
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "trajectory.md")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    match = re.search(r"```json\n(.*?)\n```", text, re.S)
+    if not match:
+        fail("docs/trajectory.md 缺少 json 示例")
+    problems = validate(json.loads(match.group(1)))
+    if problems:
+        fail(f"docs/trajectory.md 示例没通过校验：{problems}")
+
+
+def _trajectory_scrub_units() -> None:
+    """去敏单元：密钥形态、路径、助手文本里出现的本地正文、被忘掉的本地内容重新生成。"""
+    from services.meta.export import Exporter, Scrubber
+
+    scrub = Scrubber([("本机正文不出门甲乙丙丁戊", "c_" + "1" * 32)], ["文件里的字节内容-ABCDEFG"], [SECRET])
+    for raw, bad in [
+        ("密钥 sk-abcdefghijklmnop 在这", "sk-abcdefghijklmnop"),
+        ("ghp_ABCDEFGHIJKLMNOPQRST", "ghp_ABCDEFGHIJKLMNOPQRST"),
+        ("Authorization: Bearer abc.def.ghi-123", "abc.def.ghi-123"),
+        ("api_key=hunter2hunter2", "hunter2hunter2"),
+        (r"路径 D:\comfyui\multimodal-agent-studio\apps 在此", "comfyui"),
+        ("看 /home/box/secret.txt 和 /Users/le/x", "/home/box"),
+        ("回答里引用了本机正文不出门甲乙丙丁戊", "甲乙丙丁戊"),
+        ("文件里的字节内容-ABCDEFG 被复述", "ABCDEFG"),
+        ("配置里的 " + SECRET, SECRET),
+    ]:
+        if bad in scrub.text(raw):
+            fail(f"去敏没有挡住：{bad}")
+    if "https://example.com/data" not in scrub.text("见 https://example.com/data"):
+        fail("去敏误伤了网址")
+    directory = tempfile.mkdtemp(prefix="traj-")
+    os.makedirs(os.path.join(directory, "sessions"))
+    sid, handle = "s_" + "a" * 32, "c_" + "b" * 32
+    body = "会被忘掉的本地正文庚辛壬癸"
+    session = {"session_id": sid, "title": "t", "created_at": "2026-10-24T00:00:00Z", "updated_at": "2026-10-24T00:00:01Z",
+               "contents": [{"handle": handle, "message_id": "m_" + "1" * 32, "kind": "text", "text": body}],
+               "messages": [
+                   {"message_id": "m_" + "1" * 32, "role": "user", "text": body, "status": "completed"},
+                   {"message_id": "m_" + "2" * 32, "role": "assistant", "text": "复述：" + body, "status": "completed",
+                    "run_id": "r_" + "3" * 32, "created_at": "2026-10-24T00:00:01Z", "events": [], "runtime": []},
+               ]}
+    path = os.path.join(directory, "sessions", sid + ".json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(session, fh, ensure_ascii=False)
+    exporter = Exporter(directory)
+    if exporter.export(keep_days=0)["written"] != 1:
+        fail("合成会话没有导出")
+    with open(exporter.jsonl, encoding="utf-8") as fh:
+        text = fh.read()
+    if body in text or json.loads(text)["input"]["local_handle"] != handle:
+        fail("合成会话的本地正文进了轨迹")
+    session["contents"] = []
+    session["messages"][0]["text"] = "这条本地内容已经丢掉。"
+    session["messages"][1]["text"] = "这条本地内容已经丢掉。"
+    session["updated_at"] = "2026-10-24T00:00:02Z"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(session, fh, ensure_ascii=False)
+    stats = exporter.export(keep_days=0)
+    if stats["removed"] != 1 or stats["written"] != 1 or stats["total"] != 1:
+        fail(f"忘掉本地内容后没有重新生成轨迹：{stats}")
+    os.remove(path)
+    if exporter.export(keep_days=0)["total"] != 0:
+        fail("删掉会话后轨迹还在")
+    session["updated_at"] = "2000-01-01T00:00:00Z"
+    session["messages"][1]["created_at"] = "2000-01-01T00:00:00Z"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(session, fh, ensure_ascii=False)
+    if exporter.export(keep_days=90)["total"] != 0:
+        fail("超过保留期的轨迹还被导出")
 
 
 def _skill_cases() -> None:

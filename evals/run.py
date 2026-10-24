@@ -401,6 +401,29 @@ def run_multi_agent_forced(h: Harness, task: dict, live: bool) -> dict:
     return {"chain": ["planner", "writer", "reviewer"], "greeting": "direct"}
 
 
+def run_trajectory_export(h: Harness, task: dict, live: bool) -> dict:
+    """#39：多智能体文字回合之后导出轨迹：校验通过、幂等、委托树完整、没有密钥和数据目录路径。"""
+    from services.meta.export import Exporter
+    from services.meta.trajectory import build_tree, validate
+
+    try:
+        check._multi_text_turn(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "多智能体文字回合失败") from exc
+    exporter = Exporter(h.directory)
+    first = exporter.export()
+    second = exporter.export()
+    expect(first["written"] > 0 and second["written"] == 0, f"导出不幂等：{first} {second}")
+    records = exporter.query(limit=0)
+    expect(all(not validate(r) for r in records), "有记录没通过 schema 校验")
+    blob = json.dumps(records, ensure_ascii=False)
+    expect(check.SECRET not in blob and os.path.abspath(h.directory) not in blob, "轨迹里有密钥或路径")
+    trees = [n for n in build_tree(records)
+             if sorted(c["run"]["agent"] for c in n["children"]) == ["planner", "reviewer", "writer"]]
+    expect(trees, "委托树不完整：没有 planner/writer/reviewer 三个子运行挂在同一个编排者下")
+    return {"runs": len(records), "trees": len(trees)}
+
+
 def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     """子 Agent 越权调用（accept_local_content、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
     import threading
@@ -448,6 +471,7 @@ RUNNERS = {
     "multi_agent_guard": run_multi_agent_guard,
     "multi_agent_text": run_multi_agent_text,
     "multi_agent_forced": run_multi_agent_forced,
+    "trajectory_export": run_trajectory_export,
 }
 
 
