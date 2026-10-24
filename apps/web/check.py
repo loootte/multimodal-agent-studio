@@ -3075,7 +3075,7 @@ def _image_success(base: str, session_id: str, provider, box: ComfyState, workfl
         fail("检查或页面拿不到 artifact_id 对应的图片")
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     message = stored["messages"][-1]
-    if [event.get("type") for event in message.get("events") or []] != ["content_request", "tool_call", "progress", "artifact"]:
+    if [event.get("type") for event in message.get("events") or []] != ["content_request", "tool_call", "progress", "artifact", "image_config"]:
         fail(f"刷新后成片不在同一条消息上：{message.get('events')}")
     if message.get("status") != "completed":
         fail("出图完成后消息状态不对")
@@ -3500,7 +3500,7 @@ def _image_disconnect(base: str, session_id: str, provider, box: ComfyState) -> 
         fail("接回后拿不到这张图片")
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     message = stored["messages"][-1]
-    if [event.get("type") for event in message.get("events") or []] != ["content_request", "tool_call", "progress", "artifact"]:
+    if [event.get("type") for event in message.get("events") or []] != ["content_request", "tool_call", "progress", "artifact", "image_config"]:
         fail("断开后刷新，成片不在原来的消息上")
 
 
@@ -4211,7 +4211,7 @@ def _egress_file(provider) -> None:
 # ---------- #31 工具包 ----------
 
 BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
-                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo"}
+                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt"}
 
 
 def _packs_module():
@@ -4530,8 +4530,12 @@ def _toolpack_http_case(base: str, directory: str) -> None:
     view = json.loads(request("GET", base + "/api/tools/generate_image/config")[1])
     if view.get("kind") != "tool" or [b["name"] for b in view["pack"]["backend_status"]] != ["comfyui"]:
         fail(f"generate_image 的页面没有显示依赖的后端：{view.get('pack')}")
-    if view["fields"]:
-        fail("内置工具不该有自己的配置项")
+    names = [field.get("name") for field in view["fields"]]
+    if names != ["remote_base_url", "remote_api_key", "remote_model", "remote_local_prompt", "remote_timeout_sec"]:
+        fail(f"generate_image 只该有第三方出图的配置项：{names}")
+    key_field = next(field for field in view["fields"] if field.get("name") == "remote_api_key")
+    if not key_field.get("secret"):
+        fail(f"第三方出图的 API key 没有按密钥处理：{key_field}")
     if json.loads(request("GET", base + "/api/tools/comfyui/config")[1]).get("kind") != "backend":
         fail("ComfyUI 没有标成后端")
     script = open(os.path.join(WEB_DIR, "static", "app.js"), encoding="utf-8").read()

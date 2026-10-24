@@ -1,0 +1,47 @@
+{
+  "schema": "mas.tool/1",
+  "name": "stage_prompt",
+  "version": "1.0.0",
+  "description": "把聊天里已经出现的文字（source=chat，原样用）或你写/优化的提示词（source=model）登记成出图句柄，返回 content_handle，再交给 generate_image。只在用户明确要用聊天里的文字或要你写、优化提示词时调用；用户没说时按本地提示词流程（accept_local_content）。不要把本地内容句柄的正文写进来，你也看不到它。",
+  "order": 12,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "visible_prompt",
+      "source"
+    ],
+    "properties": {
+      "visible_prompt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4000,
+        "description": "模型本来就看得见的提示词：source=chat 时是用户在聊天里的原话（可截取画面部分），source=model 时是你写好的提示词。绝不是本地内容的正文。"
+      },
+      "source": {
+        "type": "string",
+        "enum": [
+          "chat",
+          "model"
+        ],
+        "description": "chat：直接用聊天里的文字（1.1）；model：你根据聊天写或优化的提示词（1.2）。"
+      }
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": false,
+    "network": false,
+    "write_files": false,
+    "send_local_to_model": false
+  }
+}

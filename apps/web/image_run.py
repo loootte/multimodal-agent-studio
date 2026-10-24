@@ -67,10 +67,14 @@ def generate(session_id: str, arguments: dict, on_event) -> dict:
     _ensure_poc()
     import agent_tools
 
+    arguments = dict(arguments)
+    backend = arguments.pop("backend", None) or "local"
     with _ENV_LOCK:
         previous = os.environ.get("COMFY_SESSION")
         os.environ["COMFY_SESSION"] = session_id
         try:
+            if backend == "remote":
+                return _remote(arguments)
             with agent_tools.listen_run(on_event):
                 return agent_tools.call_tool("generate_image", arguments)
         finally:
@@ -78,6 +82,25 @@ def generate(session_id: str, arguments: dict, on_event) -> dict:
                 os.environ.pop("COMFY_SESSION", None)
             else:
                 os.environ["COMFY_SESSION"] = previous
+
+
+def _remote(arguments: dict) -> dict:
+    poc_root = os.path.join(ROOT, "poc")
+    if poc_root not in sys.path:
+        sys.path.append(poc_root)
+    import remote_image
+
+    return remote_image.generate(str(arguments.get("prompt") or ""), str(arguments.get("aspect_ratio") or "1:1"))
+
+
+def remote_settings() -> dict:
+    _ensure_poc()
+    poc_root = os.path.join(ROOT, "poc")
+    if poc_root not in sys.path:
+        sys.path.append(poc_root)
+    import remote_image
+
+    return remote_image.settings()
 
 
 def cancel(base: str, prompt_id: str) -> None:

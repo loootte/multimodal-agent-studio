@@ -66,6 +66,11 @@ SYSTEM = (
     "出图请求不要先追问细节：用户没说要变体时，默认每张用同一个提示词句柄、不同 seed。直接调用工具，不要只回复文字。"
     "已经留下的本地提示词直接用句柄，不要再收集正文，也不要填写画面描述。文件句柄不能出图。"
     "不要编造工作流。没有成片之前，不要说图片已经生成。"
+    "提示词来源由你按用户的话判断（详见 image-gen 技能）：用户明确要直接用聊天里的文字时，"
+    "调用 stage_prompt（source=chat，visible_prompt 填那段原话）；用户要你写、优化、扩写提示词时，"
+    "写好后调用 stage_prompt（source=model）；拿到句柄后再 generate_image。用户没这么说时仍走本地提示词（accept_local_content）。"
+    "出图后端：用户要第三方、云端或在线模型出图时 generate_image 的 backend 填 remote；否则不填，用本机 ComfyUI。"
+    "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
 _DRAFT_MARKERS = ("提示词", "内容是", "画面是", "画面：", "画面:")
@@ -117,12 +122,26 @@ _WEB_TOOLS = (
     "generate_image",
     "plan_images",
     "build_skill_page",
+    "stage_prompt",
 )
 EVENT_AGENT = "agent"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
 
 _SKILL_MARKERS = ("等距", "等轴测", "isometric")
+# 隐私闸门：默认把出图请求的聊天正文当本地提示词，不让对话模型看到。
+# 只有用户明说要模型参与提示词（1.1/1.2）或要第三方出图时才放行给模型；来源、后端、张数仍由模型决定。
+_OPEN_MARKERS = (
+    "优化提示词", "优化一下提示词", "润色", "扩写", "帮我写提示词", "帮我写个提示词", "你来写提示词", "写个提示词",
+    "直接用这句", "直接用这段", "原样", "按原话", "用我刚才说的", "用刚才说的", "用上面说的", "就用这句话",
+    "第三方", "云端", "在线模型", "远程模型", "openai", "dall-e", "dall·e", "gpt-image",
+)
+EVENT_IMAGE_CONFIG = "image_config"
+_SOURCE_LABEL = {"chat": "聊天原文（1.1）", "model": "模型撰写（1.2）", "local": "本地提示词（1.3，模型只见句柄）"}
+_HINTS = {
+    "comfyui_error": "确认本机 ComfyUI 已启动、地址正确（设置 → 工具 → comfyui），或改用第三方出图。",
+    "invalid_tool_call": "换一个本会话的文字句柄，或重新输入提示词。",
+}
 
 
 class RequestError(Exception):
@@ -553,7 +572,7 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     try:
         session = app.sessions.get(session_id)
         user_id, user_text, attachments = _latest_user(session)
-        image_request = _image_request(user_text, attachments) and getattr(run, "agent_mode", "single") != "multi"
+        image_request = _image_request(user_text, attachments) and not _open_prompt_request(user_text) and getattr(run, "agent_mode", "single") != "multi"
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
             session = app.sessions.get(session_id)
@@ -626,6 +645,7 @@ def _generate_text_turn(
     # 张数只认第三方模型调用 plan_images 报的计划（存在 run 上，收集本地提示词后重进循环也还在）；没有计划就不追。
     pushes = {"stalls": 0, "seen": 0, "handle": "", "nudged": False, "tools": 0}
     image_turn = _wants_images("", user_text) or _image_request(user_text)
+    open_turn = _open_prompt_request(user_text)
 
     def resume(text):
         if multi:
@@ -638,7 +658,7 @@ def _generate_text_turn(
         ):
             pushes["nudged"] = True
             print(f"nudge {run.run_id}", file=sys.stderr)
-            return _NUDGE_LINE
+            return _OPEN_NUDGE_LINE if open_turn else _NUDGE_LINE
         # 用户要 N 张、模型做了 k 张就自己收尾时，服务端追一句续写指令；连续两次没进展就放弃，免得死循环。
         total = _plan_total(run)
         done = int(getattr(run, "_images_done", 0) or 0)
@@ -1091,6 +1111,7 @@ def _fail_status(app, session_id, message_id, run, exc: GatewayError) -> str:
 
 
 def _complete(app, session_id, message_id, run, text: str) -> None:
+    _push_image_config(app, session_id, message_id, run)
     app.sessions.update_message(session_id, message_id, text=text, status="completed", error=None)
     app.sessions.refresh_memory(session_id)
     run.push({
@@ -1103,6 +1124,7 @@ def _complete(app, session_id, message_id, run, text: str) -> None:
 
 def _fail(app, session_id: str, message_id: str, run: Run, error: GatewayError, text: str) -> None:
     state = "cancelled" if error.code == "cancelled" else "failed"
+    _push_image_config(app, session_id, message_id, run)
     retryable = bool(getattr(error, "retryable", RETRYABLE.get(error.code, False)))
     app.sessions.update_message(
         session_id,
@@ -1162,12 +1184,16 @@ def _finish_image_inner(app, session_id: str, message_id: str, run: Run, text: s
         if "已经生成" in message:
             message = "生成失败。"
         return _error_finish(app, session_id, message_id, run, code, message, text)
+    _note_image(run, "local", "local", False)
+    run._images_done = int(getattr(run, "_images_done", 0) or 0) + 1
     _push_saved(app, session_id, message_id, run, _artifact_event(message_id, result))
     _complete(app, session_id, message_id, run, text)
     return "completed"
 
 
 def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict:
+    if name == "stage_prompt":
+        return _execute_stage_prompt(app, session_id, run, arguments)
     if name == "plan_images":
         return _execute_plan_images(run, arguments)
     if name == "generate_image":
@@ -1223,12 +1249,131 @@ def _execute_plan_images(run, arguments) -> dict:
     }
 
 
+def _execute_stage_prompt(app, session_id, run, arguments) -> dict:
+    """1.1/1.2：模型本来就看得见的提示词登记成本轮句柄。本地正文不能借这里换成可见来源。"""
+    args = arguments if isinstance(arguments, dict) else {}
+    text = args.get("visible_prompt")
+    source = args.get("source")
+    if not isinstance(text, str) or not text.strip() or source not in ("chat", "model"):
+        return {"ok": False, "tool": "stage_prompt",
+                "error": {"code": "invalid_parameter", "message": "visible_prompt 不能为空，source 只能是 chat 或 model。"}}
+    text = text.strip()[:4000]
+    for body in app.sessions.local_bodies(session_id):
+        if len(body) >= 8 and (body in text or text in body):
+            return {"ok": False, "tool": "stage_prompt",
+                    "error": {"code": "local_content", "message": "这段文字是本地内容，只能用它的本地句柄出图。"}}
+    staged = getattr(run, "_staged", None)
+    if staged is None:
+        staged = run._staged = {}
+    for handle, item in staged.items():
+        if item["text"] == text and item["source"] == source:
+            break
+    else:
+        handle = new_id("c_")
+        staged[handle] = {"text": text, "source": source}
+    print(f"stage {run.run_id} {handle} {source} {len(text)}", file=sys.stderr)
+    return {"ok": True, "tool": "stage_prompt", "content_handle": handle, "source": source,
+            "next": f"调用 generate_image，content_handle 填 {handle}。"}
+
+
+def _image_error(handle: str, code: str, message: str, hint: str = "", backend: str = "") -> dict:
+    error = {"code": code, "message": message}
+    if hint:
+        error["hint"] = hint
+    out = {"ok": False, "tool": "generate_image", "error": error}
+    if handle:
+        out["content_handle"] = handle
+    if backend:
+        out["backend"] = backend
+    return out
+
+
+def _remote_consent(app, session_id, message_id, run, handle: str, base: str) -> bool:
+    """1.3 + 第三方：每轮先请用户明确同意把本地提示词正文发给出图服务（不发给对话模型）。"""
+    if getattr(run, "_remote_local_ok", False):
+        return True
+    lock = getattr(run, "_agent_confirm_lock", None)
+    if lock is not None:
+        lock.acquire()
+    try:
+        run.begin_confirm_wait()
+        notice = (
+            f"要把本地提示词（{handle}）的正文发给第三方出图服务 {base}。"
+            "正文不会发给对话模型。确认后这一轮不再询问。"
+        )
+        args = {"content_handle": handle, "backend": "remote"}
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_TOOL_CONFIRM, "name": "generate_image", "tool": "generate_image", "arguments": args,
+            "notice": notice, "message_id": message_id, "run_id": run.run_id,
+        })
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_TOOL_CALL, "tool": "generate_image", "arguments": args, "status": "waiting_confirm",
+            "notice": notice, "message_id": message_id, "run_id": run.run_id,
+        })
+        ok = run.wait_confirm()
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+    run._remote_local_ok = bool(ok)
+    return bool(ok)
+
+
+def _note_image(run, source: str, backend: str, explicit_backend: bool) -> None:
+    log = getattr(run, "_image_log", None)
+    if log is None:
+        log = run._image_log = []
+    log.append({"source": source, "backend": backend, "explicit_backend": explicit_backend})
+
+
+def image_config(run) -> dict | None:
+    """本轮出图配置：来源、后端、张数。没有出图尝试时返回 None。"""
+    log = getattr(run, "_image_log", None)
+    if not log:
+        return None
+    sources = sorted({item["source"] for item in log})
+    backends = sorted({item["backend"] for item in log})
+    total = _plan_total(run)
+    done = int(getattr(run, "_images_done", 0) or 0)
+    model = getattr(run, "_remote_model", "") or ""
+    backend_text = "、".join(
+        "本地 ComfyUI" if name == "local" else ("第三方图片 API" + (f"（{model}）" if model else "")) for name in backends
+    )
+    if not any(item["explicit_backend"] for item in log):
+        backend_text += "（默认）"
+    count_text = f"{done} 张" + (f"（计划 {total} 张）" if total else "（未指定，默认 1 张）")
+    summary = "本次配置：提示词来源 " + "、".join(_SOURCE_LABEL.get(name, name) for name in sources) \
+        + " · 出图 " + backend_text + " · 张数 " + count_text
+    return {"prompt_source": sources, "backend": backends, "count": done, "planned": total or None, "summary": summary}
+
+
+def _push_image_config(app, session_id, message_id, run) -> None:
+    config = image_config(run)
+    if not config or getattr(run, "_config_pushed", False):
+        return
+    run._config_pushed = True
+    event = {"type": EVENT_IMAGE_CONFIG, "message_id": message_id, "run_id": run.run_id}
+    event.update(config)
+    _push_saved(app, session_id, message_id, run, event)
+
+
 def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict:
     tool_call = {
         "name": "generate_image",
         "arguments": arguments if isinstance(arguments, dict) else {},
     }
     handle = _named_handle(tool_call)
+    raw_backend = tool_call["arguments"].get("backend")
+    backend = raw_backend or "local"
+    if backend not in ("local", "remote"):
+        return _image_error(handle, "invalid_parameter", "backend 只能是 local 或 remote。")
+    staged = (getattr(run, "_staged", None) or {}).get(handle)
+    if staged:
+        source = staged["source"]
+        bound = _bind_submitted(staged["text"], tool_call)
+        return _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, bool(raw_backend))
     block = _handle_block(app, session_id, tool_call)
     if block == "file":
         return {
@@ -1239,12 +1384,38 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
         }
     bound = _bind_image(app, session_id, "", tool_call, False)
     if bound is None:
-        return {
-            "ok": False,
-            "tool": "generate_image",
-            "content_handle": handle,
-            "error": {"code": "invalid_tool_call", "message": "这个内容句柄不属于本会话。"},
-        }
+        return _image_error(handle, "invalid_tool_call", "这个内容句柄不属于本会话。", _HINTS["invalid_tool_call"])
+    return _generate_bound(app, session_id, message_id, run, handle, bound, "local", backend, bool(raw_backend))
+
+
+def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend) -> dict:
+    if backend == "remote":
+        settings = image_run.remote_settings()
+        import remote_image
+
+        problem = remote_image.check_ready(settings)
+        if problem:
+            _note_image(run, source, backend, explicit_backend)
+            problem["content_handle"] = handle
+            return problem
+        run._remote_model = str(settings.get("remote_model") or "")
+        if source == "local":
+            if settings.get("remote_local_prompt") != "confirm":
+                _note_image(run, source, backend, explicit_backend)
+                return _image_error(
+                    handle, "local_prompt_remote_refused",
+                    "本地提示词（1.3）默认不发给第三方出图服务。",
+                    "改用本机 ComfyUI 出图（backend 不填）；或让我用聊天里的文字/我写的提示词出图；"
+                    "确实要发时在 设置 → 工具 → generate_image 把 remote_local_prompt 改成 confirm，之后每轮会先请你确认。",
+                    backend,
+                )
+            if not _remote_consent(app, session_id, message_id, run, handle, str(settings.get("remote_base_url") or "")):
+                _note_image(run, source, backend, explicit_backend)
+                return _image_error(handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。",
+                                    "可以改用本机 ComfyUI 出图。", backend)
+    bound_args = dict(bound.get("arguments") or {})
+    if backend == "remote":
+        bound_args["backend"] = "remote"
     if run.cancel.is_set():
         return {
             "ok": False,
@@ -1252,8 +1423,11 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
             "content_handle": handle,
             "error": {"code": "cancelled", "message": HUMAN["cancelled"]},
         }
-    result = _run_image(app, session_id, message_id, run, bound.get("arguments") or {})
+    result = _run_image(app, session_id, message_id, run, bound_args)
     public = _public_generate_result(result, handle)
+    _note_image(run, source, backend, explicit_backend)
+    public["prompt_source"] = source
+    public["backend"] = backend
     if public.get("ok"):
         run._images_done = getattr(run, "_images_done", 0) + 1
         public["images_done_this_turn"] = run._images_done
@@ -1333,6 +1507,9 @@ def _public_generate_result(result: dict, handle: str) -> dict:
             "tool": "generate_image",
             "error": {"code": code, "message": message},
         }
+        hint = error.get("hint") or _HINTS.get(code)
+        if hint:
+            public["error"]["hint"] = str(hint)
         if handle:
             public["content_handle"] = handle
         return public
@@ -1493,6 +1670,13 @@ def _has_image_attachment(attachments) -> bool:
     return False
 
 
+def _open_prompt_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not any(marker in lowered for marker in _OPEN_MARKERS):
+        return False
+    return "图" in text or "comfy" in lowered or any(marker in text for marker in _IMAGE_MARKERS)
+
+
 def _image_request(text: str, attachments=None) -> bool:
     if any(marker in text for marker in _SCHEDULE_MARKERS):
         return False
@@ -1531,6 +1715,12 @@ _NUDGE_LINE = (
     "这是出图请求，请现在调用工具，不要只回复文字，不要让用户在聊天里贴提示词，也不要追问变体。"
     "要多张时先调用 plan_images（count 按用户请求）；还没有提示词句柄时调用 accept_local_content"
     "（purpose=image_prompt，kind=text），它会在用户本机弹出输入框，正文不经过你；拿到句柄后逐张调用 generate_image。"
+)
+
+_OPEN_NUDGE_LINE = (
+    "这是出图请求，请现在调用工具，不要只回复文字。用户要直接用聊天里的文字时调用 stage_prompt（source=chat），"
+    "要你写或优化提示词时写好后调用 stage_prompt（source=model）；拿到句柄后调用 generate_image，"
+    "用户要第三方/云端出图时 backend 填 remote。要多张时先调用 plan_images。"
 )
 
 
