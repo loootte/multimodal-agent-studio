@@ -512,3 +512,7 @@ dialog select { font: inherit; padding: 0.35rem; }
 .markdown hr { border: 0; border-top: 1px solid rgba(127,127,127,.35); }
 .markdown a { color: #2563eb; }
 .agent-tree details { margin: .2em 0; }
+
+.confirm-notice { flex-basis: 100%; margin: 0; color: var(--muted, #666); font-size: 0.9em; }
+.confirm-row { flex-wrap: wrap; }
+.image-config { margin: 0.4rem 0 0; color: var(--muted, #666); font-size: 0.85em; }
