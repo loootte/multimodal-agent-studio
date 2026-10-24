@@ -2864,6 +2864,11 @@ def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path:
         fail(f"收下本地提示词后没有连续五张成片：{len(arts)} {kinds}")
     if len(box.prompts) != before + 5:
         fail("收下本地提示词后没有恰好提交五次")
+    confirms = [event for event in events if event.get("type") == "tool.confirm" and event.get("name") == "generate_image"]
+    if len(confirms) > 1:
+        fail(f"连续出图每张都要确认，第二张会卡在等待确认：{len(confirms)}")
+    if 'includes(entry.type));' not in script:
+        fail("成片之后页面还会显示上一张的旧进度")
     for submitted in box.prompts[before:]:
         _assert_whitelist(submitted, workflow_path, secret)
     if _assistant_text(events) != "五张都好了":

@@ -548,7 +548,9 @@ function bubble(message) {
   }
   const calls = events.filter((entry) => entry.type === "tool_call");
   if (calls.length) item.append(toolTimeline(message, calls));
-  const progress = [...events].reverse().find((entry) => entry.type === "progress");
+  // 只显示仍在进行中的进度：其后已有成片或新的工具调用时，旧进度不再显示。
+  const latest = [...events].reverse().find((entry) => ["progress", "artifact", "tool_call"].includes(entry.type));
+  const progress = latest && latest.type === "progress" ? latest : null;
   if (showEntry) item.append(localEntry(message, pendingContent));
   if (progress && message.status === "running") {
     const line = document.createElement("p");

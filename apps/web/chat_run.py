@@ -521,12 +521,20 @@ def _generate_text_turn(
         claimed["spoken"] = "".join(spoken)
         return True
 
+    allowed: set[str] = set()
+
     def confirm(name, arguments):
-        return run.wait_confirm()
+        ok = run.wait_confirm()
+        if ok:
+            allowed.add(name)
+        return ok
 
     def mutating(name):
         # 收本机内容走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
         if name == "accept_local_content":
+            return False
+        # 同一轮里已经确认过的工具（如连续出图的 generate_image）不再逐次确认。
+        if name in allowed:
             return False
         return tool_mutates(name)
 
