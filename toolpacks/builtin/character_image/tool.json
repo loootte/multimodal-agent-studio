@@ -1,0 +1,171 @@
+{
+  "schema": "mas.tool/1",
+  "name": "character_image",
+  "version": "1.0.0",
+  "description": "定制角色图片：用户要画一个角色/人物（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）时调用。只填用户说到的字段，其余用默认值（年轻成年女性、黑长直、棕瞳、休闲装、站立、纯色背景）。字段可填预设键或中文标签，例如 hair_color=red、outfit=knight_armor、pose=fighting，也可以填简短自由描述。返回 content_handle，之后每张图调用一次 generate_image（要多张先 plan_images）。不要写露骨、色情内容；未成年角色不能配暴露服装或挑逗姿势。",
+  "order": 13,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "gender": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。性别：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "age": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。年龄：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "build": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。体型：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "hairstyle": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。发型：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "hair_color": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。发色：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "eye_color": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。瞳色：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "outfit": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。服装：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "pose": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。姿势：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "background": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。背景：填预设键或中文标签（见工具说明），或一小段自由描述（中英文都行）。用户没说就不要填，会用默认值。"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "chat",
+          "model"
+        ],
+        "description": "chat：字段直接取自用户原话（1.1）；model：你根据用户的话推断、补全的（1.2）。默认 model。"
+      }
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [
+    {
+      "name": "default_gender",
+      "type": "string",
+      "default": "female",
+      "required": true,
+      "secret": false,
+      "description": "性别的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_age",
+      "type": "string",
+      "default": "young_adult",
+      "required": true,
+      "secret": false,
+      "description": "年龄的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_build",
+      "type": "string",
+      "default": "slim",
+      "required": true,
+      "secret": false,
+      "description": "体型的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_hairstyle",
+      "type": "string",
+      "default": "long_straight",
+      "required": true,
+      "secret": false,
+      "description": "发型的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_hair_color",
+      "type": "string",
+      "default": "black",
+      "required": true,
+      "secret": false,
+      "description": "发色的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_eye_color",
+      "type": "string",
+      "default": "brown",
+      "required": true,
+      "secret": false,
+      "description": "瞳色的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_outfit",
+      "type": "string",
+      "default": "casual",
+      "required": true,
+      "secret": false,
+      "description": "服装的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_pose",
+      "type": "string",
+      "default": "standing",
+      "required": true,
+      "secret": false,
+      "description": "姿势的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "default_background",
+      "type": "string",
+      "default": "plain",
+      "required": true,
+      "secret": false,
+      "description": "背景的默认值：预设键（见 presets.json）或一段自由描述。"
+    },
+    {
+      "name": "presets_json",
+      "type": "string",
+      "default": "",
+      "required": false,
+      "secret": false,
+      "description": "可选。追加或覆盖预设的 JSON，例如 {\"hair_color\": [{\"key\": \"teal\", \"label\": \"青绿\", \"prompt\": \"teal hair\"}]}。同键覆盖，新键追加。"
+    },
+    {
+      "name": "quality_tags",
+      "type": "string",
+      "default": "character illustration, full body, highly detailed, best quality",
+      "required": false,
+      "secret": false,
+      "description": "拼在提示词最前面的画质/画风标签。"
+    }
+  ],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": false,
+    "network": false,
+    "write_files": false,
+    "send_local_to_model": false
+  }
+}

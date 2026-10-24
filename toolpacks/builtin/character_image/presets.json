@@ -1,0 +1,101 @@
+{
+  "schema": "mas.character_presets/1",
+  "fields": {
+    "gender": {"label": "性别", "options": [
+      {"key": "female", "label": "女性", "prompt": "woman", "minor_prompt": "girl"},
+      {"key": "male", "label": "男性", "prompt": "man", "minor_prompt": "boy"},
+      {"key": "androgynous", "label": "中性", "prompt": "androgynous person", "minor_prompt": "child"}
+    ]},
+    "age": {"label": "年龄", "options": [
+      {"key": "young_adult", "label": "青年（20 多岁）", "prompt": "young adult in their early twenties"},
+      {"key": "adult", "label": "成年（30 多岁）", "prompt": "adult in their thirties"},
+      {"key": "middle_aged", "label": "中年", "prompt": "middle-aged adult"},
+      {"key": "elderly", "label": "老年", "prompt": "elderly person with gentle wrinkles"},
+      {"key": "teen", "label": "青少年（未成年）", "prompt": "teenager, about 15 years old", "minor": true},
+      {"key": "child", "label": "儿童（未成年）", "prompt": "young child, about 8 years old", "minor": true}
+    ]},
+    "build": {"label": "体型", "options": [
+      {"key": "slim", "label": "纤细", "prompt": "slim build"},
+      {"key": "average", "label": "匀称", "prompt": "average build"},
+      {"key": "athletic", "label": "健美", "prompt": "athletic build"},
+      {"key": "muscular", "label": "强壮", "prompt": "muscular build"},
+      {"key": "petite", "label": "娇小", "prompt": "petite build"},
+      {"key": "tall", "label": "高挑", "prompt": "tall build"},
+      {"key": "plump", "label": "丰满圆润", "prompt": "plump, soft build"}
+    ]},
+    "hairstyle": {"label": "发型", "options": [
+      {"key": "long_straight", "label": "长直发", "prompt": "long straight hair"},
+      {"key": "long_wavy", "label": "长卷发", "prompt": "long wavy hair"},
+      {"key": "bob", "label": "波波头", "prompt": "bob cut hair"},
+      {"key": "ponytail", "label": "马尾", "prompt": "ponytail"},
+      {"key": "twin_tails", "label": "双马尾", "prompt": "twin tails"},
+      {"key": "bun", "label": "丸子头", "prompt": "hair in a bun"},
+      {"key": "braid", "label": "麻花辫", "prompt": "braided hair"},
+      {"key": "short", "label": "短发", "prompt": "short hair"},
+      {"key": "pixie", "label": "精灵短发", "prompt": "pixie cut"},
+      {"key": "buzz", "label": "寸头", "prompt": "buzz cut"}
+    ]},
+    "hair_color": {"label": "发色", "options": [
+      {"key": "black", "label": "黑色", "prompt": "black hair"},
+      {"key": "brown", "label": "棕色", "prompt": "brown hair"},
+      {"key": "blonde", "label": "金色", "prompt": "blonde hair"},
+      {"key": "red", "label": "红色", "prompt": "red hair"},
+      {"key": "silver", "label": "银白", "prompt": "silver hair"},
+      {"key": "pink", "label": "粉色", "prompt": "pink hair"},
+      {"key": "blue", "label": "蓝色", "prompt": "blue hair"},
+      {"key": "purple", "label": "紫色", "prompt": "purple hair"},
+      {"key": "green", "label": "绿色", "prompt": "green hair"},
+      {"key": "gradient", "label": "渐变色", "prompt": "gradient ombre hair"}
+    ]},
+    "eye_color": {"label": "瞳色", "options": [
+      {"key": "brown", "label": "棕色", "prompt": "brown eyes"},
+      {"key": "black", "label": "黑色", "prompt": "dark eyes"},
+      {"key": "blue", "label": "蓝色", "prompt": "blue eyes"},
+      {"key": "green", "label": "绿色", "prompt": "green eyes"},
+      {"key": "amber", "label": "琥珀色", "prompt": "amber eyes"},
+      {"key": "gray", "label": "灰色", "prompt": "gray eyes"},
+      {"key": "red", "label": "红色", "prompt": "red eyes"},
+      {"key": "purple", "label": "紫色", "prompt": "violet eyes"},
+      {"key": "heterochromia", "label": "异色瞳", "prompt": "heterochromia, one blue eye and one gold eye"}
+    ]},
+    "outfit": {"label": "服装", "options": [
+      {"key": "casual", "label": "休闲装", "prompt": "casual outfit, sweater and jeans"},
+      {"key": "school_uniform", "label": "校服", "prompt": "neat school uniform"},
+      {"key": "business", "label": "职业装", "prompt": "business suit"},
+      {"key": "dress", "label": "连衣裙", "prompt": "elegant knee-length dress"},
+      {"key": "hanfu", "label": "汉服", "prompt": "traditional chinese hanfu"},
+      {"key": "kimono", "label": "和服", "prompt": "traditional kimono"},
+      {"key": "knight_armor", "label": "骑士铠甲", "prompt": "full plate knight armor"},
+      {"key": "mage_robe", "label": "法师长袍", "prompt": "flowing mage robe"},
+      {"key": "sci_fi", "label": "科幻战斗服", "prompt": "futuristic sci-fi bodysuit with armor plates"},
+      {"key": "sportswear", "label": "运动服", "prompt": "sportswear"},
+      {"key": "winter_coat", "label": "冬季大衣", "prompt": "warm winter coat and scarf"},
+      {"key": "swimsuit", "label": "泳装", "prompt": "one-piece swimsuit", "suggestive": true}
+    ]},
+    "pose": {"label": "姿势", "options": [
+      {"key": "standing", "label": "站立", "prompt": "standing, relaxed pose"},
+      {"key": "sitting", "label": "坐着", "prompt": "sitting"},
+      {"key": "walking", "label": "行走", "prompt": "walking"},
+      {"key": "running", "label": "奔跑", "prompt": "running, dynamic pose"},
+      {"key": "waving", "label": "挥手", "prompt": "waving hand, smiling"},
+      {"key": "arms_crossed", "label": "抱臂", "prompt": "arms crossed"},
+      {"key": "fighting", "label": "战斗姿态", "prompt": "fighting stance"},
+      {"key": "reading", "label": "看书", "prompt": "reading a book"},
+      {"key": "looking_back", "label": "回眸", "prompt": "looking back over shoulder"},
+      {"key": "lying", "label": "躺卧", "prompt": "lying down, reclining", "suggestive": true}
+    ]},
+    "background": {"label": "背景", "options": [
+      {"key": "plain", "label": "纯色背景", "prompt": "simple plain light background"},
+      {"key": "studio", "label": "影棚", "prompt": "studio lighting, gradient backdrop"},
+      {"key": "city", "label": "城市街道", "prompt": "city street background"},
+      {"key": "night_city", "label": "夜晚都市", "prompt": "neon city at night"},
+      {"key": "forest", "label": "森林", "prompt": "lush forest background"},
+      {"key": "beach", "label": "海边", "prompt": "sunny beach background"},
+      {"key": "classroom", "label": "教室", "prompt": "classroom background"},
+      {"key": "castle", "label": "城堡", "prompt": "medieval castle background"},
+      {"key": "cherry_blossom", "label": "樱花", "prompt": "cherry blossom trees background"},
+      {"key": "space", "label": "太空", "prompt": "outer space with stars"},
+      {"key": "cafe", "label": "咖啡馆", "prompt": "cozy cafe interior"}
+    ]}
+  }
+}
