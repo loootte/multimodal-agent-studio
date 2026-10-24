@@ -31,7 +31,7 @@ Agent 运行时
 6. 工具结果写回运行轨迹，再次进入循环，直到模型给出最终回答或预算用尽。
 7. 界面对着同一条运行标识渲染回答和工具时间线。
 
-文字这一刀走 `services/runtime` 的多步循环，步骤出现在聊天页右侧的运行过程窗口。出图和本地内容仍走网页切片。写操作先在运行时发出 `tool.confirm`，聊天页给出确认和拒绝。
+文字这一刀走 `services/runtime` 的多步循环，步骤出现在聊天页右侧的运行过程窗口。明确的单次出图关键词仍走网页切片，一次出一张。已经留下的提示词要连续出图时，由第三方模型在运行时循环里多次调用 `generate_image`。`accept_local_content` 仍由网页切片接手对话框。写操作先在运行时发出 `tool.confirm`，聊天页给出确认和拒绝。确认之后循环继续。
 
 ## 现在的一次出图
 
@@ -40,11 +40,15 @@ Agent 运行时
 3. `apps/web/chat_run.py` 把对话收成统一请求，交给 `services/gateway.stream`。默认适配器是 `openai_chat.py`。带着 `poc/tools/external/` 里自注册的工具契约去请求供应商。`image_run.image_tools()` 负责转发。载荷里一旦出现已入库的正文、文件文本或文件字节的 base64，连接不会打开。工具契约本身不参与这道检查。
 4. 模型调用 `accept_local_content`，`purpose` 为 `image_prompt`，`kind` 为 `text`。`chat_run.py` 发出 `content_request`。页面上的文本框收集画面描述。草稿只出现在这条本机事件里。
 5. 页面 `POST /api/runs/{run_id}/content`，正文是文字。`store.py` 的 `add_content` 用新的随机句柄留下这段文字。下一次模型请求只带句柄。
-6. `chat_run.py` 用对话框里提交的文字填 `prompt`，丢掉模型自己写的画面描述。`image_run.py` 调用 `poc/comfyui/agent_tools.py` 的 `generate_image`。一条用户消息最多一次。
+6. `chat_run.py` 用对话框里提交的文字填 `prompt`，丢掉模型自己写的画面描述。`image_run.py` 调用 `poc/comfyui/agent_tools.py` 的 `generate_image`。关键词切片一次用户消息最多一张。
 7. `poc/comfyui/template_fill.py` 只改白名单字段。`poc/comfyui/comfy_client.py` 把这张图 `POST /prompt`。
 8. `poc/comfyui/artifacts.py` 按当前网页会话收成 `artifact_id`。页面再按这个标识取文件。
 
 纯文字不进入第 6 步。文件句柄也不进入第 6 步，那次运行不提交 ComfyUI。停止只在 `chat_run.py` 里置位，并由另一条连接取消已经提交的 `prompt_id`。
+
+## 连续出图
+
+用户说「用本地提示词连续生成5张」这类话时，不走上面的关键词切片。文字回合进入 `runtime.run`。模型列出本会话内容，选文字句柄，对每一张分别调用 `generate_image`。一次调用只出一张。工具契约没有张数字段。每张图的工具结果（句柄、工件标识、成败）写回轨迹，再问模型下一步。已经留下的提示词不再收集正文，也不把正文发给第三方。同一条助手消息上排列多张 `artifact`。写操作仍先确认。确认之后循环继续，不在第一张图后结束。
 
 ## 现在的一次本地内容
 
@@ -96,7 +100,7 @@ Agent 运行时
 
 拥有循环和停止条件。它是唯一可以调用工具的地方。模型文本里出现的「我已经执行了」不算执行。
 
-`services/runtime` 拥有循环、预算、校验、确认和追踪。文字回合由 `chat_run.py` 交给 `runtime.run`，步骤写成 `runtime.step`，显示在聊天页右侧窗口。出图和本地内容仍走网页切片。写操作先确认，网页切片再接手。
+`services/runtime` 拥有循环、预算、校验、确认和追踪。文字回合由 `chat_run.py` 交给 `runtime.run`，步骤写成 `runtime.step`，显示在聊天页右侧窗口。`accept_local_content` 仍由网页切片接手对话框。`list_local_content`、`retrieve_local`、`forget_local_content` 和 `generate_image` 在确认之后于循环内执行，结果写回轨迹再问模型下一步。
 
 | 文件 | 做什么 |
 | --- | --- |
@@ -113,13 +117,9 @@ Agent 运行时
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/chat_run.py` | 一轮回答。文字走 `runtime.run`，步骤推到运行过程窗口。系统指令附上已安装技能的名字和短描述。带图片的提问把附件句柄写成图像部件。出图时先让模型调用 `accept_local_content`，等对话框提交，再注入正文并调用已有的 `generate_image`。等距说明走 `read_skill` 和 `build_skill_page`，不调用 `generate_image`。语义唤起可以收文字或文件。`list_local_content`、`retrieve_local` 和 `forget_local_content` 只操作本会话。发给模型的是会话记忆加最近几条，不含本地正文。同一条助手消息上排列 `content_request`、`tool.confirm`、`tool_call`、`progress`、`artifact` 或 `error` |
+| `apps/web/chat_run.py` | 一轮回答。交给 `runtime.run`，界面只画统一运行过程窗口。系统指令附带已安装技能的名字和短摘要。把图片附件把手交给网关写进图像部件。明确的单次出图关键词仍走网页切片：一次出一张。已留下的提示词要连续出图时，交给第三方模型在运行时循环里按次调用 `generate_image`，一次一张。`accept_local_content` 仍走网页切片，先对话框里提交正文；文件不能出图。解剖说明走 `read_skill` 与 `build_skill_page`，不要走 `generate_image`。本地会话内容工具只看本会话；模型侧是会话级摘要加可引用句柄，没有正文。同一条助手消息上可有 `content_request`、`tool.confirm`、`tool_call`、`progress`、多张 `artifact` 和 `error` |
 | `apps/web/skill_page.py` | 用本机 Node 跑 `skills/anatomy` 的最小例子，把页面存成这个会话的 HTML 工件。没有 Node 时这一轮以可读错误结束，不落到出图 |
-| `apps/web/image_run.py` | 网页和 `poc/comfyui` 之间的唯一桥。`image_tools()` 转发 `poc/tools/external/` 的扫描结果。真正出图调用 `agent_tools.call_tool("generate_image")`。技能页面和出图打开同一个工件库。取消另开一个 ComfyUI 客户端，不关正在读模型的那条连接 |
 
-`poc/tools/external/` 里的契约是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content`、`generate_image`、`lookup_demo`、`read_skill` 和 `build_skill_page`。这些参数都没有正文、字节、路径或文件名。`generate_image` 只收 `content_handle`、画幅、可选种子和可选风格。文字句柄由 `chat_run.py` 在本机注入 `prompt`。文件句柄不调用 `generate_image` 的提交。`read_skill` 只收技能名，正文留到模型来读的那一轮。`build_skill_page` 只收技能名和机制短名，页面是 HTML 工件。`poc/tools/internal/` 里的生成工具仍然要求 `prompt`，这个参数不转发给模型。文件按规范自注册，见 [ADR 0004](adr/0004-tool-governance.md)。
-
-`skills/anatomy/` 是钉住的 [Anatomy](https://github.com/wheresryan22/anatomy) 提交 `e9488296a44211c42701ff71705b7901470ec78f`。正面信息在 `SKILL.md`。这一刀只带最小例子和 `kit/`。系统指令不放正文，也不放 kit 源码。读到的正文是做法，不进入画面描述。这不开始插件市场，也不把第 5 或第 6 阶段标成完成。
 
 `generate_video` 仍不在这一刀。issue #7 的视频队列、超时、参数白名单和参考图上传留在 `poc/comfyui`。不把第 5 或第 6 阶段标成完成。
 

@@ -307,7 +307,11 @@ function rememberAgentEvent(assistant, event) {
       return;
     }
   }
-  if (event.type === "artifact" && events.some((item) => item.type === "artifact")) return;
+  if (
+    event.type === "artifact"
+    && event.artifact_id
+    && events.some((item) => item.type === "artifact" && item.artifact_id === event.artifact_id)
+  ) return;
   if (event.type === "error" && events.some((item) => item.type === "error")) return;
   if (event.type === "progress") {
     const previous = events[events.length - 1];
@@ -526,9 +530,9 @@ function bubble(message) {
   item.className = `bubble ${message.role === "user" ? "user" : "assistant"}`;
   const events = message.events || [];
   const pendingContent = events.find((entry) => entry.type === "content_request");
-  const artifact = events.find((entry) => entry.type === "artifact");
+  const artifacts = events.filter((entry) => entry.type === "artifact");
   const collecting = !events.some((entry) => entry.type === "tool_call" || entry.type === "error");
-  const showEntry = pendingContent && !artifact && message.status === "running" && collecting;
+  const showEntry = pendingContent && !artifacts.length && message.status === "running" && collecting;
   if (message.status === "running" && !showEntry) item.classList.add("streaming");
   const who = document.createElement("span");
   who.className = "who";
@@ -544,20 +548,20 @@ function bubble(message) {
   if (calls.length) item.append(toolTimeline(message, calls));
   const progress = [...events].reverse().find((entry) => entry.type === "progress");
   if (showEntry) item.append(localEntry(message, pendingContent));
-  if (progress && !artifact) {
+  if (progress && message.status === "running") {
     const line = document.createElement("p");
     line.className = "status-line";
     line.textContent = progressLine(progress);
     item.append(line);
   }
-  if (artifact && artifact.media === "image") {
+  for (const artifact of artifacts) {
+    if (artifact.media !== "image") continue;
     const src = artifactSrc(artifact);
-    if (src) {
-      const image = document.createElement("img");
-      image.alt = "生成的图片";
-      image.src = src;
-      item.append(image);
-    }
+    if (!src) continue;
+    const image = document.createElement("img");
+    image.alt = "生成的图片";
+    image.src = src;
+    item.append(image);
   }
   if (artifact && artifact.media === "html") {
     const src = artifactSrc(artifact);
@@ -573,13 +577,13 @@ function bubble(message) {
   }
   const agentError = events.find((entry) => entry.type === "error");
   const failure = agentError || message.error;
-  if (failure && failure.message && !artifact) {
+  if (failure && failure.message && !artifacts.length) {
     const extra = document.createElement("p");
     extra.className = failure.code === "cancelled" ? "status-line" : "error";
     extra.textContent = failure.message;
     item.append(extra);
   }
-  if (canRetry(message, failure) && !artifact) {
+  if (canRetry(message, failure) && !artifacts.length) {
     item.append(retryRow(message));
   }
   return item;
