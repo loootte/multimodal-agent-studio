@@ -605,8 +605,11 @@ def _generate_text_turn(
     request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra))
     multi = getattr(run, "agent_mode", "single") == "multi"
     delegator = None
+    pipeline = None
     if multi:
         request, delegator = _orchestrate(app, session_id, message_id, run, provider, request)
+        pipeline = _Pipeline(user_text, {agent.name: agent.role for agent in agents.discover()})
+        telemetry.record("orchestrator.policy", turn_kind=pipeline.kind)
     spoken: list[str] = []
     seen = 0
     claimed: dict = {}
@@ -626,7 +629,7 @@ def _generate_text_turn(
 
     def resume(text):
         if multi:
-            return None
+            return pipeline.resume(text)
         # 出图请求第一步就只回文字（追问提示词、追问变体）时，纠正一次，让它按 plan_images → accept_local_content 走。
         if (
             image_turn and not pushes["nudged"] and pushes["tools"] == 0
@@ -683,6 +686,7 @@ def _generate_text_turn(
             if name not in delegator.allowed:
                 return agents.not_allowed(name, agents.ORCHESTRATOR)
             if name == agents.DELEGATE:
+                pipeline.saw(arguments)
                 return delegator(arguments)
         if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
             pushes["handle"] = str(arguments.get("content_handle"))
@@ -724,6 +728,7 @@ def _generate_text_turn(
             execute=execute,
             mutating=mutating,
             validate=validate,
+            choose=pipeline.choose if multi else None,
             budget=delegator.budget if multi else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
@@ -1816,6 +1821,84 @@ class _Orchestration:
 
     def __call__(self, arguments):
         return self._call(arguments)
+
+
+# 多智能体模式下编排者的委托规则在运行时执行，不只写在系统指令里（#38）。
+# 实测（DeepSeek，tool_choice=auto）：讨论、咨询类长问题模型常常自己一步答完；文字任务也会跳过 reviewer。
+_CHAT_GREETING = re.compile(
+    r"^\s*(你好|您好|嗨|哈喽|hi|hello|hey|早上好|早安|中午好|下午好|晚上好|晚安|谢谢|多谢|感谢|谢了|再见|拜拜|bye|"
+    r"好的|好|嗯|ok|okay|收到|在吗|在不在|辛苦了|thanks|thank you)[\s!！。.~～,，?？]*$",
+    re.IGNORECASE,
+)
+_TASK_WORDS = re.compile(
+    r"写|生成|画|做|列|整理|总结|概括|翻译|改写|润色|扩写|比较|对比|分析|调研|研究|综述|评估|设计|规划|计划|方案|报告|"
+    r"文章|介绍|解释|讲讲|说说|说明|优缺点|选型|建议|步骤|教程|清单|大纲|提纲|怎么|如何|为什么|代码|"
+    r"write|draft|compare|analy|research|explain|summar|plan|design|list",
+    re.IGNORECASE,
+)
+_RESEARCH_WORDS = re.compile(r"比较|对比|调研|研究|综述|分析|评估|优缺点|选型|利弊|差异|区别|为什么|compare|research|analy", re.IGNORECASE)
+_TEXT_PIPELINE = ("planner", "writer", "reviewer")
+_MAX_FORCED = 6
+
+
+def turn_kind(text: str) -> str:
+    """便宜的启发式：chat（寒暄、很短且不含任务词的问答或追问）/ image / research / text。"""
+    body = (text or "").strip()
+    if not body or _CHAT_GREETING.match(body):
+        return "chat"
+    if _image_request(body) or _wants_images("", body):
+        return "image"
+    if len(body) <= 15 and not _TASK_WORDS.search(body):
+        return "chat"
+    if _RESEARCH_WORDS.search(body):
+        return "research"
+    return "text"
+
+
+class _Pipeline:
+    """编排者这一轮必须走的委托。非寒暄的回合：第一步强制 delegate；
+    文字和研究类任务在 planner、writer、reviewer 都委托过之前，每一步都强制 delegate 并点明下一个该委托谁。"""
+
+    def __init__(self, text: str, roles: dict):
+        self.kind = turn_kind(text)
+        self.roles = roles
+        self.done: list[str] = []
+        self.forced = 0
+        self.nudged = False
+
+    def saw(self, arguments) -> None:
+        for item in (arguments or {}).get("tasks") or []:
+            if isinstance(item, dict):
+                role = self.roles.get(str(item.get("agent") or ""))
+                if role:
+                    self.done.append(role)
+
+    def missing(self) -> list[str]:
+        if self.kind == "chat":
+            return []
+        if self.kind == "image":
+            return [] if self.done else ["planner"]
+        return [role for role in _TEXT_PIPELINE if role not in self.done]
+
+    def _note(self, role: str) -> str:
+        flow = "研究类任务：planner 把问题拆成子问题，writer 分头回答（可 parallel），reviewer 核对一致性、依据和缺口，最后你汇总并标明依据。" \
+            if self.kind == "research" else "文字任务：planner 出提纲，writer 起草，reviewer 审稿，最后你汇总。"
+        return f"（运行时）这一轮不能直接回答，必须先用 delegate 委托子 Agent。{flow}下一步委托 {role}。"
+
+    def choose(self, messages):
+        missing = self.missing()
+        if not missing or self.forced >= _MAX_FORCED:
+            return None
+        self.forced += 1
+        return {"tool_choice": {"name": agents.DELEGATE}, "note": self._note(missing[0])}
+
+    def resume(self, spoken: str):
+        # 供应商不接受强制时的兜底：编排者想直接收尾而委托还没走完，提醒一次。
+        missing = self.missing()
+        if not missing or self.nudged:
+            return None
+        self.nudged = True
+        return self._note(missing[0]) + " 刚才那段不算最终回答。"
 
 
 def _orchestrate(app, session_id, message_id, run, provider, request):
