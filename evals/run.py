@@ -377,6 +377,15 @@ def run_multi_agent_web(h: Harness, task: dict, live: bool) -> dict:
     return {"delegated": "planner"}
 
 
+def run_multi_agent_text(h: Harness, task: dict, live: bool) -> dict:
+    """勾多智能体的文字任务：planner → writer → reviewer，编排者汇总。"""
+    try:
+        check._multi_text_turn(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "多智能体文字任务检查失败") from exc
+    return {"chain": ["planner", "writer", "reviewer"]}
+
+
 def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     """子 Agent 越权调用（accept_local_content、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
     import threading
@@ -422,6 +431,7 @@ RUNNERS = {
     "injection": run_injection,
     "multi_agent_web": run_multi_agent_web,
     "multi_agent_guard": run_multi_agent_guard,
+    "multi_agent_text": run_multi_agent_text,
 }
 
 

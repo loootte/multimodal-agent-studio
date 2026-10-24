@@ -11,7 +11,8 @@
         "security.mutating_requires_confirm.runtime": true,
         "security.injection_in_tool_result": true,
         "multi_agent.delegate_plan": true,
-        "multi_agent.child_tool_not_allowed": true
+        "multi_agent.child_tool_not_allowed": true,
+        "multi_agent.text_outline_write_review": true
       }
     }
   }
