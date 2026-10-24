@@ -79,7 +79,7 @@ def comfy_fields() -> list[dict]:
         {"name": "base_url", "type": "string", "default": str(data.get("comfy_url") or "http://127.0.0.1:8188"),
          "required": True, "secret": False, "env": "COMFY_URL", "description": "ComfyUI 地址，例如 http://127.0.0.1:8188。"},
         {"name": "auth_token", "type": "secret", "default": "", "required": False, "secret": True,
-         "description": "可选。ComfyUI 前面有鉴权代理时的令牌，只保存在本机。"},
+         "description": "可选。ComfyUI 前面有鉴权代理时的令牌，只保存在本机；每个 ComfyUI 请求（提交、历史、下载、WebSocket、取消）都带 Authorization: Bearer。"},
         {"name": "output_dir", "type": "path", "default": _rel(base, data.get("output_dir") or "output"),
          "required": True, "secret": False, "env": "COMFY_OUTPUT_DIR", "must_exist": False,
          "description": "ComfyUI 的输出目录（相对路径按 poc/comfyui 解析）。"},
@@ -365,6 +365,9 @@ def install(store: ToolConfigStore) -> None:
     import comfy_poc
 
     comfy_poc.CONFIG_OVERLAY = comfy_overlay
+    import comfy_client
+
+    comfy_client.TOKEN_SOURCE = lambda: store.effective("comfyui").get("auth_token") if _ACTIVE is store else None
 
 
 # ---- 测试连接 ----

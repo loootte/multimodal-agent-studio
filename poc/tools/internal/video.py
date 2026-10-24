@@ -97,11 +97,14 @@ def generate(arguments: dict) -> dict:
     aspect, problem = common.parse_aspect(tool, arguments, set(comfy_poc.ASPECTS))
     if problem:
         return problem
+    config = comfy_poc.load_config()
+    defaults = comfy_poc.run_defaults(config)
+    if arguments.get("seed") is None and defaults.get("seed_policy") == "fixed":
+        arguments = {**arguments, "seed": int(defaults.get("seed") or 0)}
     seed, problem = common.parse_seed(tool, arguments)
     if problem:
         return problem
     image_ref = arguments.get("image_ref")
-    config = comfy_poc.load_config()
     if image_ref is not None and (not isinstance(image_ref, str) or not image_ref.strip()):
         return common.tool_error(tool, "image_not_found", "image_ref 必须是 artifact_id。", "image_ref")
     kind = "video_i2v" if image_ref else "video"
@@ -122,6 +125,9 @@ def generate(arguments: dict) -> dict:
     workflow = template_fill.copy_template(template)
     template_fill.fill_common(workflow, job, arguments["prompt"], aspect, seed, None)
     template_fill.fill_frames(workflow, job, frames)
+    steps = int(defaults.get("steps") or 0)
+    if steps > 0 and "steps" in job:
+        comfy_poc.apply_steps(workflow, job, steps)
     if local_image:
         template_fill.assert_image_to_video(workflow, job)
         uploaded = comfy_client.upload(config["comfy_url"], local_image)

@@ -2019,6 +2019,7 @@ class ComfyState:
         self.release = threading.Event()
         self.hold_after = None
         self.missing_nodes = set()
+        self.auth = []
 
     def set_mode(self, mode: str) -> None:
         with self.cv:
@@ -2095,6 +2096,7 @@ class ComfyHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        self.server.box.auth.append((parsed.path.split("/")[1] if "/" in parsed.path else parsed.path, self.headers.get("Authorization", "")))
         if parsed.path == "/ws":
             self._websocket()
             return
@@ -2126,6 +2128,7 @@ class ComfyHandler(BaseHTTPRequestHandler):
             body = {}
         path = urllib.parse.urlparse(self.path).path
         box = self.server.box
+        box.auth.append((path.strip("/"), self.headers.get("Authorization", "")))
         if path == "/prompt":
             prompt_id = box.add_prompt(body if isinstance(body, dict) else {})
             self._json({"prompt_id": prompt_id, "number": 1, "node_errors": {}})
@@ -3118,6 +3121,13 @@ def _tool_config_case(base: str, provider, box: ComfyState, directory: str, port
         fail(f"保存工具配置后出图失败：{events[-1]}")
     if _field_input(box.prompts[-1]["prompt"], fields_map, "steps") != 13:
         fail("出图没有用保存的步数")
+    bearer = "Bearer " + token
+    seen = {name for name, value in box.auth[-40:] if value == bearer}
+    for name in ("prompt", "history", "view", "ws"):
+        if name not in seen:
+            fail(f"ComfyUI 请求 /{name} 没有带保存的令牌：{sorted(seen)}")
+    _auth_cancel_case(box, port, bearer)
+    _video_defaults_case(base, box)
     status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {"steps": 0}})
     _speak(base, session_id, "画一只默认茶壶", timeout=12)
     with open(os.path.join(ROOT, "poc", "comfyui", "workflows", "image_api.json"), encoding="utf-8") as handle:
@@ -3158,6 +3168,56 @@ def _tool_config_case(base: str, provider, box: ComfyState, directory: str, port
     page = request("GET", base + "/")[1]
     if "/api/tools/" not in script or 'id="tool-settings"' not in page or "恢复默认值" not in page or "测试连接" not in page:
         fail("页面没有工具配置表单")
+
+
+def _auth_cancel_case(box: ComfyState, port: int, bearer: str) -> None:
+    import comfy_client
+
+    box.auth.clear()
+    comfy_client.ComfyClient(f"http://127.0.0.1:{port}").cancel("p-auth", interrupt=True)
+    got = {name: value for name, value in box.auth}
+    if got.get("queue") != bearer or got.get("interrupt") != bearer:
+        fail(f"取消请求没有带令牌：{got}")
+    box.auth.clear()
+    comfy_client.ComfyClient(f"http://127.0.0.1:{port}", token="").queued("p-auth")
+    if box.auth and box.auth[-1][1]:
+        fail("显式空令牌时仍发了 Authorization")
+
+
+def _video_defaults_case(base: str, box: ComfyState) -> None:
+    """网页里没有视频入口；视频工具读同一份配置：固定种子、步数、超时。"""
+    sys.path.insert(0, os.path.join(ROOT, "poc"))
+    from tools.internal import video
+
+    status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {
+        "video_workflow": "workflows/video_api.json", "video_fields": "workflows/video.fields.json",
+        "video_timeout_sec": 15, "seed_policy": "fixed", "seed": 4242, "steps": 6,
+    }})
+    if status != 200:
+        fail(f"保存视频配置失败：{body}")
+    box.set_mode("ok")
+    before = len(box.prompts)
+    result = video.generate({"prompt": "配置视频", "duration_sec": 1, "aspect_ratio": "16:9"})
+    if len(box.prompts) != before + 1:
+        fail(f"视频工具没有提交：{result}")
+    with open(os.path.join(ROOT, "poc", "comfyui", "workflows", "video.fields.json"), encoding="utf-8") as handle:
+        fields_map = json.load(handle)
+    prompt = box.prompts[-1]["prompt"]
+
+    def values(name):
+        specs = fields_map[name] if isinstance(fields_map[name], list) else [fields_map[name]]
+        return {prompt[str(item["node"])]["inputs"][item["input"]] for item in specs}
+
+    if values("seed") != {4242} or values("steps") != {6}:
+        fail(f"视频没有用固定种子或保存的步数：{result}")
+    import comfy_poc
+    import template_fill
+
+    if template_fill.load_job(comfy_poc.load_config(), "video")[2] != 15:
+        fail("视频超时没有读工具配置")
+    request("PUT", base + "/api/tools/comfyui/config", {"values": {
+        "video_workflow": None, "video_fields": None, "video_timeout_sec": None, "seed_policy": None, "seed": None,
+    }})
 
 
 def _batch_stop_case(base: str, provider, box: ComfyState) -> None:

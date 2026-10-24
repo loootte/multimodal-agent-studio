@@ -247,9 +247,25 @@ def job_state(entry: dict | None) -> str:
     return "running"
 
 
+# 网页工具配置可以装一个取令牌的函数；没装时读环境变量 COMFY_AUTH_TOKEN。
+TOKEN_SOURCE = None
+
+
+def current_token() -> str:
+    if TOKEN_SOURCE is not None:
+        try:
+            value = TOKEN_SOURCE()
+        except Exception:
+            value = None
+        if value:
+            return str(value)
+    return os.environ.get("COMFY_AUTH_TOKEN", "")
+
+
 class ComfyClient:
-    def __init__(self, base: str | None = None, client_id: str | None = None, urlopen=None, connect=None):
+    def __init__(self, base: str | None = None, client_id: str | None = None, urlopen=None, connect=None, token: str | None = None):
         self.base = (base or DEFAULT_BASE).rstrip("/")
+        self.token = current_token() if token is None else token
         self.client_id = client_id or str(uuid.uuid4())
         self._urlopen = urlopen or urllib.request.urlopen
         self._connect = connect
@@ -375,7 +391,7 @@ class ComfyClient:
         relative = os.path.join(subfolder, filename) if subfolder else filename
         destination = os.path.join(output_dir, relative)
         os.makedirs(os.path.dirname(destination) or output_dir, exist_ok=True)
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, headers=self._auth(), method="GET")
         try:
             with self._urlopen(req, timeout=120) as response:
                 data = response.read()
@@ -448,7 +464,7 @@ class ComfyClient:
         req = urllib.request.Request(
             self.base + "/upload/image",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **self._auth()},
             method="POST",
         )
         try:
@@ -503,6 +519,9 @@ class ComfyClient:
             self._thread = threading.Thread(target=self._listen, name="comfy-ws", daemon=True)
             self._thread.start()
 
+    def _auth(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
     def _open_ws(self):
         if self._connect is not None:
             ws = self._connect(ws_url(self.base, self.client_id), self.client_id)
@@ -512,7 +531,7 @@ class ComfyClient:
             ws = create_connection(
                 ws_url(self.base, self.client_id),
                 timeout=10,
-                header=[f"Origin: {self.base}"],
+                header=[f"Origin: {self.base}"] + [f"{k}: {v}" for k, v in self._auth().items()],
             )
         if hasattr(ws, "settimeout"):
             ws.settimeout(1)
@@ -606,7 +625,7 @@ class ComfyClient:
 
     def _request_json(self, url: str, payload: dict | None = None, timeout: int = 120):
         data = None
-        headers = {}
+        headers = self._auth()
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
