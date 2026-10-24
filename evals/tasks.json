@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "text.reply",
+      "category": "text",
+      "kind": "chat",
+      "prompt": "只聊天，随便说一句",
+      "fake_mode": "ok",
+      "expect": {"status": "completed", "text_equals": "你好", "comfy_prompts": 0},
+      "live_expect": {"status": "completed", "text_nonempty": true, "comfy_prompts": 0}
+    },
+    {
+      "id": "image_input.describe",
+      "category": "image_input",
+      "kind": "chat",
+      "prompt": "识别这张图片并编写提示词",
+      "attachment": "png",
+      "fake_mode": "ok",
+      "expect": {"status": "completed", "text_nonempty": true, "image_sent_to_provider": true, "no_content_request": true, "comfy_prompts": 0},
+      "live_expect": {"status": "completed", "text_nonempty": true, "no_content_request": true, "comfy_prompts": 0}
+    },
+    {
+      "id": "text_to_image.teapot",
+      "category": "text_to_image",
+      "kind": "chat",
+      "prompt": "画一只茶壶",
+      "fake_mode": "image",
+      "expect": {"status": "completed", "artifacts": 1, "comfy_prompts": 1, "prompt_not_in_provider": true},
+      "live_expect": {"status": "completed", "artifacts_min": 1, "prompt_not_in_provider": true}
+    }
+  ]
+}
