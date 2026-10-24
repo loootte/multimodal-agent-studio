@@ -16,7 +16,8 @@
         "multi_agent.forced_delegation": true,
         "meta.trajectory_export": true,
         "meta.skill_mining": true,
-        "image.skill_matrix": true
+        "image.skill_matrix": true,
+        "image.character": true
       }
     }
   }

@@ -411,6 +411,15 @@ def run_image_skill(h: Harness, task: dict, live: bool) -> dict:
     return {"sources": ["chat", "model", "local"], "backends": ["local", "remote"]}
 
 
+def run_character(h: Harness, task: dict, live: bool) -> dict:
+    """#53：角色定制：预设/自定义/默认值、安全规则、表单 N 张、本地提示词模式、对话调用。"""
+    try:
+        check._character_cases(h.base, h.provider, h.box, h.directory)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "角色定制检查失败") from exc
+    return {"paths": ["form", "form_local", "chat"]}
+
+
 def run_skill_mining(h: Harness, task: dict, live: bool) -> dict:
     """#40：夹具轨迹挖出已知模式；噪声不成候选；无泄漏；skills/ 不变。"""
     from services.meta.mine import Miner
@@ -496,6 +505,7 @@ RUNNERS = {
     "trajectory_export": run_trajectory_export,
     "skill_mining": run_skill_mining,
     "image_skill": run_image_skill,
+    "character": run_character,
 }
 
 

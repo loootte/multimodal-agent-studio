@@ -205,6 +205,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "character":
+            self._character()
+            return
         if mode == "imageskill":
             self._image_skill()
             return
@@ -426,6 +429,23 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if "第三方" in ask:
             args["backend"] = "remote"
         self._emit_tool("generate_image", args)
+
+    def _character(self) -> None:
+        """#53：模型只填用户说到的字段，拿到句柄再出图。"""
+        texts = self._user_texts()
+        if self._tool_result_count("generate_image") >= 1:
+            self._piece(_delta(content="好了"))
+            self._done()
+            return
+        staged = next((t for t in reversed(texts) if "工具结果 character_image" in t), "")
+        if not staged:
+            self._emit_tool("character_image", {"hair_color": "红发", "outfit": "knight_armor"})
+            return
+        if '"ok": false' in staged:
+            self._piece(_delta(content="不能这样画"))
+            self._done()
+            return
+        self._emit_tool("generate_image", {"content_handle": _content_handle(staged)})
 
     def _ready(self) -> bool:
         return "已就绪" in self._last_user()
@@ -3067,6 +3087,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _toolpack_http_case(base, directory)
         _delete_session_case(base, directory)
         _resources_case(base, provider, directory)
+        _character_cases(base, provider, comfy.box, directory)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -4482,7 +4503,7 @@ def _egress_file(provider) -> None:
 # ---------- #31 工具包 ----------
 
 BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
-                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt"}
+                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image"}
 
 
 def _packs_module():
@@ -5100,5 +5121,163 @@ def main() -> None:
     print("check ok")
 
 
+
+def _character_units() -> None:
+    """#53：清单、默认值、预设拼接、自定义覆盖、配置覆盖预设、安全规则。"""
+    import character
+    sys.path.insert(0, os.path.join(ROOT, "poc", "tools"))
+    import packs
+
+    with open(os.path.join(ROOT, "toolpacks", "builtin", "character_image", "tool.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    packs.validate_manifest(manifest, builtin=True)
+    props = manifest["parameters"]["properties"]
+    if set(character.FIELDS) - set(props):
+        fail("character_image 清单缺字段")
+    base = character.compose({}, {})
+    if base["used_defaults"] != list(character.FIELDS) or base["minor"]:
+        fail(f"默认值不对：{base['used_defaults']}")
+    for part in ("woman", "young adult", "long straight hair", "black hair", "brown eyes", "safe for work"):
+        if part not in base["prompt"]:
+            fail(f"默认提示词缺 {part}：{base['prompt']}")
+    by_label = character.compose({"hair_color": "红发", "outfit": "骑士铠甲", "gender": "male"}, {})
+    if "red hair" not in by_label["prompt"] or "knight" not in by_label["prompt"] or " man," not in by_label["prompt"]:
+        fail(f"预设（键或中文标签）没拼进去：{by_label['prompt']}")
+    custom = character.compose({"hair_color": "薄荷绿挑染", "background": "雨夜的霓虹小巷"}, {})
+    if "薄荷绿挑染" not in custom["prompt"] or "雨夜的霓虹小巷" not in custom["prompt"]:
+        fail("自定义文字没有覆盖预设")
+    if not custom["fields"]["hair_color"]["custom"] or custom["fields"]["gender"]["custom"]:
+        fail("自定义字段没标出来")
+    config = {"default_hair_color": "silver", "presets_json": json.dumps({"hair_color": [
+        {"key": "silver", "label": "银发", "prompt": "glossy platinum silver hair"},
+        {"key": "mint", "label": "薄荷绿", "prompt": "mint green hair"}]}, ensure_ascii=False)}
+    changed = character.compose({}, config)
+    if "glossy platinum silver hair" not in changed["prompt"]:
+        fail("配置里的预设没覆盖同名预设或默认值")
+    labels = [o["key"] for f in character.catalog(config)["fields"] if f["name"] == "hair_color" for o in f["options"]]
+    if "mint" not in labels:
+        fail("配置里新增的预设没出现在表单里")
+    if character.check_config({"presets_json": "{bad"}) == {}:
+        fail("坏的 presets_json 没被拦下")
+    if character.check_config({"presets_json": json.dumps({"outfit": [{"key": "x", "label": "x", "prompt": "nude"}]})}) == {}:
+        fail("露骨预设没被配置检查拦下")
+    for fields, code in (
+        ({"age": "child", "outfit": "swimsuit"}, "minor_unsafe"),
+        ({"age": "teen", "pose": "lying"}, "minor_unsafe"),
+        ({"age": "12岁", "pose": "躺在床上"}, "minor_unsafe"),
+        ({"outfit": "nude"}, "unsafe_content"),
+    ):
+        try:
+            character.compose(fields, {})
+        except character.CharacterError as exc:
+            if exc.code != code:
+                fail(f"{fields} 应是 {code}，得到 {exc.code}")
+        else:
+            fail(f"{fields} 没被拦下")
+    kid = character.compose({"age": "child", "outfit": "school_uniform"}, {})
+    if not kid["minor"] or "non-sexualized" not in kid["prompt"] or " woman" in kid["prompt"]:
+        fail(f"未成年角色没加保护性描述：{kid['prompt']}")
+    adult_swim = character.compose({"outfit": "swimsuit"}, {})
+    if "tasteful" not in adult_swim["prompt"]:
+        fail("成年泳装没有加得体描述")
+    for name, field in character.base_presets().items():
+        for option in field["options"]:
+            if option.get("minor") and name != "age":
+                fail("只有年龄预设能标未成年")
+    print("character units ok")
+
+
+def _character_form(base: str, session_id: str, payload: dict, timeout: float = 15):
+    status, raw, events = read_sse(site_port(base), f"/api/sessions/{session_id}/character", payload, timeout=timeout)
+    return status, raw, events
+
+
+def _character_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    import chat_run
+
+    _character_units()
+    box.set_mode("ok")
+    status, body = request("GET", base + "/api/character")
+    catalog = json.loads(body)
+    if status != 200 or catalog["defaults"]["gender"] != "female" or len(catalog["fields"]) != 9:
+        fail(f"/api/character 不对：{status}")
+    status, body = request("POST", base + "/api/character/preview", {"fields": {"hair_color": "红发"}})
+    if status != 200 or "red hair" not in json.loads(body)["prompt"]:
+        fail("预览没拼出提示词")
+    status, body = request("POST", base + "/api/character/preview", {"fields": {"age": "child", "outfit": "swimsuit"}})
+    if status != 400 or json.loads(body).get("code") != "minor_unsafe":
+        fail(f"预览没拦未成年+泳装：{status} {body}")
+
+    # 表单：N 张就提交 N 次，不调对话模型。
+    session_id = _fresh_session(base)
+    sent, before = len(provider.requests), len(box.prompts)
+    status, raw, events = _character_form(base, session_id, {"fields": {"hair_color": "红发"}, "count": 2, "seed": 7})
+    if status != 200 or events[-1].get("type") != "message.completed":
+        fail(f"表单出图没完成：{status} {[e.get('type') for e in events]}")
+    if len(box.prompts) != before + 2 or len([e for e in events if e.get("type") == "artifact"]) != 2:
+        fail("表单两张图没有恰好提交两次")
+    if len(provider.requests) != sent:
+        fail("表单出图调用了对话模型")
+    if "red hair" not in json.dumps(box.prompts[-1]):
+        fail("表单提示词没送到 ComfyUI")
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    if "定制角色出图（2 张" not in stored["messages"][0]["text"]:
+        fail("表单没写进聊天记录")
+    status, raw, events = _character_form(base, session_id, {"fields": {"age": "child", "pose": "lying"}})
+    if status != 400:
+        fail("表单没拦未成年+不当姿势")
+    for bad in ({"count": 0}, {"count": 21}, {"privacy": "x"}, {"backend": "x"}):
+        if _character_form(base, session_id, bad)[0] != 400:
+            fail(f"表单没拦坏参数 {bad}")
+
+    # 本地提示词：自定义文字不进聊天记录，第三方默认拒绝。
+    session_id = _fresh_session(base)
+    secret = "只留本机的角色描述丙"
+    before = len(box.prompts)
+    status, raw, events = _character_form(base, session_id, {"fields": {"outfit": secret}, "privacy": "local"})
+    if status != 200 or events[-1].get("type") != "message.completed" or len(box.prompts) != before + 1:
+        fail("本地提示词模式没出图")
+    visible = request("GET", base + f"/api/sessions/{session_id}")[1]
+    if secret in visible or secret in raw:
+        fail("本地提示词模式把自定义文字写进了会话或事件")
+    if secret not in json.dumps(box.prompts[-1], ensure_ascii=False):
+        fail("本地提示词没送到本机 ComfyUI")
+    saved = {name: os.environ.get(name) for name in ("MAS_IMAGE_API_BASE", "MAS_IMAGE_API_KEY")}
+    os.environ["MAS_IMAGE_API_BASE"] = "http://127.0.0.1:9/v1"
+    os.environ["MAS_IMAGE_API_KEY"] = "sk-fake-character-53"
+    try:
+        status, raw, events = _character_form(base, session_id, {"fields": {"outfit": secret}, "privacy": "local", "backend": "remote"})
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    blob = json.dumps(events, ensure_ascii=False)
+    if events[-1].get("type") == "message.completed" or "local_prompt_remote_refused" not in blob:
+        fail(f"本地提示词默认没拒绝第三方：{blob[-300:]}")
+
+    # 对话：模型调 character_image，没说的字段用默认值，再 generate_image。
+    if not chat_run._open_prompt_request("画一个红发女骑士角色"):
+        fail("“角色”没打开对话出图")
+    provider.mode = "character"
+    session_id = _fresh_session(base)
+    before, sent = len(box.prompts), len(provider.requests)
+    events = _speak(base, session_id, "画一个红发女骑士角色", timeout=15)
+    if _assistant_text(events) != "好了" or len(box.prompts) != before + 1:
+        fail(f"对话角色出图不对：{_assistant_text(events)} {len(box.prompts) - before}")
+    submitted = json.dumps(box.prompts[-1])
+    for part in ("red hair", "knight", "woman", "long straight hair", "brown eyes"):
+        if part not in submitted:
+            fail(f"对话角色提示词缺 {part}")
+    result = next((e for e in events if e.get("type") == "tool_result" and e.get("tool") == "character_image"), None)
+    blob = json.dumps(events, ensure_ascii=False)
+    if "used_defaults" not in json.dumps(provider.requests[sent + 1]["body"], ensure_ascii=False) and result is None:
+        fail(f"character_image 结果没回到模型：{blob[:300]}")
+    provider.mode = "ok"
+    print("character ok")
+
+
 if __name__ == "__main__":
     main()
+
