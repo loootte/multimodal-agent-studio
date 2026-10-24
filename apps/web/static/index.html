@@ -86,14 +86,27 @@
         <select id="tool-select"></select>
       </label>
       <p id="tool-description" class="hint"></p>
+      <div id="tool-meta" class="tool-meta" hidden></div>
       <div id="tool-fields" class="tool-fields"></div>
       <p id="tool-note" class="note" hidden></p>
       <div class="dialog-actions">
-        <button type="submit">保存</button>
+        <button type="submit" id="tool-save">保存</button>
         <button type="button" id="tool-test">测试连接</button>
+        <button type="button" id="tool-export" hidden>导出工具包</button>
+        <button type="button" id="tool-uninstall" hidden>卸载</button>
         <button type="button" id="tool-reset">恢复默认值</button>
         <button type="button" id="close-tools">关闭</button>
       </div>
+      <details id="toolpack-install-box">
+        <summary>安装工具包</summary>
+        <label>
+          本机目录或 .zip 路径
+          <input id="toolpack-source" autocomplete="off" spellcheck="false" placeholder="D:\toolpacks\dice_roll">
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="toolpack-install">检查并安装</button>
+        </div>
+      </details>
     </form>
   </dialog>
   <script src="/static/app.js"></script>

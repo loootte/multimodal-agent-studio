@@ -1123,25 +1123,103 @@ document.querySelector("#tool-form").addEventListener("submit", saveToolConfig);
 document.querySelector("#tool-reset").addEventListener("click", resetToolConfig);
 document.querySelector("#tool-test").addEventListener("click", testToolConfig);
 document.querySelector("#tool-select").addEventListener("change", (event) => loadToolConfig(event.target.value));
+document.querySelector("#tool-export").addEventListener("click", exportToolPack);
+document.querySelector("#tool-uninstall").addEventListener("click", uninstallToolPack);
+document.querySelector("#toolpack-install").addEventListener("click", installToolPack);
 
 const SOURCE_LABEL = { env: "来自环境变量（优先，页面改不了）", saved: "已保存", default: "默认值" };
+
+const PERMISSION_LABEL = {
+  read_local_content: "读本机内容",
+  network: "联网",
+  write_files: "写文件",
+  send_local_to_model: "把本机内容交给模型",
+};
+
+// 下拉框按实际工具名（plan_images、generate_image…）列出；后端（ComfyUI）单独一组。
+function toolOptions(listing) {
+  const groups = [];
+  const tools = document.createElement("optgroup");
+  tools.label = "工具";
+  for (const tool of listing.tools || []) {
+    const option = document.createElement("option");
+    option.value = tool.name;
+    const flags = [];
+    if (!tool.builtin) flags.push("已安装");
+    if (!tool.ready) flags.push("未就绪");
+    option.textContent = flags.length ? `${tool.name}（${flags.join("，")}）` : tool.name;
+    tools.append(option);
+  }
+  groups.push(tools);
+  if ((listing.backends || []).length) {
+    const backends = document.createElement("optgroup");
+    backends.label = "后端";
+    for (const backend of listing.backends) {
+      const option = document.createElement("option");
+      option.value = backend.name;
+      option.textContent = backend.complete ? backend.title : `${backend.title}（未配全）`;
+      backends.append(option);
+    }
+    groups.push(backends);
+  }
+  return groups;
+}
+
+async function refreshToolList(selected) {
+  const listing = await api("GET", "/api/tools");
+  const select = document.querySelector("#tool-select");
+  select.replaceChildren(...toolOptions(listing));
+  const names = [...(listing.tools || []), ...(listing.backends || [])].map((item) => item.name);
+  const pick = names.includes(selected) ? selected : names[0];
+  if (pick) {
+    select.value = pick;
+    await loadToolConfig(pick);
+  }
+}
 
 async function openToolSettings() {
   toolNote("");
   try {
-    const listing = await api("GET", "/api/tools");
-    const select = document.querySelector("#tool-select");
-    select.replaceChildren(...listing.tools.map((tool) => {
-      const option = document.createElement("option");
-      option.value = tool.name;
-      option.textContent = tool.complete ? tool.title : `${tool.title}（未配全）`;
-      return option;
-    }));
-    if (listing.tools.length) await loadToolConfig(listing.tools[0].name);
+    await refreshToolList(state.toolView && state.toolView.name);
   } catch (error) {
     toolNote(error.message || "读不到工具配置。");
   }
   toolDialog.showModal();
+}
+
+function renderToolMeta(view) {
+  const box = document.querySelector("#tool-meta");
+  const pack = view.pack;
+  document.querySelector("#tool-export").hidden = !pack || pack.builtin;
+  document.querySelector("#tool-uninstall").hidden = !pack || pack.builtin;
+  box.replaceChildren();
+  box.hidden = !pack;
+  if (!pack) return;
+  const line = (text) => {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = text;
+    box.append(p);
+    return p;
+  };
+  line(`版本 ${pack.version} · ${pack.builtin ? "内置" : "已安装"} · ${pack.exposed ? "模型可调用" : "只在本机使用"} · 确认：${{ always: "每次确认", never: "不用确认", by_args: "按参数" }[pack.confirm] || pack.confirm}`);
+  const perms = (pack.permissions || []).map((key) => PERMISSION_LABEL[key] || key);
+  line(`权限：${perms.length ? perms.join("、") : "无"}`);
+  if ((pack.denied || []).length) line(`未授权：${pack.denied.map((key) => PERMISSION_LABEL[key] || key).join("、")}`).className = "note";
+  if ((pack.missing || []).length) line(`缺少依赖：${pack.missing.join("、")}`).className = "note";
+  for (const backend of pack.backend_status || []) {
+    const row = line(`依赖后端 ${backend.title}：${backend.complete ? "已配好" : "未配全（" + backend.missing.join("、") + "）"} `);
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "ghost";
+    jump.textContent = `去配置 ${backend.title}`;
+    jump.addEventListener("click", async () => {
+      document.querySelector("#tool-select").value = backend.name;
+      await loadToolConfig(backend.name);
+    });
+    row.append(jump);
+  }
+  if (!view.fields.length) line("这个工具没有自己的配置项。");
 }
 
 async function loadToolConfig(name) {
@@ -1153,6 +1231,9 @@ function renderToolForm(view, errors) {
   const box = document.querySelector("#tool-fields");
   document.querySelector("#tool-description").textContent = view.description || "";
   document.querySelector("#tool-test").hidden = !view.testable;
+  document.querySelector("#tool-save").hidden = !view.fields.length;
+  document.querySelector("#tool-reset").hidden = !view.fields.length;
+  renderToolMeta(view);
   box.replaceChildren();
   for (const field of view.fields) {
     const current = view.values[field.name] || {};
@@ -1256,6 +1337,57 @@ async function testToolConfig() {
     toolNote(result.message || (result.ok ? "连接正常。" : "连接失败。"));
   } catch (error) {
     toolNote(error.message || "测试失败。");
+  }
+}
+
+function exportToolPack() {
+  const view = state.toolView;
+  if (!view || !view.pack || view.pack.builtin) return;
+  // 导出的 zip 只有清单和代码：配置值、密钥和授权记录都不带走。
+  const link = document.createElement("a");
+  link.href = `/api/toolpacks/${encodeURIComponent(view.name)}/export`;
+  link.download = `${view.name}.zip`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  toolNote("已导出（不含配置和密钥）。");
+}
+
+async function uninstallToolPack() {
+  const view = state.toolView;
+  if (!view || !view.pack || view.pack.builtin) return;
+  if (!window.confirm(`卸载工具 ${view.name}？它保存的配置会留在 tools.json 里。`)) return;
+  try {
+    await api("POST", `/api/toolpacks/${encodeURIComponent(view.name)}/uninstall`);
+    state.toolView = null;
+    await refreshToolList();
+    toolNote(`已卸载 ${view.name}。`);
+  } catch (error) {
+    toolNote(error.message || "卸载失败。");
+  }
+}
+
+async function installToolPack() {
+  const source = document.querySelector("#toolpack-source").value.trim();
+  if (!source) {
+    toolNote("先填工具包目录或 .zip 路径。");
+    return;
+  }
+  try {
+    const info = await api("POST", "/api/toolpacks/inspect", { source });
+    if ((info.problems || []).length) {
+      toolNote(`工具包不合格：${info.problems.join("；")}`);
+      return;
+    }
+    const perms = (info.permissions || []).map((key) => PERMISSION_LABEL[key] || key);
+    const missing = (info.missing || []).length ? `\n缺少依赖：${info.missing.join("、")}（装上后调用会报 dependency_missing）` : "";
+    const ok = window.confirm(`安装 ${info.name} ${info.version}？\n${info.description}\n要的权限：${perms.length ? perms.join("、") : "无"}${missing}`);
+    if (!ok) return;
+    await api("POST", "/api/toolpacks/install", { source, accept_permissions: info.permissions || [] });
+    await refreshToolList(info.name);
+    toolNote(`已安装 ${info.name}。`);
+  } catch (error) {
+    toolNote(error.message || "安装失败。");
   }
 }
 

@@ -469,3 +469,6 @@ dialog input {
 #tool-settings { max-width: 40rem; }
 .tool-fields { max-height: 60vh; overflow-y: auto; padding-right: 0.3rem; }
 dialog select { font: inherit; padding: 0.35rem; }
+
+.tool-meta p { margin: 0.2rem 0; }
+.tool-meta button { margin-left: 0.4rem; }
