@@ -504,14 +504,16 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
     )
 
 
-def _generate_text_turn(app, session_id, message_id, run, provider, session, user_text) -> str:
-    request = _gateway_request(provider, _turn_messages(app, session_id, session))
+def _generate_text_turn(
+    app, session_id, message_id, run, provider, session, user_text, extra=None, take_tools=_TAKE_TOOLS,
+) -> str:
+    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra))
     spoken: list[str] = []
     seen = 0
     claimed: dict = {}
 
     def take(name, arguments):
-        if name not in _TAKE_TOOLS:
+        if name not in take_tools:
             return False
         claimed["name"] = name
         claimed["arguments"] = arguments
@@ -522,7 +524,7 @@ def _generate_text_turn(app, session_id, message_id, run, provider, session, use
         return run.wait_confirm()
 
     def execute(name, arguments):
-        if name in _WEB_TOOLS and name not in _TAKE_TOOLS:
+        if name in _WEB_TOOLS and name not in take_tools:
             return _execute_web_tool(app, session_id, message_id, run, name, arguments)
         return execute_tool(name, arguments)
 
@@ -701,6 +703,14 @@ def _continue_after_content(
     stored_kind = record.get("kind") or kind
     print(f"content {session_id} {handle} {stored_kind} {record.get('size')}", file=sys.stderr)
     session = app.sessions.get(session_id)
+    if not image and stored_kind == "text" and _wants_images(purpose, user_text):
+        # 刚收下的提示词要出图（可能连续多张）：回到运行时循环，让模型按句柄逐张调用 generate_image。
+        # accept_local_content 不再被 take 截走，免得收完正文就结束这一轮。
+        return _generate_text_turn(
+            app, session_id, message_id, run, provider, session, user_text,
+            extra=[{"role": "user", "content": _ready_line(handle)}],
+            take_tools=("build_skill_page",),
+        )
     ready = _ready_line(handle) if image else _kept_line(handle, stored_kind, record.get("size") or 0)
     messages = _turn_messages(
         app,
@@ -1258,6 +1268,14 @@ def _image_request(text: str, attachments=None) -> bool:
     if "图片" in text and any(word in text for word in ("生成", "画")):
         return True
     return any(marker in text for marker in _IMAGE_MARKERS)
+
+
+def _wants_images(purpose: str, user_text: str) -> bool:
+    if purpose == "image_prompt":
+        return True
+    return any(marker in user_text for marker in _SCHEDULE_MARKERS) and (
+        "图" in user_text or any(marker in user_text for marker in _IMAGE_MARKERS)
+    )
 
 
 def _skill_figure(text: str) -> bool:

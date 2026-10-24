@@ -199,6 +199,17 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "localmulti":
+            if self._tool_result_count("generate_image") >= 5:
+                self._piece(_delta(content="五张都好了"))
+                self._done()
+                return
+            handle = _content_handle(json.dumps(self.server.requests[-1]["body"], ensure_ascii=False))
+            if not handle:
+                self._emit_tool("accept_local_content", {"purpose": "image_prompt", "kind": "text"})
+                return
+            self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
+            return
         if mode == "fileimage":
             if not self._ready():
                 self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
@@ -2136,6 +2147,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_file_image(base, provider, comfy.box)
         _egress_file(provider)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
+        _local_multi_image_case(base, provider, comfy.box, workflow)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -2826,6 +2838,38 @@ def _multi_image_case(base: str, provider, box: ComfyState, directory: str, work
                 break
         else:
             fail("连续出图没有把文字句柄交给模型")
+
+
+def _local_multi_image_case(base: str, provider, box: ComfyState, workflow_path: str) -> None:
+    provider.mode = "localmulti"
+    box.set_mode("ok")
+    session_id = _fresh_session(base)
+    secret = "当场留下的连续出图提示词-不应外发"
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "用本地提示词连续生成5张图片", timeout=25, content=secret)
+    kinds = [event.get("type") for event in events]
+    if "content_request" not in kinds:
+        fail(f"没有句柄时连续出图没有先询问本地提示词：{kinds}")
+    asked = kinds.index("content_request")
+    arts = [index for index, kind in enumerate(kinds) if kind == "artifact"]
+    if len(arts) != 5 or arts[0] < asked:
+        fail(f"收下本地提示词后没有连续五张成片：{len(arts)} {kinds}")
+    if len(box.prompts) != before + 5:
+        fail("收下本地提示词后没有恰好提交五次")
+    for submitted in box.prompts[before:]:
+        _assert_whitelist(submitted, workflow_path, secret)
+    if _assistant_text(events) != "五张都好了":
+        fail("收下本地提示词后没有等模型调度完再回答")
+    if events[-1].get("type") != "message.completed":
+        fail("收下本地提示词后连续出图没有正常结束")
+    if len(provider.requests) != sent + 7:
+        fail(f"收下本地提示词后供应商请求次数不对：{len(provider.requests) - sent}")
+    for item in provider.requests[sent:]:
+        if secret in _provider_blob(item):
+            fail("收下本地提示词后把正文发给了模型")
+    if secret in json.dumps(events, ensure_ascii=False):
+        fail("收下本地提示词后把正文写进了页面")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):
