@@ -1,13 +1,13 @@
 # 角色图片定制（issue #53）
 
-一个标准化的角色出图工具：用户决定角色的 **性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景** 九项。每项都有预设可选，也可以自己写；没填的项用默认值——一个**年轻女性角色**。
+一个标准化的角色出图工具：用户决定角色的 **性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考已有角色** 十二项。每项都有预设可选，也可以自己写；没填的项用默认值——一个**年轻东亚女性角色**（二次元动漫风格，无参考）。
 
 ## 怎么用
 
 **网页表单**：侧栏点「定制角色」。
 
-- 每一项是一个下拉框（预设），选最后的「自定义…」就能自己写（最长 200 字）。
-- 「恢复默认」把九项都还原成默认值；下面实时显示这次会发给出图服务的英文提示词。
+- 每一项是一个下拉框（预设），选最后的「自定义…」就能自己写（最长 200 字）。「参考已有角色」默认是「无」。
+- 「恢复默认」把十二项都还原成默认值；下面实时显示这次会发给出图服务的英文提示词。
 - 选张数（1–20）、画幅（1:1 / 16:9 / 9:16）、出图后端（本机 ComfyUI / 第三方）、提示词去向（写进聊天记录 / 本地提示词）。
 - 点「生成」：在当前对话里多出一轮，N 张就逐张调用 N 次 `generate_image`，进度、成片、停止都和普通出图一样。表单**不经过对话模型**，没配模型密钥也能用。
 
@@ -21,6 +21,7 @@
 | --- | --- |
 | 性别 | 女性 |
 | 年龄 | 青年（20 多岁） |
+| 人种 | 东亚 |
 | 体型 | 纤细 |
 | 发型 | 黑长直 |
 | 发色 | 黑色 |
@@ -28,12 +29,16 @@
 | 服装 | 休闲装 |
 | 姿势 | 站立 |
 | 背景 | 纯色背景 |
+| 画面风格 | 二次元动漫 |
+| 参考已有角色 | 无 |
 
 默认提示词：
 
 ```
-character illustration, full body, highly detailed, best quality, woman, young adult in their early twenties, slim build, long straight hair, black hair, brown eyes, wearing casual outfit, sweater and jeans, standing, relaxed pose, simple plain light background, tasteful, fully clothed, safe for work
+anime style illustration, character illustration, full body, highly detailed, best quality, woman, young adult in their early twenties, East Asian features, slim build, long straight hair, black hair, brown eyes, wearing casual outfit, sweater and jeans, standing, relaxed pose, simple plain light background, tasteful, fully clothed, safe for work
 ```
+
+（`reference=none` / 空时不进入提示词。）
 
 ## 预设
 
@@ -43,6 +48,7 @@ character illustration, full body, highly detailed, best quality, woman, young a
 | --- | --- |
 | 性别（`gender`） | 女性`female`、男性`male`、中性`androgynous` |
 | 年龄（`age`） | 青年（20 多岁）`young_adult`、成年（30 多岁）`adult`、中年`middle_aged`、老年`elderly`、青少年（未成年）`teen`⚠未成年、儿童（未成年）`child`⚠未成年 |
+| 人种（`ethnicity`） | 东亚`east_asian`、东南亚`southeast_asian`、南亚`south_asian`、欧洲裔`european`、非洲裔`african`、中东`middle_eastern`、拉丁裔`latino`、混血`mixed` |
 | 体型（`build`） | 纤细`slim`、匀称`average`、健美`athletic`、强壮`muscular`、娇小`petite`、高挑`tall`、丰满圆润`plump` |
 | 发型（`hairstyle`） | 长直发`long_straight`、长卷发`long_wavy`、波波头`bob`、马尾`ponytail`、双马尾`twin_tails`、丸子头`bun`、麻花辫`braid`、短发`short`、精灵短发`pixie`、寸头`buzz` |
 | 发色（`hair_color`） | 黑色`black`、棕色`brown`、金色`blonde`、红色`red`、银白`silver`、粉色`pink`、蓝色`blue`、紫色`purple`、绿色`green`、渐变色`gradient` |
@@ -50,10 +56,12 @@ character illustration, full body, highly detailed, best quality, woman, young a
 | 服装（`outfit`） | 休闲装`casual`、校服`school_uniform`、职业装`business`、连衣裙`dress`、汉服`hanfu`、和服`kimono`、骑士铠甲`knight_armor`、法师长袍`mage_robe`、科幻战斗服`sci_fi`、运动服`sportswear`、冬季大衣`winter_coat`、泳装`swimsuit`⚠ |
 | 姿势（`pose`） | 站立`standing`、坐着`sitting`、行走`walking`、奔跑`running`、挥手`waving`、抱臂`arms_crossed`、战斗姿态`fighting`、看书`reading`、回眸`looking_back`、躺卧`lying`⚠ |
 | 背景（`background`） | 纯色背景`plain`、影棚`studio`、城市街道`city`、夜晚都市`night_city`、森林`forest`、海边`beach`、教室`classroom`、城堡`castle`、樱花`cherry_blossom`、太空`space`、咖啡馆`cafe` |
+| 画面风格（`art_style`） | 二次元动漫`anime`、写实`realistic`、半写实`semi_realistic`、水彩`watercolor`、油画`oil_painting`、水墨`ink_wash`、Q版`chibi`、像素`pixel`、漫画`comic`、3D渲染`3d_render`、素描`sketch` |
+| 参考已有角色（`reference`） | 无`none`（默认可空）；也可自定义一段自由描述（按灵感生成原创角色，不复制版权角色） |
 
-匹配规则：先按键、中文标签（或括号前的部分）找预设；发色、瞳色还认“红发”“红色头发”“蓝眼睛”这类说法。都对不上就当自定义文字原样放进提示词。
+匹配规则：先按键、中文标签（或括号前的部分）找预设；发色、瞳色还认“红发”“红色头发”“蓝眼睛”这类说法。都对不上就当自定义文字原样放进提示词。`reference` 自定义会包一层 `inspired by "…", original character, not a copy of any copyrighted character`；选「无」或空则完全不进提示词。
 
-提示词顺序：画质词 → 性别 → 年龄 → 体型 → 发型 → 发色 → 瞳色 → `wearing` 服装 → 姿势 → 背景 → 安全尾注。
+提示词顺序：画面风格 → 画质词 → 性别 → 年龄 → 人种 → 体型 → 发型 → 发色 → 瞳色 → `wearing` 服装 → 姿势 → 背景 → 参考（可缺）→ 安全尾注。
 
 ## 改预设和默认值（工具配置，#28）
 
@@ -61,9 +69,9 @@ character illustration, full body, highly detailed, best quality, woman, young a
 
 | 配置 | 含义 |
 | --- | --- |
-| `default_gender` … `default_background` | 九项的默认值，填键、中文标签或自由文字 |
+| `default_gender` … `default_background`、`default_ethnicity`、`default_art_style`、`default_reference` | 十二项的默认值，填键、中文标签或自由文字；`default_reference` 默认 `none` |
 | `presets_json` | 覆盖或新增预设。格式 `{"字段": [{"key": "...", "label": "...", "prompt": "..."}]}`；同键替换、新键追加到列表末尾 |
-| `quality_tags` | 提示词开头的画质词 |
+| `quality_tags` | 提示词靠前的画质词（接在画面风格之后） |
 
 例：
 
@@ -76,7 +84,7 @@ character illustration, full body, highly detailed, best quality, woman, young a
 
 ## 安全规则
 
-- **没有露骨预设。** 自定义文字或配置里的预设含露骨/色情词（如 nude、naked、nsfw、lingerie、bikini、sexy、裸、色情、性感、内衣、比基尼、r18）时拒绝出图（`unsafe_content`）。
+- **没有露骨预设。** 自定义文字或配置里的预设含露骨/色情词（如 nude、naked、nsfw、lingerie、bikini、sexy、裸、色情、性感、内衣、比基尼、r18）时拒绝出图（`unsafe_content`）。参考角色的自定义文字同样检查。
 - **年龄默认是成年人**（青年，20 多岁）。所有非年龄预设都按成年人写。
 - **未成年角色**（选了 青少年/儿童 预设，或自定义年龄里有“少年、小孩、萝莉、正太、child、teen…”，或写了小于 18 的“N 岁 / years old”）：
   - 和带 ⚠ 的服装（泳装）、姿势（躺卧），或自定义文字里有暗示性词（泳装、泳衣、躺、卧、床、短裙、露脐、紧身、swimsuit、lying、bed…）组合时**直接拒绝**（`minor_unsafe`），表单和预览会显示原因；
@@ -95,15 +103,15 @@ character illustration, full body, highly detailed, best quality, woman, young a
 
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/character` | 九个字段的预设和生效默认值 |
+| `GET /api/character` | 十二个字段的预设和生效默认值 |
 | `POST /api/character/preview` | `{fields}` → `{prompt, fields, used_defaults, minor, summary}`，不安全时 400 + `code` |
 | `POST /api/sessions/{id}/character` | `{fields, count, aspect_ratio, seed?, backend, privacy}`，返回和发消息相同的事件流 |
 
-宿主工具 `character_image` 的参数：九个字段（字符串，可省略）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
+宿主工具 `character_image` 的参数：十二个字段（字符串，可省略；`reference` 默认可空）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
 
 ## 不做
 
-不做角色一致性（LoRA、参考图）、不加负面提示词通道、不改 `generate_image` 的约定和默认隐私闸门。
+不做角色一致性（LoRA、参考图）、不加负面提示词通道、不改 `generate_image` 的约定和默认隐私闸门。参考字段只接受文字灵感，不接参考图文件。
 
 ## 代码
 

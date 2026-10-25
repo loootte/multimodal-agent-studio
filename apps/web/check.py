@@ -5137,9 +5137,13 @@ def _character_units() -> None:
     base = character.compose({}, {})
     if base["used_defaults"] != list(character.FIELDS) or base["minor"]:
         fail(f"默认值不对：{base['used_defaults']}")
-    for part in ("woman", "young adult", "long straight hair", "black hair", "brown eyes", "safe for work"):
+    for part in ("anime style", "woman", "young adult", "East Asian features", "long straight hair", "black hair", "brown eyes", "safe for work"):
         if part not in base["prompt"]:
             fail(f"默认提示词缺 {part}：{base['prompt']}")
+    if "inspired by" in base["prompt"]:
+        fail(f"空参考不应进提示词：{base['prompt']}")
+    if base["fields"]["reference"]["key"] != "none" or base["fields"]["art_style"]["key"] != "anime":
+        fail(f"默认字段不对：{base['fields']}")
     by_label = character.compose({"hair_color": "红发", "outfit": "骑士铠甲", "gender": "male"}, {})
     if "red hair" not in by_label["prompt"] or "knight" not in by_label["prompt"] or " man," not in by_label["prompt"]:
         fail(f"预设（键或中文标签）没拼进去：{by_label['prompt']}")
@@ -5148,6 +5152,17 @@ def _character_units() -> None:
         fail("自定义文字没有覆盖预设")
     if not custom["fields"]["hair_color"]["custom"] or custom["fields"]["gender"]["custom"]:
         fail("自定义字段没标出来")
+    styled = character.compose({"ethnicity": "european", "art_style": "watercolor"}, {})
+    if "European features" not in styled["prompt"] or "watercolor painting" not in styled["prompt"]:
+        fail(f"人种/画面风格没拼进去：{styled['prompt']}")
+    if not styled["prompt"].startswith("watercolor painting"):
+        fail(f"画面风格应在提示词最前：{styled['prompt']}")
+    refed = character.compose({"reference": "fantasy knight heroine"}, {})
+    if 'inspired by "fantasy knight heroine"' not in refed["prompt"] or "original character" not in refed["prompt"]:
+        fail(f"自定义参考没包灵感/原创：{refed['prompt']}")
+    none_ref = character.compose({"reference": "none"}, {})
+    if "inspired by" in none_ref["prompt"] or none_ref["fields"]["reference"]["label"] != "无":
+        fail(f"reference=none 应跳过提示词：{none_ref['prompt']}")
     config = {"default_hair_color": "silver", "presets_json": json.dumps({"hair_color": [
         {"key": "silver", "label": "银发", "prompt": "glossy platinum silver hair"},
         {"key": "mint", "label": "薄荷绿", "prompt": "mint green hair"}]}, ensure_ascii=False)}
@@ -5166,6 +5181,7 @@ def _character_units() -> None:
         ({"age": "teen", "pose": "lying"}, "minor_unsafe"),
         ({"age": "12岁", "pose": "躺在床上"}, "minor_unsafe"),
         ({"outfit": "nude"}, "unsafe_content"),
+        ({"reference": "sexy nude warrior"}, "unsafe_content"),
     ):
         try:
             character.compose(fields, {})
@@ -5199,7 +5215,7 @@ def _character_cases(base: str, provider, box: ComfyState, directory: str) -> No
     box.set_mode("ok")
     status, body = request("GET", base + "/api/character")
     catalog = json.loads(body)
-    if status != 200 or catalog["defaults"]["gender"] != "female" or len(catalog["fields"]) != 9:
+    if status != 200 or catalog["defaults"]["gender"] != "female" or catalog["defaults"].get("ethnicity") != "east_asian" or catalog["defaults"].get("art_style") != "anime" or catalog["defaults"].get("reference") != "none" or len(catalog["fields"]) != 12:
         fail(f"/api/character 不对：{status}")
     status, body = request("POST", base + "/api/character/preview", {"fields": {"hair_color": "红发"}})
     if status != 200 or "red hair" not in json.loads(body)["prompt"]:

@@ -14,6 +14,16 @@
       {"key": "teen", "label": "青少年（未成年）", "prompt": "teenager, about 15 years old", "minor": true},
       {"key": "child", "label": "儿童（未成年）", "prompt": "young child, about 8 years old", "minor": true}
     ]},
+    "ethnicity": {"label": "人种", "options": [
+      {"key": "east_asian", "label": "东亚", "prompt": "East Asian features"},
+      {"key": "southeast_asian", "label": "东南亚", "prompt": "Southeast Asian features"},
+      {"key": "south_asian", "label": "南亚", "prompt": "South Asian features"},
+      {"key": "european", "label": "欧洲裔", "prompt": "European features"},
+      {"key": "african", "label": "非洲裔", "prompt": "African features"},
+      {"key": "middle_eastern", "label": "中东", "prompt": "Middle Eastern features"},
+      {"key": "latino", "label": "拉丁裔", "prompt": "Latino features"},
+      {"key": "mixed", "label": "混血", "prompt": "mixed heritage features"}
+    ]},
     "build": {"label": "体型", "options": [
       {"key": "slim", "label": "纤细", "prompt": "slim build"},
       {"key": "average", "label": "匀称", "prompt": "average build"},
@@ -96,6 +106,22 @@
       {"key": "cherry_blossom", "label": "樱花", "prompt": "cherry blossom trees background"},
       {"key": "space", "label": "太空", "prompt": "outer space with stars"},
       {"key": "cafe", "label": "咖啡馆", "prompt": "cozy cafe interior"}
+    ]},
+    "art_style": {"label": "画面风格", "options": [
+      {"key": "anime", "label": "二次元动漫", "prompt": "anime style illustration"},
+      {"key": "realistic", "label": "写实", "prompt": "photorealistic"},
+      {"key": "semi_realistic", "label": "半写实", "prompt": "semi-realistic illustration"},
+      {"key": "watercolor", "label": "水彩", "prompt": "watercolor painting"},
+      {"key": "oil_painting", "label": "油画", "prompt": "oil painting"},
+      {"key": "ink_wash", "label": "水墨", "prompt": "Chinese ink wash painting"},
+      {"key": "chibi", "label": "Q版", "prompt": "chibi, cute proportion"},
+      {"key": "pixel", "label": "像素", "prompt": "pixel art"},
+      {"key": "comic", "label": "漫画", "prompt": "comic book style"},
+      {"key": "3d_render", "label": "3D渲染", "prompt": "3D render"},
+      {"key": "sketch", "label": "素描", "prompt": "pencil sketch"}
+    ]},
+    "reference": {"label": "参考已有角色", "options": [
+      {"key": "none", "label": "无", "prompt": ""}
     ]}
   }
 }

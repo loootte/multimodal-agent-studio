@@ -72,7 +72,7 @@ SYSTEM = (
     "写好后调用 stage_prompt（source=model）；拿到句柄后再 generate_image。用户没这么说时仍走本地提示词（accept_local_content）。"
     "出图后端：用户要第三方、云端或在线模型出图时 generate_image 的 backend 填 remote；否则不填，用本机 ComfyUI。"
     "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
-    "用户要画一个角色/人物（说到性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）时，调用 character_image，"
+    "用户要画一个角色/人物（说到性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考角色）时，调用 character_image，"
     "只填用户说到的字段，其余用默认值；拿到句柄后再 generate_image（多张先 plan_images）。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"

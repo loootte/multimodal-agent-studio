@@ -1,7 +1,8 @@
-"""角色图片定制（#53）：九个字段 → 英文提示词。
+"""角色图片定制（#53）：十二个字段 → 英文提示词。
 
 预设在 toolpacks/builtin/character_image/presets.json；工具配置（#28）里可以改默认值、用 JSON 追加/覆盖预设。
-每个字段可以填预设键、中文标签或一小段自由文字；没填用默认值。这里只拼文字和做安全检查，出图仍走 generate_image。
+每个字段可以填预设键、中文标签或一小段自由文字；没填用默认值。reference 默认可空（无）。
+这里只拼文字和做安全检查，出图仍走 generate_image。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import re
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PACK = os.path.join(ROOT, "toolpacks", "builtin", "character_image")
 TOOL = "character_image"
-FIELDS = ("gender", "age", "build", "hairstyle", "hair_color", "eye_color", "outfit", "pose", "background")
+FIELDS = ("gender", "age", "ethnicity", "build", "hairstyle", "hair_color", "eye_color", "outfit", "pose", "background", "art_style", "reference")
 MAX_FIELD = 200
 QUALITY = "character illustration, full body, highly detailed, best quality"
 SAFE_TAIL = "tasteful, fully clothed, safe for work"
@@ -74,8 +75,12 @@ def _overrides(raw) -> dict:
         if not isinstance(options, list):
             raise CharacterError("invalid_presets", f"presets_json.{name} 要是列表。")
         for item in options:
-            if not (isinstance(item, dict) and all(isinstance(item.get(k), str) and item.get(k).strip() for k in ("key", "label", "prompt"))):
-                raise CharacterError("invalid_presets", f"presets_json.{name} 的每一项要有 key、label、prompt 三个非空文字。")
+            if not (isinstance(item, dict) and isinstance(item.get("key"), str) and item.get("key").strip()
+                    and isinstance(item.get("label"), str) and item.get("label").strip()
+                    and isinstance(item.get("prompt"), str)):
+                raise CharacterError("invalid_presets", f"presets_json.{name} 的每一项要有 key、label、prompt（key/label 非空；prompt 可为空白，表示跳过）。")
+            if not item["prompt"].strip() and item["key"].strip().lower() not in ("none", ""):
+                raise CharacterError("invalid_presets", f"presets_json.{name} 的 prompt 为空时 key 只能是 none。")
             if _explicit(item["prompt"]) or _explicit(item["label"]):
                 raise CharacterError("unsafe_content", f"presets_json.{name}.{item['key']} 含露骨内容。")
     return data
@@ -87,7 +92,7 @@ def presets(config: dict | None = None) -> dict:
     for name, options in _overrides((config or {}).get("presets_json")).items():
         current = fields[name]["options"]
         for item in options:
-            clean = {"key": item["key"].strip(), "label": item["label"].strip(), "prompt": item["prompt"].strip()[:MAX_FIELD]}
+            clean = {"key": item["key"].strip(), "label": item["label"].strip(), "prompt": item["prompt"].strip()[:MAX_FIELD] if item["prompt"].strip() else ""}
             for flag in ("minor", "suggestive"):
                 if item.get(flag) is True:
                     clean[flag] = True
@@ -112,8 +117,20 @@ def defaults(config: dict | None = None) -> dict:
     return out
 
 
-_BUILTIN_DEFAULTS = {"gender": "female", "age": "young_adult", "build": "slim", "hairstyle": "long_straight",
-                     "hair_color": "black", "eye_color": "brown", "outfit": "casual", "pose": "standing", "background": "plain"}
+_BUILTIN_DEFAULTS = {
+    "gender": "female",
+    "age": "young_adult",
+    "ethnicity": "east_asian",
+    "build": "slim",
+    "hairstyle": "long_straight",
+    "hair_color": "black",
+    "eye_color": "brown",
+    "outfit": "casual",
+    "pose": "standing",
+    "background": "plain",
+    "art_style": "anime",
+    "reference": "none",
+}
 
 
 def _first_default(fields, name):
@@ -204,9 +221,35 @@ def compose(values: dict | None, config: dict | None = None) -> dict:
     if _explicit(quality):
         raise CharacterError("unsafe_content", "quality_tags 里有露骨内容。")
     gender = chosen["gender"]["minor_prompt" if minor else "prompt"]
-    parts = [quality, gender, chosen["age"]["prompt"], chosen["build"]["prompt"], chosen["hairstyle"]["prompt"], chosen["hair_color"]["prompt"],
-             chosen["eye_color"]["prompt"], "wearing " + chosen["outfit"]["prompt"], chosen["pose"]["prompt"],
-             chosen["background"]["prompt"], MINOR_TAIL if minor else SAFE_TAIL]
+    # 顺序：画面风格 → 画质 → 性别 → 年龄 → 人种 → 体型 → 发型 → 发色 → 瞳色 → 服装 → 姿势 → 背景 → 参考 → 安全尾注。
+    # reference 为空/none 时完全不进提示词；自定义参考包一层“灵感/原创”以免暗示抄袭。
+    ref = chosen["reference"]
+    if ref["prompt"].strip():
+        if ref["custom"]:
+            ref_part = (
+                f'inspired by "{ref["prompt"]}", original character, '
+                "not a copy of any copyrighted character"
+            )
+        else:
+            ref_part = ref["prompt"]
+    else:
+        ref_part = ""
+    parts = [
+        chosen["art_style"]["prompt"],
+        quality,
+        gender,
+        chosen["age"]["prompt"],
+        chosen["ethnicity"]["prompt"],
+        chosen["build"]["prompt"],
+        chosen["hairstyle"]["prompt"],
+        chosen["hair_color"]["prompt"],
+        chosen["eye_color"]["prompt"],
+        "wearing " + chosen["outfit"]["prompt"],
+        chosen["pose"]["prompt"],
+        chosen["background"]["prompt"],
+        ref_part,
+        MINOR_TAIL if minor else SAFE_TAIL,
+    ]
     prompt = ", ".join(part for part in parts if part)
     return {
         "prompt": prompt,
