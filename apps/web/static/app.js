@@ -495,6 +495,9 @@ const EGRESS_REASONS = {
   timeout: "等待超时。",
   cancelled: "已停止。",
   rejected: "对方拒绝了这次请求。",
+  handle_not_found: "句柄不存在或不属于本会话，已拦下；没有读取任何本地内容。",
+  handle_expired: "本地内容句柄已过期或已撤销，已拦下；本地内容没有离开本机。",
+  handle_forbidden: "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
 };
 
 function rememberEgress(assistant, event) {

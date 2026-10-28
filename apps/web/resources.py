@@ -131,6 +131,7 @@ def inventory(app, kind: str | None = None, session: str | None = None, q: str |
                 "session_id": sid, "media_type": public["media_type"], "size": size,
                 "purpose": public["purpose"], "label": item.get("label") or "", "name": "",
                 "created_at": item.get("created_at") or s.get("created_at"),
+                "state": public["state"], "expires_at": public["expires_at"],
                 "sessions": ref_list(sid, shared), "mentions": _mentions(s, item["handle"]),
                 "shared": len(shared) > 1, "running": bool(running.get(sid)),
             })
@@ -334,6 +335,17 @@ def _forget_artifact(app, sid: str, artifact_id: str) -> str:
                 pass
     app.sessions.drop_artifact_events(sid, artifact_id)
     return "forgotten"
+
+
+def revoke(app, rid: str) -> dict:
+    """撤销本地提示词/文字/文件的句柄（12.B #58）：正文留在本机，这个句柄串以后不能再消费。
+    要再用就「复用」，会换一枚新句柄。"""
+    kind, sid, handle = parse_id(rid)
+    if kind not in ("prompt", "text", "file"):
+        raise ResourceError(400, "not_revocable", "只有本地提示词、文字和文件有句柄可以撤销。")
+    if app.sessions.revoke_content(sid, handle) != "revoked":
+        raise ResourceError(404, "not_found", "找不到这个资源。")
+    return {"id": rid, "state": "revoked"}
 
 
 def reuse(app, rid: str, target_session: str) -> dict:

@@ -125,6 +125,30 @@
       "marker": "LOCAL-EGRESS-4e7a"
     },
     {
+      "id": "security.handle_expired",
+      "category": "security",
+      "kind": "handle_scope",
+      "fake_only": true,
+      "case": "expired",
+      "marker": "LOCAL-HANDLE-5b1e"
+    },
+    {
+      "id": "security.handle_forbidden_purpose",
+      "category": "security",
+      "kind": "handle_scope",
+      "fake_only": true,
+      "case": "forbidden_purpose",
+      "marker": "LOCAL-HANDLE-7c3f"
+    },
+    {
+      "id": "security.handle_cross_session",
+      "category": "security",
+      "kind": "handle_scope",
+      "fake_only": true,
+      "case": "cross_session",
+      "marker": "LOCAL-HANDLE-2d9a"
+    },
+    {
       "id": "multi_agent.delegate_plan",
       "category": "multi_agent",
       "kind": "multi_agent_web",
