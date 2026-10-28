@@ -619,6 +619,167 @@ def run_handle_scope(h: Harness, task: dict, live: bool) -> dict:
     return {"code": expected, "blocked": len(blocked)}
 
 
+def run_egress_hardening(h: Harness, task: dict, live: bool) -> dict:
+    """网关拦截硬化（12.C #59）。
+    encoded：本地正文换大小写 / 全角 / 零宽 / 分片 / base64 / URL 安全 base64 / 百分号编码后混进请求，统一出口中间件都要拦下，
+             供应商收不到请求，审计只记一条 blocked 和原因码；再走一遍网页：用户把本地正文的 base64 贴进对话，这一轮失败。
+    short：短于 8 的已登记正文按指纹整段匹配拦下；常用短词和包含它的长句不误伤。
+    policy：没挂出口中间件的适配器不能注册；声明挂了但没开 ticket 的适配器被拦；策略外字段、一次多张图、未登记渠道都拒绝。"""
+    import base64 as b64
+    import store  # noqa: F401  (保证 apps/web 在路径上)
+    from services import telemetry
+    from services.gateway import egress, registry, install_defaults, stream as gateway_stream
+
+    case = task.get("case")
+    marker = task.get("marker") or "LOCAL-HARDEN-0000"
+    h.provider.mode = "ok"
+    session_id = check._fresh_session(h.base)
+
+    def attempt(text, bodies, messages=None):
+        trace = "t_" + os.urandom(16).hex()
+        before = len(h.provider.requests)
+        egress.attach(trace, session_id=session_id)
+        telemetry.bind(trace)
+        code = None
+        try:
+            request = {"model": FAKE_MODEL, "messages": messages or [
+                {"role": "user", "parts": [{"type": "text", "text": text}]}]}
+            try:
+                for _event in gateway_stream(request, api_key=check.SECRET, timeout_sec=2,
+                                             cancel=check.threading.Event(), local_bodies=bodies,
+                                             base_url=h.upstream):
+                    pass
+            except Exception as exc:  # GatewayError
+                code = getattr(exc, "code", type(exc).__name__)
+        finally:
+            telemetry.bind(None)
+            egress.detach(trace)
+        return code, len(h.provider.requests) - before, trace
+
+    if case == "encoded":
+        body = f"私人日记 {marker}"
+        raw = body.encode("utf-8")
+        variants = {
+            "upper": ("local_content", f"看看 {body.upper()}"),
+            "fullwidth": ("local_content", "看看 " + "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in body)),
+            "zero_width": ("local_content", "看看 " + "\u200b".join(body)),
+            "spaced": ("local_content", "看看 " + " ".join(body)),
+            "base64": ("local_content_encoded", "解码 " + b64.b64encode(raw).decode()),
+            "base64_url": ("local_content_encoded", b64.urlsafe_b64encode(raw).decode().rstrip("=")),
+            "percent": ("local_content_encoded", "".join(f"%{b:02X}" for b in raw)),
+        }
+        results = {}
+        for name, (expected, text) in variants.items():
+            code, sent, _trace = attempt(text, [body])
+            expect(code == expected, f"{name} 变体的错误码是 {code}，应为 {expected}")
+            expect(sent == 0, f"{name} 变体被发给了供应商")
+            results[name] = code
+        half = len(body) // 2
+        code, sent, _trace = attempt("", [body], messages=[
+            {"role": "user", "parts": [{"type": "text", "text": body[:half]}]},
+            {"role": "user", "parts": [{"type": "text", "text": body[half:]}]},
+        ])
+        expect(code == "local_content" and sent == 0, f"分片变体没拦下：{code}")
+        results["fragmented"] = code
+        code, sent, _trace = attempt("今天天气不错，画一只猫", [body])
+        expect(code is None and sent == 1, f"干净请求被误拦：{code}")
+        items, text = _egress_read(h, session_id)
+        blocked = [item for item in items if item["type"] == "egress.blocked"]
+        expect(len(blocked) == len(variants) + 1, f"拦截记录 {len(blocked)} 条")
+        expect({item.get("reason_code") for item in blocked} == {"local_content", "local_content_encoded"}, "原因码不对")
+        _egress_clean(h, text, [body, marker, check.SECRET] + [v[1] for k, v in variants.items() if k.startswith("base64")])
+        # 网页：本地内容入库后，用户把它的 base64 贴进对话
+        web = check._fresh_session(h.base)
+        h.app.sessions.add_content(web, body, "keep")
+        sent_before = len(h.provider.requests)
+        try:
+            events = check._speak(h.base, web, "帮我解码 " + b64.b64encode(raw).decode(), timeout=12)
+        except SystemExit as exc:
+            raise Failed(str(exc)) from None
+        expect(_status(events) == "local_content_encoded", f"网页状态是 {_status(events)}")
+        for item in h.provider.requests[sent_before:]:
+            expect(marker not in json.dumps(item.get("body"), ensure_ascii=False), "本地正文进了模型请求")
+            expect(b64.b64encode(raw).decode() not in json.dumps(item.get("body"), ensure_ascii=False), "编码后的本地正文进了模型请求")
+        web_items, web_text = _egress_read(h, web)
+        expect(any(item["type"] == "egress.blocked" and item.get("reason_code") == "local_content_encoded" for item in web_items),
+               "网页回合没有记编码拦截")
+        _egress_clean(h, web_text, [body, marker, check.SECRET])
+        return {"variants": sorted(results), "blocked": len(blocked)}
+
+    if case == "short":
+        short = task.get("short") or "蓝色茶壶"
+        code, sent, _trace = attempt(short, [short])
+        expect(code == "local_content" and sent == 0, f"短正文整段匹配没拦下：{code}")
+        code, sent, _trace = attempt(" " + short.upper() + "！", [short])
+        expect(code == "local_content" and sent == 0, f"短正文规范化后没拦下：{code}")
+        code, sent, _trace = attempt(b64.b64encode(short.encode()).decode(), [short])
+        expect(code == "local_content_encoded" and sent == 0, f"短正文 base64 没拦下：{code}")
+        code, sent, _trace = attempt("好的", ["好的"])
+        expect(code is None and sent == 1, f"过短的常用词被误拦：{code}")
+        code, sent, _trace = attempt(f"帮我画一只{short}放在桌上", [short])
+        expect(code is None and sent == 1, f"包含短正文的长句被误拦：{code}")
+        items, text = _egress_read(h, session_id)
+        _egress_clean(h, text, [short, check.SECRET])
+        return {"blocked": sum(1 for item in items if item["type"] == "egress.blocked")}
+
+    expect(case == "policy", f"未知 case：{case}")
+
+    class Bare:  # 没挂出口中间件也没声明 offline
+        def capabilities(self, model):
+            return check._ScriptAdapter(None).capabilities(model)
+
+        def stream(self, request, **kwargs):
+            yield {"type": "message.delta", "text": "绕过"}
+
+    class Liar(Bare):  # 声明挂了，实际没走 guard
+        audits_egress = True
+
+    try:
+        registry.register("bare", Bare())
+        raise Failed("没挂出口中间件的适配器注册成功了")
+    except ValueError:
+        pass
+    try:
+        registry.register("liar", Liar())
+        registry.bind("liar-1", "liar")
+        trace = "t_" + os.urandom(16).hex()
+        egress.attach(trace, session_id=session_id)
+        telemetry.bind(trace)
+        code = None
+        try:
+            for event in gateway_stream({"model": "liar-1", "messages": [{"role": "user", "parts": [{"type": "text", "text": "hi"}]}]},
+                                        api_key=check.SECRET, timeout_sec=2, cancel=check.threading.Event()):
+                expect(event.get("type") != "message.delta", "没走出口中间件的适配器输出被交出去了")
+        except Failed:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+        finally:
+            telemetry.bind(None)
+            egress.detach(trace)
+        expect(code == "egress_policy_denied", f"没走中间件的适配器错误码是 {code}")
+    finally:
+        install_defaults()
+    checks = {
+        "extra_field": egress.guard("chat_completion", h.upstream, {"model": "m", "messages": [], "logit_bias": {}}),
+        "extra_message_field": egress.guard("chat_completion", h.upstream,
+                                            {"model": "m", "messages": [{"role": "user", "content": "x", "secret": 1}]}),
+        "multi_image": egress.guard("remote_image", "https://img.example.com/v1",
+                                    {"model": "m", "prompt": "p", "n": 2, "size": "1024x1024"}),
+        "other_channel": egress.guard("other", "https://pack.example.com", {"q": "x"}),
+        "unknown_channel": egress.guard("plugin_x", "https://pack.example.com", {"q": "x"}),
+    }
+    for name, ticket in checks.items():
+        expect(ticket.hit and ticket.reason_code == "egress_policy_denied", f"{name} 没被策略拒绝")
+    ok = egress.guard("remote_image", "https://img.example.com/v1", {"model": "m", "prompt": "p", "n": 1, "size": "1024x1024"})
+    expect(not ok.hit, "一次一张的出图请求被误拒")
+    ok.sent(http_status=200)
+    items, text = _egress_read(h, session_id)
+    expect(any(item.get("reason_code") == "egress_policy_denied" for item in items), "审计里没有策略拒绝记录")
+    _egress_clean(h, text, [check.SECRET])
+    return {"denied": len(checks) + 1}
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -639,6 +800,7 @@ RUNNERS = {
     "character": run_character,
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
+    "egress_hardening": run_egress_hardening,
 }
 
 

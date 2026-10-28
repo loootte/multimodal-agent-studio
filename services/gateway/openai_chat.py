@@ -12,6 +12,7 @@ local_bodies 里长度不少于 8 的正文一旦出现在请求里，连接还�
 工具契约本身不参与这道检查，避免说明文字被当成正文。
 每次出站都经过 services.gateway.egress 的同一个钩子：先记 egress.planned（或 egress.blocked），
 拿到响应状态后记 egress.sent，连不上或对方报错记 egress.failed（ADR 0009，#57）。
+钩子同时做结构化出站策略和规范化 / 编码窗检查，原因码 egress_policy_denied / local_content / local_content_encoded（#59）。
 图像部件按工件标识解析，写成 data URL。音频和视频由能力声明拒绝。
 能力按模型名区分：已知纯文本模型不声明图像输入，避免把图发给看不见图的接口。
 """
@@ -98,7 +99,8 @@ class OpenAIAdapter:
         upstream = base_url or DEFAULT_BASE_URL
         ticket = egress.guard("chat_completion", upstream, payload, local_bodies=local_bodies or [], body=body)
         if ticket.hit:
-            raise GatewayError("local_content", HUMAN["local_content"])
+            code = ticket.reason_code or "local_content"
+            raise GatewayError(code, HUMAN.get(code) or HUMAN["local_content"])
         deadline = time.monotonic() + timeout_sec
         try:
             conn = _open(upstream, min(10.0, timeout_sec))

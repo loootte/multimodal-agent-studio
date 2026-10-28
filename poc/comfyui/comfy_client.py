@@ -33,13 +33,19 @@ def _egress_ticket(base: str, payload: dict | None, body: bytes | None = None):
     if _egress is None:
         return None
     try:
-        if payload is None:  # 上传参考图：只有字节，按图片度量，算本地派生内容
-            stats = _egress.measure(None, body=body)
-            stats["modality"] = ["image"]
-            return _egress.Ticket("comfyui_local", base, stats=stats, local_derived=True).planned()
+        if payload is None:  # 上传参考图：只有字节，按图片度量，算本地派生内容（策略 raw_upload，#59）
+            return _egress.guard("comfyui_local", base, None, body=body, exempt=(), raw_upload=True,
+                                 local_derived=True, modality=("image",))
         return _egress.guard("comfyui_local", base, payload, exempt=())
     except Exception:
         return None
+
+
+def _egress_refused(ticket) -> None:
+    """出站策略拦下（#59）：已记 egress.blocked，不打开连接。"""
+    if ticket is not None and getattr(ticket, "hit", False):
+        code = getattr(ticket, "reason_code", None) or "egress_policy_denied"
+        raise ComfyFailure(f"出站策略拦下了这次 ComfyUI 请求（{code}），没有打开连接。", {"error": {"type": code}})
 
 
 def _egress_done(ticket, ok: bool, reason: str = "") -> None:
@@ -330,6 +336,7 @@ class ComfyClient:
         self._ensure_listener()
         outgoing = {"prompt": prompt, "client_id": self.client_id}
         ticket = _egress_ticket(self.base, outgoing)
+        _egress_refused(ticket)
         try:
             result = self._request_json(self.base + "/prompt", outgoing)
         except ComfyFailure as exc:
@@ -517,6 +524,7 @@ class ComfyClient:
             method="POST",
         )
         ticket = _egress_ticket(self.base, None, body)
+        _egress_refused(ticket)
         try:
             with self._urlopen(req, timeout=120) as response:
                 _egress_done(ticket, True)

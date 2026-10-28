@@ -1021,10 +1021,160 @@ def _gateway_cases() -> None:
         _gateway_ignored_params(provider, upstream)
         _gateway_legacy_stream_chat(provider, upstream)
         _gateway_egress(provider, upstream)
+        _gateway_hardening(provider, upstream)
     finally:
         install_defaults()
         provider.shutdown()
         provider.server_close()
+
+
+def _gateway_hardening(provider, upstream: str) -> None:
+    """#59（12.C）：结构化出站策略、规范化/编码检测、短正文指纹、统一中间件强制。"""
+    import base64
+    import json as _json
+    from packages.contracts import events as contract
+    from services import telemetry
+    from services.gateway import egress, registry, install_defaults
+    from services.gateway import stream as gateway_stream
+
+    for code in ("local_content", "local_content_encoded", "egress_policy_denied"):
+        if code not in contract.ERROR_CODES or code not in contract.EGRESS_REASONS or code not in contract.HUMAN:
+            fail(f"错误码 {code} 没有登记全")
+        if contract.RETRYABLE.get(code) is not False:
+            fail(f"{code} 不应可重试")
+    for code in ("local_content_encoded", "egress_policy_denied"):
+        if telemetry.FAILURE_CLASSES.get(code) != "policy":
+            fail(f"{code} 的失败分类不对")
+    for key in ("policy", "exempt_bytes"):
+        if key not in contract.EGRESS_FIELDS:
+            fail(f"出站记录缺字段 {key}")
+    if set(contract.EGRESS_POLICIES) != set(contract.EGRESS_CHANNELS):
+        fail("每个出站渠道都要有一条策略")
+    if contract.EGRESS_POLICIES["other"] is not None:
+        fail("其他出口默认应拒绝")
+    if contract.EGRESS_POLICIES["remote_image"].get("max_images") != 1:
+        fail("第三方出图一次只能一张")
+    with open(os.path.join(ROOT, "apps", "web", "static", "app.js"), encoding="utf-8") as handle:
+        js = handle.read()
+    for word in ("local_content_encoded", "egress_policy_denied", "其他出口"):
+        if word not in js:
+            fail(f"前端没有 {word} 的说明")
+
+    body = "私人日记 LOCAL-HARDEN-UNIT-77c2"
+    raw = body.encode("utf-8")
+    cases = {
+        body.upper(): "local_content",
+        "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in body): "local_content",
+        "\u200b".join(body): "local_content",
+        base64.b64encode(raw).decode(): "local_content_encoded",
+        base64.urlsafe_b64encode(raw).decode().rstrip("="): "local_content_encoded",
+        "".join(f"%{b:02x}" for b in raw): "local_content_encoded",
+        base64.b64encode(base64.b64encode(raw)).decode(): "local_content_encoded",
+        "画一只橘猫": None,
+    }
+    for text, expected in cases.items():
+        got = egress.inspect({"messages": [{"role": "user", "content": text}]}, [body])
+        if got != expected:
+            fail(f"规范化/编码检测不对：期望 {expected}，得到 {got}")
+    split = {"messages": [{"role": "user", "content": body[:6]}, {"role": "user", "content": body[6:]}]}
+    if egress.inspect(split, [body]) != "local_content":
+        fail("分片拼接没被拦下")
+    tool_args = {"messages": [{"role": "assistant", "tool_calls": [{"function": {"arguments": _json.dumps({"q": body})}}]}]}
+    if egress.inspect(tool_args, [body]) != "local_content":
+        fail("工具参数里的本地正文没被拦下")
+    tools = {"tools": [{"type": "function", "function": {"description": body}}], "messages": []}
+    if egress.inspect(tools, [body], exempt=("tools",)) is not None:
+        fail("工具 schema 应豁免")
+    if egress.measure(tools, exempt=("tools",)).get("exempt_bytes", 0) <= 0:
+        fail("豁免字节数没有记下")
+    short = "蓝色茶壶"
+    if egress.inspect({"messages": [{"role": "user", "content": short}]}, [short]) != "local_content":
+        fail("短正文整段匹配没拦下")
+    if egress.inspect({"messages": [{"role": "user", "content": "帮我画" + short}]}, [short]) is not None:
+        fail("包含短正文的长句被误拦")
+    if egress.inspect({"messages": [{"role": "user", "content": "好的"}]}, ["好的"]) is not None:
+        fail("过短的常用词被误拦")
+    fingerprint = egress.short_fingerprint(short)
+    if short in fingerprint or egress.inspect({"messages": [{"role": "user", "content": short}]}, [],
+                                                fingerprints=[fingerprint]) != "local_content":
+        fail("短正文指纹不能还原正文且应能命中")
+
+    saved = egress.path()
+    directory = tempfile.mkdtemp(prefix="egress-harden-")
+    try:
+        log = os.path.join(directory, "egress.jsonl")
+        egress.configure(log)
+        denied = {
+            "extra_field": egress.guard("chat_completion", upstream, {"model": "m", "messages": [], "logit_bias": {}}),
+            "multi_image": egress.guard("remote_image", "https://img.example.com/v1", {"model": "m", "prompt": "p", "n": 2}),
+            "other": egress.guard("other", "https://pack.example.com", {"q": 1}),
+            "unknown": egress.guard("plugin_x", "https://pack.example.com", {"q": 1}),
+        }
+        for name, ticket in denied.items():
+            if not ticket.hit or ticket.reason_code != "egress_policy_denied":
+                fail(f"出站策略没拒绝 {name}")
+        upload = egress.guard("comfyui_local", "http://127.0.0.1:8188/upload/image", None, raw_upload=True,
+                              local_derived=True, modality=("image",))
+        if upload.hit:
+            fail("ComfyUI 原图上传被策略误拒")
+        upload.sent(http_status=200)
+
+        class Bare:
+            def capabilities(self, model):
+                return _ScriptAdapter(None).capabilities(model)
+
+            def stream(self, request, **kwargs):
+                yield {"type": "message.delta", "text": "绕过"}
+
+        class Liar(Bare):
+            audits_egress = True
+
+        try:
+            registry.register("bare-unit", Bare())
+            fail("没挂出口中间件的适配器注册成功了")
+        except ValueError:
+            pass
+        before = len(provider.requests)
+        try:
+            registry.register("liar-unit", Liar())
+            registry.bind("liar-unit-1", "liar-unit")
+            try:
+                for event in gateway_stream({"model": "liar-unit-1", "messages": [
+                        {"role": "user", "parts": [{"type": "text", "text": "hi"}]}]},
+                        api_key=SECRET, timeout_sec=2, cancel=threading.Event()):
+                    if event.get("type") == "message.delta":
+                        fail("没走出口中间件的适配器输出被交出去了")
+                fail("没走出口中间件的适配器没被拦下")
+            except openai_chat.GatewayError as exc:
+                if exc.code != "egress_policy_denied":
+                    fail(f"没走中间件的错误码不对：{exc.code}")
+        finally:
+            install_defaults()
+        try:
+            for _event in gateway_stream({"model": "demo-model", "messages": [
+                    {"role": "user", "parts": [{"type": "text", "text": base64.b64encode(raw).decode()}]}]},
+                    api_key=SECRET, timeout_sec=2, cancel=threading.Event(), local_bodies=[body], base_url=upstream):
+                pass
+            fail("编码后的本地正文进了网关")
+        except openai_chat.GatewayError as exc:
+            if exc.code != "local_content_encoded":
+                fail(f"网关预检的错误码不对：{exc.code}")
+        if len(provider.requests) != before:
+            fail("网关拦截后仍然打开了连接")
+        for name, adapter in registry.adapters().items():
+            if getattr(adapter, "audits_egress", False) is not True and getattr(adapter, "offline", False) is not True:
+                fail(f"适配器 {name} 没挂出口中间件")
+        with open(log, encoding="utf-8") as handle:
+            text = handle.read()
+        for secret in (body, "LOCAL-HARDEN-UNIT", short, SECRET, base64.b64encode(raw).decode()):
+            if secret in text:
+                fail("出站审计里出现了本地正文或密钥")
+        for line in text.splitlines():
+            if set(_json.loads(line)) - set(contract.EGRESS_FIELDS):
+                fail("出站审计里出现了未登记字段")
+    finally:
+        egress.configure(saved)
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _gateway_egress(provider, upstream: str) -> None:
@@ -1363,6 +1513,7 @@ def _gateway_run(request: dict, upstream: str, artifacts=None) -> list[dict]:
 
 
 class _FakeAdapter:
+    offline = True  # 测试替身，不联网（12.C 注册要求）
     def __init__(self) -> None:
         self.seen: list[str] = []
 
@@ -1601,6 +1752,7 @@ def _install_script(registry, model: str, adapter) -> None:
 
 
 class _ScriptAdapter:
+    offline = True  # 测试替身，不联网（12.C 注册要求）
     def __init__(self, replies) -> None:
         self.replies = replies
         self.calls: list[dict] = []

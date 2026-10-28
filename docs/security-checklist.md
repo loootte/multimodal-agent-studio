@@ -18,6 +18,10 @@
 | 1.8 | 审计写不进去不打断主流程，但 stderr 告警并计入 `write_failures` | 自动：`apps/web/check.py`；人工：发布前看一眼 `/api/egress` 的 `write_failures` 为 0 |
 | 1.10 | 本地内容句柄是短时能力令牌：绑定会话、用途、过期（可选运行、一次性）；过期、撤销、越权 purpose、跨会话或伪造的句柄不能出图，返回固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，并记 `egress.blocked` 与 `security.handle_denied`（只有句柄前 6 位）（#58） | 自动：`security.handle_expired`、`security.handle_forbidden_purpose`、`security.handle_cross_session`；`apps/web/check.py` 的 `_handle_units`、`_handle_scope_case` |
 | 1.11 | 过期、撤销的正文仍参与网关出口检查；模型看到的句柄公开字段只有 `handle/type/kind/media_type/size/purpose/expires_at/state` | 自动：`apps/web/check.py` 的 `_handle_units`；人工：新增公开字段时复查 |
+| 1.12 | 每个出站渠道按 `EGRESS_POLICIES` 只放行登记字段；第三方出图一次只出一张；`other` 与未登记渠道默认拒绝，返回 `egress_policy_denied`；工具 schema 豁免内容检查但记 `exempt_bytes`（#59） | 自动：`security.egress_policy_denied`；`apps/web/check.py` 的 `_gateway_hardening` |
+| 1.13 | 本地正文换大小写、全角、零宽、插空格、拆到相邻消息后仍以 `local_content` 拦下；base64 / URL 安全 base64 / 百分号编码后以 `local_content_encoded` 拦下，都不开连接（#59） | 自动：`security.egress_encoded_variants`（含网页对话一轮）；`apps/web/check.py` 的 `_gateway_hardening` |
+| 1.14 | 短于 8 个字符的已登记正文按指纹整段匹配拦下；包含它的长句和不足 4 个字符的常用词不误伤；审计、日志不出现正文，界面只说明原因码（#59） | 自动：`security.egress_short_body`；人工：误拦时看界面说明不回显正文 |
+| 1.15 | 所有网关适配器挂统一出口中间件：没声明 `audits_egress` / `offline` 的不能注册，声明了却没开 ticket 的被 `egress_policy_denied` 中断；第三方出图、ComfyUI 提交与上传命中时不发出（#59） | 自动：`security.egress_policy_denied`；`apps/web/check.py` 的 `_gateway_hardening`；人工：新增适配器时复查 |
 | 1.9 | 确认卡的出站摘要由宿主生成（`by: "host"`），不取模型或工具返回的文字；多 Agent 冒泡确认同样带摘要 | 自动：`apps/web/check.py` 的确认用例；人工：看确认卡写的目的地主机与配置一致 |
 
 ## 2. 工具权限

@@ -207,7 +207,7 @@ Agent 运行时
 
 ### 出站审计（#57）
 
-`services/gateway/egress.py`：对话模型、第三方出图、ComfyUI 提交共用一个出口钩子，记 `egress.planned` / `blocked` / `sent` / `failed`（只有主机名、渠道、字节数、是否含本地派生、指纹前缀、运行标识和原因码，无正文和密钥）。写到 `<data_dir>/egress.jsonl`，同时存进助手消息的 `egress` 列表并经 SSE 推给页面「数据出站」时间线。确认卡附宿主生成的出站摘要。本机只读接口 `GET /api/egress`、`GET /api/egress/export`。审计写失败不打断主流程，告警并计数。说明见 [egress-audit.md](egress-audit.md)，决策见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md)。
+`services/gateway/egress.py`：对话模型、第三方出图、ComfyUI 提交共用一个出口钩子，记 `egress.planned` / `blocked` / `sent` / `failed`（只有主机名、渠道、字节数、是否含本地派生、指纹前缀、运行标识和原因码，无正文和密钥）。写到 `<data_dir>/egress.jsonl`，同时存进助手消息的 `egress` 列表并经 SSE 推给页面「数据出站」时间线。确认卡附宿主生成的出站摘要。本机只读接口 `GET /api/egress`、`GET /api/egress/export`。审计写失败不打断主流程，告警并计数。说明见 [egress-audit.md](egress-audit.md)，决策见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md)。12.C（#59）起每个渠道按 `EGRESS_POLICIES` 只放行登记字段，内容检查做规范化、分片拼接和 base64 / 百分号解码，适配器必须挂这个出口钩子才能注册，见 [egress-policy.md](egress-policy.md)。
 
 ### 轨迹（#39）
 
