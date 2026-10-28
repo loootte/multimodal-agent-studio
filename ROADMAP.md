@@ -212,7 +212,7 @@
 
 本阶段明确不做：多租户 IAM、远程授权、插件市场签名、把 ComfyUI 塞进通用容器沙箱、云端密钥托管。
 
-状态：进行中。12.A（#57）在 `issue-57` 分支实现：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)；待用户验收后合并。12.B 起未开始。
+状态：进行中。12.A（#57）已合并：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)。12.B（#58）在 `issue-58` 分支实现：句柄绑定会话 / 用途 / 可选运行 / 过期（默认 4 小时）、撤销与一次性、旧句柄读时升级；过期、越权 purpose、跨会话、伪造的句柄不能出图，固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，被拒记 `egress.blocked` 与 `security.handle_denied`；资源面板显示句柄状态并可撤销；`security.handle_*` 评测进门禁，说明见 [docs/handle-scope.md](docs/handle-scope.md)；待用户验收后合并。12.C 起未开始。
 
 ## 13. 角色图片定制工具
 

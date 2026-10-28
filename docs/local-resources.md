@@ -32,6 +32,7 @@
 | GET | `/api/resources/raw?id=[&download=1]` | 原始字节 |
 | POST | `/api/resources/label` | `{id, label}` |
 | POST | `/api/resources/delete` | `{ids, confirm}` |
-| POST | `/api/resources/reuse` | `{id, session_id}` → `{handle, snippet}` |
+| POST | `/api/resources/reuse` | `{id, session_id}` → `{handle, snippet}`（原句柄过期或撤销时换新句柄） |
+| POST | `/api/resources/revoke` | `{id}` → `{id, state: "revoked"}`：撤销本地提示词/文字/文件的句柄，正文留在本机（12.B #58） |
 
 资源 id 形如 `type:会话id:句柄`。代码在 `apps/web/resources.py`，测试在 `apps/web/check.py` 的 `_resources_case`。

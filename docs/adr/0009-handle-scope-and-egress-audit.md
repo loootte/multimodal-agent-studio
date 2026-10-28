@@ -2,7 +2,7 @@
 
 ## 状态
 
-部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已在 `issue-57` 分支实现（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B）仍为提议中。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
+部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）在 `issue-58` 分支实现，说明见 [handle-scope.md](../handle-scope.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
 
 本文件在接受前可随实现微调字段名；**不得**把本地正文、文件字节或密钥写入任何审计事件。
 
@@ -48,6 +48,16 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 原因码：`local_content`、`local_prompt_remote_refused`、`user_declined`、`http_error`、`connect_error`、`timeout`、`cancelled`、`rejected`；白话说明在 `EGRESS_REASONS`。
 - 存储：`<data_dir>/egress.jsonl`；本机只读接口 `GET /api/egress`、`GET /api/egress/export`（`mas.egress.export/1`）。审计写失败不打断主流程，stderr 告警并计数。
 
+### 12.B 实现定稿的句柄形状
+
+- 句柄串不变：`c_` + 32 位随机十六进制，不编码正文、会话或时间；作用域只在本机记录里（`handle_schema: mas.handle/1`）。
+- 绑定：`scope.session_id`、`scope.purpose`、可选 `scope.run_id`；`allowed_tools`；`issued_at` / `expires_at`；可选 `single_use` / `used_at`；撤销记 `revoked_at`。
+- `purpose` 集合定为 `image_prompt` / `keep`，不开放自定义。`generate_image` 不作为 purpose，而是 `allowed_tools` 里的消费工具：`image_prompt` 默认允许，`keep` 默认不允许（宿主可按用户意图用 `allow_tool` 放开，模型不行）。
+- 默认 TTL 4 小时（`MAS_HANDLE_TTL_SEC`，60 秒到 7 天）。会话结束**不**立即作废全部句柄，靠 TTL、资源面板撤销和删除。
+- 失败码 `handle_not_found` / `handle_expired` / `handle_forbidden`（`HANDLE_ERRORS`）。跨会话与伪造同为 `handle_not_found`；过期、撤销、一次性已用同为 `handle_expired`；运行或工具不符为 `handle_forbidden`。
+- 被拒时记 `egress.blocked`（`reason_code` 即失败码，`handle_id_prefix` 前 6 位）和遥测安全事件 `security.handle_denied`；不读正文、不开连接。
+- 同一正文再次收下：有效则复用句柄，失效则换新句柄（旧串不复活）。旧句柄读时升级（双读一期）。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
@@ -57,6 +67,6 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 
 ## 未决（接受前拍板）
 
-- `purpose` 枚举的最终集合与是否允许用户自定义 purpose。
-- 默认 TTL 与「会话结束是否立即作废全部句柄」。
+- ~~`purpose` 枚举的最终集合与是否允许用户自定义 purpose~~：12.B 定为 `image_prompt` / `keep`，不开放自定义；消费工具走 `allowed_tools`。
+- ~~默认 TTL 与「会话结束是否立即作废全部句柄」~~：12.B 定为默认 4 小时、可配置；会话结束不立即作废。
 - ~~`content_fingerprint` 算法与工具 schema 字节是否单独计数~~：12.A 定为 SHA-256 前 16 个十六进制字符，工具契约单独记 `tool_contract_bytes`。
