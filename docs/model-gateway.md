@@ -69,6 +69,7 @@
 - 把供应商的工具调用归一成名字加 JSON 对象。解析失败用 `invalid_tool_call`，不要把原始文本当成已执行的工具。issue #10 的页面只把 `generate_image` 交给已有工具；解析失败不会去提交 ComfyUI。
 - 本地数据隔离见 [ADR 0003](adr/0003-local-data-isolation.md)。外部工具契约来自 `toolpacks/` 清单（见 [tool-packs.md](tool-packs.md)），MCP 只是进程内投影，见 [ADR 0004](adr/0004-tool-governance.md)。issue #11 的本地正文不进供应商请求。出图时模型调用 `accept_local_content`，正文由页面对话框收进本机会话，再以句柄继续。适配器在打开连接前检查载荷，正文一旦出现就以 `local_content` 失败，请求不发出。发给模型的工具契约没有可填的正文参数。issue #12 把已入库的文件字节和它的 base64 也放进这道检查。文件仍不进供应商请求。
 - 出站审计（#57）：适配器在打开连接前调用 `services/gateway/egress.py` 的 `guard`，记 `egress.planned`（或查到本地正文时 `egress.blocked` 并以 `local_content` 失败），收到响应后 `sent`，出错 `failed`。适配器类上标 `audits_egress = True`，没挂钩子的适配器检查不过。记录只有元数据，见 [egress-audit.md](egress-audit.md)。
+- 出站策略（#59）：`registry.register` 只收 `audits_egress = True` 或 `offline = True`（不联网测试替身）的适配器；`stream` 先预检一次，适配器产出第一个事件前必须已开 ticket，否则 `egress_policy_denied`。请求字段按 `EGRESS_POLICIES` 白名单检查，编码后的本地正文以 `local_content_encoded` 失败，见 [egress-policy.md](egress-policy.md)。
 - 超时由网关执行，不依赖供应商客户端的默认值。
 
 ## 首批模态承诺

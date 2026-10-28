@@ -2,7 +2,7 @@
 
 ## 状态
 
-部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）在 `issue-58` 分支实现，说明见 [handle-scope.md](../handle-scope.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
+部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）已合并，说明见 [handle-scope.md](../handle-scope.md)；网关拦截硬化（12.C，[#59](https://github.com/loootte/multimodal-agent-studio/issues/59)）在 `issue-59` 分支实现，说明见 [egress-policy.md](../egress-policy.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
 
 本文件在接受前可随实现微调字段名；**不得**把本地正文、文件字节或密钥写入任何审计事件。
 
@@ -57,6 +57,14 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 失败码 `handle_not_found` / `handle_expired` / `handle_forbidden`（`HANDLE_ERRORS`）。跨会话与伪造同为 `handle_not_found`；过期、撤销、一次性已用同为 `handle_expired`；运行或工具不符为 `handle_forbidden`。
 - 被拒时记 `egress.blocked`（`reason_code` 即失败码，`handle_id_prefix` 前 6 位）和遥测安全事件 `security.handle_denied`；不读正文、不开连接。
 - 同一正文再次收下：有效则复用句柄，失效则换新句柄（旧串不复活）。旧句柄读时升级（双读一期）。
+
+### 12.C 实现定稿的拦截规则
+
+- 策略表 `EGRESS_POLICIES`（`mas.egress.policy/1`）：`chat_completion` / `remote_image` / `comfyui_local` / `other` 各一行，声明允许字段；`remote_image` 一次最多一张；`other` 默认拒绝，未登记渠道归入 `other`。审计记录新增 `policy`、`exempt_bytes` 两个字段。
+- 内容检查先 NFKC + casefold 并只留字母数字，再按顺序拼接文本叶子查分片，再对 base64 / URL 安全 base64 / 百分号编码窗口解码（最多两层）后比对。
+- 短正文：规范化后 4–7 个字符的已登记正文只按「整段等于」匹配，登记侧用 sha256 指纹，不做子串匹配；不足 4 个字符不匹配。UI 只显示原因码说明，不回显正文。
+- 错误码拆为 `local_content`（明文 / 规范化命中）、`local_content_encoded`（解码后命中）、`egress_policy_denied`（策略不符或适配器没走中间件）；都不可重试，遥测记 `security.egress_denied`。
+- 统一出口中间件：注册时要求 `audits_egress = True` 或 `offline = True`；网关预检一次，并在适配器产出第一个事件前核对已开 ticket。
 
 ## 后果
 

@@ -212,7 +212,7 @@
 
 本阶段明确不做：多租户 IAM、远程授权、插件市场签名、把 ComfyUI 塞进通用容器沙箱、云端密钥托管。
 
-状态：进行中。12.A（#57）已合并：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)。12.B（#58）在 `issue-58` 分支实现：句柄绑定会话 / 用途 / 可选运行 / 过期（默认 4 小时）、撤销与一次性、旧句柄读时升级；过期、越权 purpose、跨会话、伪造的句柄不能出图，固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，被拒记 `egress.blocked` 与 `security.handle_denied`；资源面板显示句柄状态并可撤销；`security.handle_*` 评测进门禁，说明见 [docs/handle-scope.md](docs/handle-scope.md)；待用户验收后合并。12.C 起未开始。
+状态：进行中。12.A（#57）已合并：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)。12.B（#58）已合并：句柄绑定会话 / 用途 / 可选运行 / 过期（默认 4 小时）、撤销与一次性、旧句柄读时升级；过期、越权 purpose、跨会话、伪造的句柄不能出图，固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，被拒记 `egress.blocked` 与 `security.handle_denied`；资源面板显示句柄状态并可撤销；`security.handle_*` 评测进门禁，说明见 [docs/handle-scope.md](docs/handle-scope.md)。12.C（#59）在 `issue-59` 分支实现：每个渠道一张字段白名单（`EGRESS_POLICIES`，`other` 默认拒绝、第三方出图一次一张），出站前做 NFKC 规范化、分片拼接、base64 / 百分号解码比对，短于 8 字的已登记正文按指纹整段匹配，错误码拆为 `local_content` / `local_content_encoded` / `egress_policy_denied`；适配器不挂统一出口中间件就不能注册、运行时没开 ticket 会被拦；`security.egress_encoded_variants` / `egress_short_body` / `egress_policy_denied` 进门禁，说明见 [docs/egress-policy.md](docs/egress-policy.md)；待用户验收后合并。12.D 起未开始。
 
 ## 13. 角色图片定制工具
 

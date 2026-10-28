@@ -79,5 +79,5 @@
 ## 已知限制
 
 - 指纹是请求体 sha256 前缀，不可逆，但对极短、可猜的提示词理论上可用字典比对确认；导出前请把它当作非公开数据。
-- 只覆盖经过本进程网关和出图客户端的请求；第三方工具包若自己开连接，要到 12.C / 12.D 才统一拦截。
+- 只覆盖经过本进程网关和出图客户端的请求；12.C（#59）起适配器必须挂统一出口中间件，出站策略、编码检测与新原因码 `local_content_encoded` / `egress_policy_denied` 见 [egress-policy.md](egress-policy.md)；第三方工具包自己开 socket 要到 12.D 才拦得住。
 - 句柄作用域、过期、撤销见 [handle-scope.md](handle-scope.md)（12.B，#58）：句柄被拒时记 `egress.blocked`，原因码 `handle_not_found` / `handle_expired` / `handle_forbidden`。
