@@ -61,6 +61,10 @@ BUILTIN_PYTHON = {
     "read_skill": frozenset(),
 }
 BUILTIN_MODULES = "poc/tools/internal/"
+# 12.E #61：只回句柄和元数据、不联网的内置读取工具。它们读本地内容但结果里没有正文，可以 confirm=never；
+# 其余凡是声明了 network 或 read_local_content 的工具（内置和第三方一样）都必须 confirm=always，校验时就拒绝。
+HANDLE_ONLY_READERS = frozenset({"list_local_content", "retrieve_local"})
+SENSITIVE_CONFIRM_PROBLEM = "联网或读本地内容的工具必须 confirm=always（不能 never / by_args）。"
 GRANT_SCHEMA = "mas.grant/2"
 # 每种权限给人看的说明（安装前的权限审阅界面显示这些）。
 PERMISSION_REVIEW = {
@@ -146,6 +150,8 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
         problems.append(f"confirm 只能是 {'、'.join(CONFIRM)}。")
     if confirm == "never" and data.get("mutating") is True and not builtin:
         problems.append("改外部状态的工具不能 confirm=never。")
+    if confirm in CONFIRM and confirm != "always" and _sensitive(data, builtin=builtin):
+        problems.append(SENSITIVE_CONFIRM_PROBLEM)
     if confirm == "by_args":
         args = data.get("confirm_args")
         if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
@@ -189,6 +195,22 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif perms.get("send_local_to_model"):
         problems.append("send_local_to_model 必须是 false：本地内容不能交给第三方模型。")
     return problems
+
+
+def _sensitive(data, *, builtin: bool = False) -> bool:
+    """12.E：会联网，或会读本地内容（读完结果回到模型就可能出站）的工具。只回句柄的内置读取工具除外。"""
+    perms = data.get("permissions") if isinstance(data, dict) else None
+    if not isinstance(perms, dict):
+        return False
+    if perms.get("network") is True:
+        return True
+    if perms.get("read_local_content") is True:
+        return not (builtin and data.get("name") in HANDLE_ONLY_READERS)
+    return False
+
+
+def sensitive(pack: "Pack") -> bool:
+    return _sensitive(pack.manifest, builtin=pack.builtin)
 
 
 def _field_problems(field, seen: set) -> list[str]:
@@ -420,7 +442,10 @@ def review(data: dict) -> dict:
         label, risk, effect = PERMISSION_REVIEW[key]
         items.append({"permission": key, "label": label, "risk": risk, "effect": effect})
     denied = [PERMISSION_REVIEW[k][0] for k in PERMISSIONS if k not in wanted and k != "send_local_to_model"]
-    return {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
+    out = {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
+    # 12.E：联网 / 读本地内容的包每次调用都弹确认，同一轮里也不复用上一次的同意。
+    out["confirm_every_call"] = _sensitive(data)
+    return out
 
 
 def gate(pack: Pack) -> dict | None:
@@ -433,6 +458,9 @@ def gate(pack: Pack) -> dict | None:
 
 
 def needs_confirm(pack: Pack, arguments=None) -> bool:
+    # 12.E：敏感工具不论清单写了什么都要确认（校验已经拒绝了别的写法，这里是第二道）。
+    if sensitive(pack):
+        return True
     policy = pack.manifest["confirm"]
     if policy == "always":
         return True
@@ -617,6 +645,7 @@ def summary(pack: Pack) -> dict:
         "name": pack.name, "version": m["version"], "description": m["description"],
         "builtin": pack.builtin, "exposed": m.get("parameters") is not None,
         "mutating": m["mutating"], "confirm": m["confirm"], "entry": m["entry"]["kind"],
+        "sensitive": sensitive(pack),
         "permissions": sorted(k for k, v in m["permissions"].items() if v),
         "denied": denied_permissions(pack), "missing": missing_dependencies(pack),
         "backends": list((m.get("requires") or {}).get("backends") or []),

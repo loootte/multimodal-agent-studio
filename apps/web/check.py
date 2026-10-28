@@ -364,7 +364,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._emit_tool("lookup_demo", {"topic": "runtime"})
             return
         if mode == "probe":  # 12.D：模型调用装好的探针工具包，参数来自 server.probe
-            if self._tool_result_count("sandbox_probe"):
+            if self._tool_result_count("sandbox_probe") >= int(getattr(self.server, "probe_times", 1) or 1):
                 self._piece(_delta(content="探针完成"))
                 self._done()
                 return
@@ -4707,6 +4707,8 @@ def _image_skill_cases(base: str, provider, box: ComfyState, directory: str) -> 
             os.remove(os.path.join(directory, "tools.json"))
         _image_skill_errors(base, provider, remote)
         _image_skill_launder()
+        _dataflow_unit()
+        _consent_unit()
     finally:
         remote.shutdown()
         remote.server_close()
@@ -4788,9 +4790,20 @@ def _image_skill_local_remote(base, provider, box, remote) -> None:
     if not any(item["type"] == "egress.blocked" and item.get("reason_code") == "local_prompt_remote_refused"
                and item["channel"] == "remote_image" and item.get("contains_local_derived") for item in refused):
         fail(f"本地提示词被拒没有记出站拦截：{[(i['type'], i.get('reason_code')) for i in refused]}")
+    # 12.E #61：放宽到 confirm 要显式 acknowledge；没带就 409 且不改；改了记一条 security.policy_changed。
     status, body = request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "confirm"}})
+    payload = json.loads(body or "{}")
+    if status != 409 or payload.get("code") != "acknowledge_required" or "remote_local_prompt" not in (payload.get("warnings") or {}):
+        fail(f"没确认就放宽了 remote_local_prompt：{status} {body}")
+    status, body = request("GET", base + "/api/tools/generate_image/config")
+    view = json.loads(body)
+    if view["values"]["remote_local_prompt"]["value"] != "refuse" or "本地提示词将发往第三方出图" not in json.dumps(view.get("warnings") or {}, ensure_ascii=False):
+        fail(f"409 之后配置被改了，或设置页拿不到警示：{view['values']['remote_local_prompt']} {view.get('warnings')}")
+    status, body = request("PUT", base + "/api/tools/generate_image/config",
+                           {"values": {"remote_local_prompt": "confirm"}, "acknowledge": ["remote_local_prompt"]})
     if status != 200:
         fail(f"改不了 remote_local_prompt：{status} {body}")
+    _policy_audit(base, "refuse", "confirm")
     try:
         events, requests, prompts, calls = _image_run(
             base, provider, box, remote, "用第三方出图，提示词我在本机输入", secret)
@@ -4812,8 +4825,138 @@ def _image_skill_local_remote(base, provider, box, remote) -> None:
         remote_sent = [item for item in sent if item["channel"] == "remote_image" and item["type"] == "egress.sent"]
         if len(remote_sent) != 1 or not remote_sent[0].get("contains_local_derived") or not remote_sent[0].get("handle_id_prefix"):
             fail(f"本地提示词发第三方没有记出站：{sent}")
+        if remote_sent[0].get("tool") != "generate_image":
+            fail(f"出站审计没有标是哪个工具发的：{remote_sent[0]}")
+        # 12.E 固定区块：出站主机 / 含本地派生内容 / 句柄用途，三项总在，由宿主生成。
+        fixed = {row.get("key"): row.get("value") for row in summary.get("fixed") or []}
+        host = remote_sent[0].get("destination_host")
+        if list(fixed) != ["destination_host", "contains_local_derived", "handle_purpose"] or not str(fixed["destination_host"]).startswith(host) \
+                or fixed["contains_local_derived"] != "是" or not fixed["handle_purpose"] \
+                or summary.get("destination_host") != host or summary.get("contains_local_derived") is not True:
+            fail(f"确认卡固定区块不对：{summary.get('fixed')} {host}")
+        _dataflow_session(base, remote_sent[0]["session_id"], (secret, remote.key))
+        # 每一轮都要再确认：同一配置下第二轮仍弹专门的确认。
+        events, _requests, _prompts, calls = _image_run(
+            base, provider, box, remote, "用第三方出图，提示词我在本机输入", secret)
+        again = [event for event in events if event.get("type") == "tool.confirm" and event.get("notice")]
+        if not again or len(calls) != 1:
+            fail(f"第二轮没有重新确认本地提示词发第三方：{len(again)} {len(calls)}")
     finally:
         request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "refuse"}})
+    _policy_audit(base, "confirm", "refuse")
+
+
+def _policy_audit(base: str, before: str, after: str) -> None:
+    """最近一条 security.policy_changed 是这次改动；只有名字和取值。"""
+    status, body = request("GET", base + "/api/telemetry?limit=5000")
+    if status != 200:
+        fail(f"读遥测失败：{status}")
+    items = [item for item in json.loads(body)["events"] if item.get("kind") == "security.policy_changed"]
+    last = items[-1] if items else {}
+    if (last.get("tool"), last.get("field"), last.get("from_value"), last.get("to_value")) != \
+            ("generate_image", "remote_local_prompt", before, after) or not str(last.get("trace_id", "")).startswith("cfg_"):
+        fail(f"受保护配置变更没有记安全事件：{last}")
+    if set(last) - {"ts", "trace_id", "kind", "tool", "field", "from_value", "to_value", "via"}:
+        fail(f"安全事件里多了字段：{sorted(last)}")
+
+
+def _dataflow_session(base: str, session_id: str, secrets=()) -> dict:
+    """12.E #61：会话数据流图只来自审计和句柄元数据；没有正文、密钥、完整句柄；本地→句柄→工具→目的地连得上。"""
+    import re as _re
+
+    status, body = request("GET", base + f"/api/dataflow?session_id={session_id}")
+    if status != 200:
+        fail(f"读不了数据流图：{status} {body}")
+    if any(secret in body for secret in secrets) or SECRET in body or _re.search(r"c_[0-9a-f]{12,}", body):
+        fail("数据流图里出现了正文、密钥或完整句柄")
+    flow = json.loads(body)
+    nodes = {node["id"]: node for node in flow["nodes"]}
+    edges = {(edge["from"], edge["to"], edge["kind"]): edge for edge in flow["edges"]}
+    if flow.get("schema") != "mas.dataflow/1" or flow.get("lanes") != ["local", "handle", "tool", "destination"]:
+        fail(f"数据流图格式不对：{flow.get('schema')} {flow.get('lanes')}")
+    handles = [node for node in nodes.values() if node["kind"] == "handle"]
+    if not handles or any(len(node["handle_id_prefix"]) != 6 for node in handles):
+        fail(f"数据流图没有句柄节点或句柄前缀不是 6 位：{handles}")
+    if not any(key[0] == "local" and key[2] == "holds" for key in edges):
+        fail("数据流图没有 本地内容 → 句柄")
+    if not any(key[1] == "t:generate_image" and key[2] == "uses" and edge["local_derived"] for key, edge in edges.items()):
+        fail(f"数据流图没有 句柄 → generate_image：{list(edges)}")
+    out = [edge for key, edge in edges.items() if key[0] == "t:generate_image" and key[2] == "egress"]
+    if not out or not any(edge["counts"]["sent"] and edge["local_derived"] for edge in out):
+        fail(f"数据流图没有 generate_image → 出图服务：{out}")
+    for bad in ("../x", "", "s_" + "0" * 32):
+        status, _ = request("GET", base + f"/api/dataflow?session_id={bad}")
+        if status not in (400, 404):
+            fail(f"数据流图接受了坏的 session_id：{bad} {status}")
+    return flow
+
+
+def _consent_unit() -> None:
+    """12.E #61：本地提示词发第三方的同意只绑在（这一轮, 句柄, 目的主机）上；拒绝不记住；新一轮重新问。"""
+    import chat_run
+
+    asked = []
+
+    class Run:
+        run_id = "r_consent"
+        def __init__(self, answers):
+            self.answers = list(answers)
+        def begin_confirm_wait(self):
+            pass
+        def wait_confirm(self):
+            return self.answers.pop(0)
+
+    saved = chat_run._confirm_egress, chat_run._push_saved
+    chat_run._confirm_egress = lambda *a, **k: {}
+    chat_run._push_saved = lambda app, sid, mid, run, event: asked.append(event) if event["type"] == chat_run.EVENT_TOOL_CONFIRM else None
+    try:
+        run = Run([True, True, True, False, True])
+        one, two = "https://img-a.example/v1", "https://img-b.example/v1"
+        steps = [("c_h1", one, True), ("c_h1", one, True), ("c_h2", one, True), ("c_h1", two, True),
+                 ("c_h3", one, False), ("c_h3", one, True)]
+        for handle, base, want in steps:
+            if chat_run._remote_consent(None, "s", "m", run, handle, base) is not want:
+                fail(f"同意结果不对：{handle} {base}")
+        if len(asked) != 5:
+            fail(f"同意没有按（句柄, 主机）绑定或拒绝被记住了：问了 {len(asked)} 次")
+        if not chat_run._remote_consent(None, "s", "m", Run([True]), "c_h1", one) or len(asked) != 6:
+            fail("新一轮没有重新问")
+    finally:
+        chat_run._confirm_egress, chat_run._push_saved = saved
+
+
+def _dataflow_unit() -> None:
+    """dataflow.build 只挑白名单字段：输入里混进正文、提示词、完整句柄也不会出现在图里；planned 不计数。"""
+    import dataflow
+
+    full = "c_" + "a" * 32
+    events = [
+        {"type": "egress.planned", "channel": "remote_image", "tool": "generate_image", "destination_host": "img.example"},
+        {"type": "egress.sent", "channel": "remote_image", "tool": "generate_image", "destination_scope": "third_party",
+         "destination_host": "img.example", "contains_local_derived": True, "handle_id_prefix": full[:6],
+         "prompt": "不该出现的正文", "handle": full},
+        {"type": "egress.blocked", "channel": "remote_image", "tool": "generate_image", "destination_scope": "third_party",
+         "destination_host": "img.example", "reason_code": "local_prompt_remote_refused", "contains_local_derived": True,
+         "handle_id_prefix": full},
+        {"type": "egress.sent", "channel": "comfyui_local", "destination_scope": "local", "destination_host": "127.0.0.1:8188",
+         "tool": "generate_image"},
+        {"type": "egress.sent", "channel": "chat_completion", "destination_scope": "third_party", "destination_host": "llm.example"},
+    ]
+    contents = [{"handle": full, "purpose": "image_prompt", "state": "active", "kind": "text", "body": "不该出现的正文"}]
+    flow = dataflow.build("s_" + "b" * 32, events, contents)
+    blob = json.dumps(flow, ensure_ascii=False)
+    if "不该出现的正文" in blob or full in blob:
+        fail("数据流图把正文或完整句柄带出来了")
+    s = flow["summary"]
+    if (s["sent"], s["blocked"], s["failed"], s["local_derived_to_third_party"], s["handles"]) != (3, 1, 0, 1, 1):
+        fail(f"数据流图计数不对：{s}")
+    ids = {node["id"] for node in flow["nodes"]}
+    if not {"local", "h:" + full[:6], "t:generate_image", "t:chat", "d:third_party:img.example", "d:local_comfyui",
+            "d:third_party:llm.example"} <= ids:
+        fail(f"数据流图节点不对：{sorted(ids)}")
+    egress_edge = next(e for e in flow["edges"] if e["from"] == "t:generate_image" and e["to"] == "d:third_party:img.example")
+    if egress_edge["counts"] != {"sent": 1, "blocked": 1, "failed": 0} or egress_edge["reasons"] != {"local_prompt_remote_refused": 1}:
+        fail(f"数据流图边计数不对：{egress_edge}")
 
 
 def _egress_since(base: str, events: list[dict], secrets=()) -> list[dict]:
@@ -5045,6 +5188,10 @@ def _egress_http_case(base: str, provider, directory: str) -> None:
     web_server._egress_route(fake, "/api/egress", {})
     if fake.status != 403 or b"egress.sent" in fake.wfile.getvalue():
         fail("非本机能读出站审计")
+    fake = _Fake()
+    web_server._dataflow_route(fake, None, {"session_id": [session_id]})
+    if fake.status != 403 or b"nodes" in fake.wfile.getvalue():
+        fail("非本机能读数据流图")
 
 
 # ---------- #31 工具包 ----------
@@ -5186,7 +5333,18 @@ def _toolpack_cases() -> None:
         "默认值": _pack_manifest("bad_six", config=[{"name": "key", "type": "secret", "default": "leak", "required": False, "secret": True, "description": ""}]),
         "相对路径": _pack_manifest("bad_seven", entry={"kind": "python", "module": "../evil.py"}),
         "confirm_args": _pack_manifest("bad_eight", confirm="by_args"),
+        # 12.E #61：联网或读本地内容的第三方包只能 confirm=always。
+        "confirm=always": _pack_manifest("bad_nine", permissions={"network": True}),
     }
+    for label, manifest in {
+        "network+by_args": _pack_manifest("bad_ten", confirm="by_args", confirm_args=["n"], permissions={"network": True}),
+        "read_local+never": _pack_manifest("bad_eleven", permissions={"read_local_content": True}),
+        "read_local 冒充内置名": _pack_manifest("retrieve_local", permissions={"read_local_content": True}),
+    }.items():
+        if packs.SENSITIVE_CONFIRM_PROBLEM not in packs.validate_manifest(manifest):
+            fail(f"{label} 没有被拒绝：{packs.validate_manifest(manifest)}")
+    if packs.validate_manifest(_pack_manifest("net_always", confirm="always", permissions={"network": True})):
+        fail("联网 + confirm=always 的清单被误拒了")
     for word, manifest in bad.items():
         problems = packs.validate_manifest(manifest)
         if not any(word in item for item in problems):
@@ -5209,7 +5367,7 @@ def _toolpack_cases() -> None:
         if result.get("error", {}).get("code") != "dependency_missing" or result.get("executed") is not False:
             fail(f"缺依赖时没有稳定错误码：{result}")
         # 权限：安装要确认；授权记录被改掉后调用 permission_denied。
-        netty = _write_pack(source, _pack_manifest("needs_network", permissions={"network": True}), _PACK_CODE)
+        netty = _write_pack(source, _pack_manifest("needs_network", confirm="always", permissions={"network": True}), _PACK_CODE)
         try:
             packs.install(netty, [])
         except packs.PackError as exc:
@@ -5220,6 +5378,15 @@ def _toolpack_cases() -> None:
         packs.install(netty, ["network"])
         if execute_tool("needs_network", {"n": 2}).get("n") != 2:
             fail("授权后的工具没有执行")
+        # 12.E #61：联网的第三方包每次调用都确认（不在一轮里复用）；内置工具保持一轮复用。
+        from services.runtime.tools import confirm_every_call
+        if not confirm_every_call("needs_network") or confirm_every_call("generate_image") or confirm_every_call("needs_backend"):
+            fail("每次调用都确认的范围不对")
+        net_pack = {pack.manifest["name"]: pack for pack in packs.discover()}["needs_network"]
+        if not packs.sensitive(net_pack) or not packs.needs_confirm(net_pack, {}) or not packs.summary(net_pack).get("sensitive"):
+            fail("联网包没有被标成敏感或没有强制确认")
+        if not packs.review(net_pack.manifest).get("confirm_every_call"):
+            fail("安装前审阅没有说明每次调用都确认")
         with open(os.path.join(folder, "needs_network", ".granted.json"), "w", encoding="utf-8") as handle:
             json.dump({"permissions": []}, handle)
         result = execute_tool("needs_network", {"n": 2})
@@ -5292,6 +5459,8 @@ def _probe_copy(folder: str, name: str = "sandbox_probe", **permissions) -> str:
         manifest = json.load(handle)
     manifest["name"] = name
     manifest["permissions"].update(permissions)
+    if permissions.get("network") or permissions.get("read_local_content"):
+        manifest["confirm"] = "always"  # 12.E #61：联网/读本地的第三方包必须 confirm=always
     with open(os.path.join(target, "tool.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False)
     return target

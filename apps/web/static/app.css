@@ -581,6 +581,19 @@ dialog select { font: inherit; padding: 0.35rem; }
 .egress-reason { margin: 0.2rem 0 0; font-size: 0.82rem; }
 .confirm-egress { flex-basis: 100%; margin: 0; font-size: 0.9em; }
 .confirm-egress strong { margin-right: 0.25rem; }
+/* 12.E 确认卡固定区块 + 数据流图 */
+.confirm-fixed { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.6rem; margin: 0.3rem 0 0; }
+.confirm-fixed dt { color: var(--muted); }
+.confirm-fixed dd { margin: 0; }
+.confirm-warn { margin: 0.3rem 0 0; color: #8f2f18; font-weight: 600; }
+.dataflow { max-height: 35%; }
+#dataflow-status { margin: 0; }
+#dataflow-graph { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; font-size: 0.85rem; }
+#dataflow-graph li { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 0.4rem 0.6rem; margin-bottom: 0.3rem; overflow-wrap: anywhere; }
+#dataflow-graph li.flow-third-party { border-color: #b4492f; }
+#dataflow-graph li.flow-blocked { background: #fbe9e3; }
+#dataflow-graph .kind { display: block; font-size: 0.72rem; color: var(--muted); }
+.tool-warning { margin: 0.3rem 0; padding: 0.4rem 0.6rem; border: 1px solid #b4492f; background: #fbe9e3; border-radius: 8px; color: #8f2f18; font-weight: 600; }
 
 /* 12.D 安装前权限审阅 */
 .toolpack-review { border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 12px; margin-top: 8px; }

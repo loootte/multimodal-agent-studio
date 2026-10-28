@@ -32,6 +32,28 @@ class ConfigError(ValueError):
         self.errors = errors
 
 
+# 12.E #61：放宽隐私默认值的配置项。改成这些值时，界面要明确写出后果，请求里要带 acknowledge 才能保存，
+# 每次变更（含改回去）记一条遥测安全事件 security.policy_changed（只有工具名、字段名、前后取值）。
+GUARDED = {
+    ("generate_image", "remote_local_prompt"): {
+        "confirm": "本地提示词将发往第三方出图服务（正文不发给对话模型）。每一轮出图前仍会单独请你确认。",
+    },
+}
+
+
+class AckRequired(ConfigError):
+    """改成放宽隐私的取值，但请求里没有确认（acknowledge）。"""
+
+    def __init__(self, errors: dict, warnings: dict):
+        super().__init__(errors)
+        self.warnings = warnings
+
+
+def guarded_warnings(name: str) -> dict:
+    """{字段名: {取值: 警示}}，给设置页显示。"""
+    return {field: dict(values) for (tool, field), values in GUARDED.items() if tool == name}
+
+
 def _ensure_poc() -> None:
     if POC not in sys.path:
         sys.path.insert(0, POC)
@@ -232,6 +254,7 @@ class ToolConfigStore:
         return {"name": name, "title": decl["title"], "description": decl["description"],
                 "fields": decl["fields"], "values": values, "complete": not missing, "missing": missing,
                 "testable": decl.get("testable", False), "kind": decl.get("kind", "backend"),
+                **({"warnings": guarded_warnings(name)} if guarded_warnings(name) else {}),
                 **({"pack": self._pack_view(decl["pack"])} if decl.get("pack") else {})}
 
     def _pack_view(self, pack: dict) -> dict:
@@ -269,7 +292,9 @@ class ToolConfigStore:
         return {"tools": tools, "backends": backends}
 
     # ---- 写入 ----
-    def update(self, name: str, values: dict, reset: bool = False, clear: list | None = None) -> dict:
+    def update(self, name: str, values: dict, reset: bool = False, clear: list | None = None,
+               acknowledge: list | None = None) -> dict:
+        """保存配置。返回公开视图；视图里的 changed_guarded 列出这次被改动的受保护字段（给调用方记审计）。"""
         if name not in declarations():
             raise KeyError(name)
         if not isinstance(values, dict):
@@ -308,12 +333,27 @@ class ToolConfigStore:
                 errors.setdefault(key, problem)
             if errors:
                 raise ConfigError(errors)
+            before = dict(data.get(name) or {})
+            changed, unacked = [], {}
+            acked = set(acknowledge) if isinstance(acknowledge, list) else set()
+            for field, warnings in guarded_warnings(name).items():
+                default = by_name[field]["default"] if field in by_name else None
+                old, new = before.get(field, default), section.get(field, default)
+                if old == new:
+                    continue
+                changed.append({"field": field, "from": old, "to": new})
+                if new in warnings and field not in acked:
+                    unacked[field] = warnings[new]
+            if unacked:
+                raise AckRequired({key: "要先确认：" + text for key, text in unacked.items()}, unacked)
             if section:
                 data[name] = section
             else:
                 data.pop(name, None)
             self._save(data)
-        return self.public(name)
+        view = self.public(name)
+        view["changed_guarded"] = changed
+        return view
 
 
 def _resolve(value: str) -> str:

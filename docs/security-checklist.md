@@ -22,6 +22,8 @@
 | 1.13 | 本地正文换大小写、全角、零宽、插空格、拆到相邻消息后仍以 `local_content` 拦下；base64 / URL 安全 base64 / 百分号编码后以 `local_content_encoded` 拦下，都不开连接（#59） | 自动：`security.egress_encoded_variants`（含网页对话一轮）；`apps/web/check.py` 的 `_gateway_hardening` |
 | 1.14 | 短于 8 个字符的已登记正文按指纹整段匹配拦下；包含它的长句和不足 4 个字符的常用词不误伤；审计、日志不出现正文，界面只说明原因码（#59） | 自动：`security.egress_short_body`；人工：误拦时看界面说明不回显正文 |
 | 1.15 | 所有网关适配器挂统一出口中间件：没声明 `audits_egress` / `offline` 的不能注册，声明了却没开 ticket 的被 `egress_policy_denied` 中断；第三方出图、ComfyUI 提交与上传命中时不发出（#59） | 自动：`security.egress_policy_denied`；`apps/web/check.py` 的 `_gateway_hardening`；人工：新增适配器时复查 |
+| 1.16 | 会话级数据流图 `/api/dataflow` 只给本机，只由出站审计和句柄公开字段拼成：句柄只有前 6 位，没有正文、提示词、密钥、完整句柄；本地 → 句柄 → 工具 → 目的地连通，计数和审计一致（#61） | 自动：`security.dataflow_no_body`；`apps/web/check.py` 的 `_dataflow_unit`、`_dataflow_session`、非本机 403 |
+| 1.17 | `remote_local_prompt` 默认 `refuse`；改成 `confirm` 要显式 `acknowledge`（否则 409 不改），设置页明示「本地提示词将发往第三方出图」；每次变更记 `security.policy_changed`；改后每一轮仍单独确认，同意只绑（这一轮, 句柄, 目的主机）（#61） | 自动：`security.remote_local_prompt_ack_required`；`apps/web/check.py` 的 `_image_skill_local_remote`、`_consent_unit` |
 | 1.9 | 确认卡的出站摘要由宿主生成（`by: "host"`），不取模型或工具返回的文字；多 Agent 冒泡确认同样带摘要 | 自动：`apps/web/check.py` 的确认用例；人工：看确认卡写的目的地主机与配置一致 |
 
 ## 2. 工具权限
@@ -40,6 +42,9 @@
 | 2.10 | 子进程拿不到宿主环境变量里的 API key、令牌；工具配置（含密钥）只经 `config` 显式注入，且不出现在模型请求里（#60） | 自动：`security.sandbox_env_isolated` |
 | 2.11 | 运行时复核：授权记录绑定权限和包内容摘要；装后改包、旧格式授权、权限超出授权都返回 `permission_denied` 不执行；内置工具 需要 ⊆ 声明 ⊆ 授权（#60） | 自动：`security.permission_manifest_changed`；`_sandbox_cases` |
 | 2.12 | 安装前网页展示权限审阅（每项说明、风险、沙箱限制），逐项勾选后才能安装 | 自动：`_sandbox_cases` 的页面检查；人工：装一个要 `network` 的包，看审阅内容 |
+| 2.13 | 声明 `network` 或 `read_local_content` 的包只能 `confirm: "always"`；`never` / `by_args` 在检查、安装、发现时报 `invalid_manifest`；只有内置只读句柄工具 `list_local_content` / `retrieve_local` 例外（#61） | 自动：`security.confirm_never_network_rejected`；`apps/web/check.py` 的清单校验用例 |
+| 2.14 | 敏感的第三方包每次调用都确认，不复用同一轮里之前的同意（子 Agent 冒泡同样）；内置工具保持一轮一次 | 自动：`security.sensitive_tool_confirm_every_call`；`apps/web/check.py` 的 `confirm_every_call` 用例 |
+| 2.15 | 确认卡固定区块三项：出站主机、含本地派生内容、句柄用途，宿主生成、顺序固定（#61） | 自动：`_image_skill_local_remote`、`security.sensitive_tool_confirm_every_call`；人工：看卡片三项和配置一致 |
 
 ## 3. 提示注入
 

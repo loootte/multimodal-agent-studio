@@ -27,7 +27,7 @@
 | `schema` | `mas.egress/1` |
 | `type`、`egress_id`、`ts` | 事件类型、请求编号（`eg_` + 16 位十六进制）、秒级时间戳 |
 | `channel` | `chat_completion` / `remote_image` / `comfyui_local` / `toolpack`（12.D：沙箱里的第三方工具包自己发起的连接） |
-| `tool` | 只在 `toolpack` 渠道：发起连接的工具包名（≤48 字） |
+| `tool` | 发起这次出站的工具名（≤48 字）：`toolpack` 渠道是工具包名；12.E 起 `generate_image` 的 `remote_image` / `comfyui_local` 也标；对话模型请求不标 |
 | `destination_host` | 只有主机名，去掉端口、路径、查询串和用户名密码 |
 | `destination_scope` | `local`（回环）/ `lan`（私有地址）/ `third_party` |
 | `modality` | 载荷里的模态（text / image …） |
@@ -83,3 +83,7 @@
 - 指纹是请求体 sha256 前缀，不可逆，但对极短、可猜的提示词理论上可用字典比对确认；导出前请把它当作非公开数据。
 - 只覆盖经过本进程网关和出图客户端的请求；12.C（#59）起适配器必须挂统一出口中间件，出站策略、编码检测与新原因码 `local_content_encoded` / `egress_policy_denied` 见 [egress-policy.md](egress-policy.md)；第三方工具包自己开 socket 要到 12.D 才拦得住。
 - 句柄作用域、过期、撤销见 [handle-scope.md](handle-scope.md)（12.B，#58）：句柄被拒时记 `egress.blocked`，原因码 `handle_not_found` / `handle_expired` / `handle_forbidden`。
+
+## 数据流图（12.E）
+
+`GET /api/dataflow?session_id=…` 把本会话的审计记录和句柄公开字段拼成「本地内容 → 句柄 → 工具 →（本机 ComfyUI | 第三方）」的图，同样只给本机、没有正文，见 [sensitive-confirm.md](sensitive-confirm.md)。

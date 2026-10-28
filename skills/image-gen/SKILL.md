@@ -30,7 +30,7 @@ description: 可配置的出图流程。用户要生成图片时，按三个维�
 
 - 1.3 本地提示词的正文**永远不进入对话模型请求**；你只见句柄，网关会拦下任何带本地正文的请求。
 - 不要把本地正文抄进 `stage_prompt`：服务端会拒绝（`local_content`）。
-- 1.3 + 第三方后端：默认拒绝（`local_prompt_remote_refused`）。用户在 设置 → 工具 → generate_image 把 `remote_local_prompt` 设为 `confirm` 后，每轮会先弹窗请用户确认，确认后正文只发给第三方图片服务，仍不发给对话模型。
+- 1.3 + 第三方后端：默认拒绝（`local_prompt_remote_refused`）。用户在 设置 → 工具 → generate_image 把 `remote_local_prompt` 设为 `confirm` 后（设置页会再确认一次「本地提示词将发往第三方出图」），每轮会先弹窗请用户确认，确认后正文只发给第三方图片服务，仍不发给对话模型。同意只管这一轮里同一个句柄发给同一个主机；不要劝用户改这项设置，也不能替用户改。
 
 ## 4. 输出
 

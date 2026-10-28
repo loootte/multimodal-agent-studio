@@ -79,12 +79,25 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 例外：内置工具不进沙箱；`generate_image` / `generate_video` 访问本机 ComfyUI 是唯一允许的本机出网，仍走 12.A 审计和 12.C 策略。
 - 局限：审计钩子是 Python 层尽力而为，C 扩展可绕过；操作系统级隔离（Job Object / seccomp / namespace）和第三方包的句柄 API 留作后续。
 
+### 12.E 实现定稿的强制确认与数据流图
+
+细节见 [sensitive-confirm.md](../sensitive-confirm.md)。
+
+- 清单校验：`network` 或 `read_local_content` 为真的包只能 `confirm: "always"`，`never` / `by_args` 在检查、安装、发现时都报 `invalid_manifest`（`SENSITIVE_CONFIRM_PROBLEM`）。例外只给内置只读句柄工具 `list_local_content` / `retrieve_local`（`HANDLE_ONLY_READERS`）。`needs_confirm` 对敏感包兜底返回需要确认。
+- 确认粒度：内置工具一轮一次不变（N 张图问一次）；敏感的第三方包每次调用都问（`confirm_every_call`，含子 Agent 冒泡）；本地提示词发第三方的同意绑定（这一轮, 句柄, 目的主机），拒绝不记住，下一轮重问。
+- 确认卡固定区块 `egress.fixed`：出站主机、含本地派生内容、句柄用途三项，宿主生成、顺序固定。
+- 放宽隐私的配置（目前 `generate_image.remote_local_prompt = confirm`）登记在 `GUARDED`：设置页明示「本地提示词将发往第三方出图」，接口不带 `acknowledge` 返回 409 `acknowledge_required`；每次变更记遥测 `security.policy_changed`（只有工具、字段、前后取值）。配置变更不走工具。
+- 审计记录的 `tool` 字段从 `toolpack` 渠道扩到所有经工具发起的出站（`generate_image` 的 `remote_image` / `comfyui_local` 也标）。
+- 会话级数据流图 `GET /api/dataflow`（只给本机，`mas.dataflow/1`）：本地内容 → 句柄（前 6 位）→ 工具 → 本机 ComfyUI / 局域网 / 第三方，边上记 sent / blocked / failed、本地派生次数和原因码；只来自审计记录和句柄公开字段，没有正文和完整句柄。
+- 不做：轨迹里的隐私边类型（#44 反向用例，issue 标为可选）。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
 - 网关适配器必须挂同一出口钩子，否则评测失败。
 - 过严的指纹匹配可能误伤短句巧合——实现侧用「已入库指纹 + 长度阈值」，UI 只说明原因码、不回显正文。
 - 12.D 的子进程沙箱见上；操作系统级隔离和落盘加密不在本 ADR 范围，见后续与 12.F。
+- 12.E 让 `network` / 读本地的第三方包不能再 `confirm=never`：12.E 之前装好的这类包升级后要改清单重装。
 
 ## 未决（接受前拍板）
 

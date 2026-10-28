@@ -104,14 +104,22 @@ def detach(trace_id: str) -> None:
 
 
 @contextlib.contextmanager
-def note(*, local_derived: bool | None = None, handle: str | None = None):
-    """宿主在发出之前标明：这次请求是否带本地派生内容、用的是哪个句柄。只在当前线程有效。"""
+def note(*, local_derived: bool | None = None, handle: str | None = None, tool: str | None = None):
+    """宿主在发出之前标明：这次请求是否带本地派生内容、用的是哪个句柄、是哪个工具发的（12.E 数据流图用）。
+    只在当前线程有效；嵌套时没给的项沿用外层。"""
     previous = getattr(_local, "note", None)
-    _local.note = {"local_derived": local_derived, "handle": handle}
+    merged = dict(previous or {})
+    for key, value in (("local_derived", local_derived), ("handle", handle), ("tool", tool)):
+        if value is not None:
+            merged[key] = value
+    _local.note = merged
     try:
         yield
     finally:
         _local.note = previous
+
+
+_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 
 
 def _note() -> dict:
@@ -396,6 +404,9 @@ class Ticket:
         }
         if isinstance(handle, str) and handle:
             self.base["handle_id_prefix"] = handle[:HANDLE_PREFIX_CHARS]
+        tool = hint.get("tool")
+        if isinstance(tool, str) and _TOOL_NAME.match(tool):
+            self.base["tool"] = tool
         for key, value in (stats or {}).items():
             if key in EGRESS_FIELDS:
                 self.base[key] = value
@@ -466,9 +477,11 @@ def security_event(reason: str, channel: str | None) -> None:
         print(f"警告：出站安全事件写入失败 {type(exc).__name__}", file=sys.stderr)
 
 
-def blocked(channel: str, url, reason_code: str, *, local_derived: bool | None = None, handle: str | None = None) -> Ticket:
+def blocked(channel: str, url, reason_code: str, *, local_derived: bool | None = None, handle: str | None = None,
+            tool: str | None = None) -> Ticket:
     """宿主在组请求之前就拦下（例如本地提示词不许发第三方）：没有载荷可度量，只记目的地和原因。"""
-    return Ticket(channel, url, local_derived=local_derived, handle=handle).blocked(reason_code)
+    with note(tool=tool):
+        return Ticket(channel, url, local_derived=local_derived, handle=handle).blocked(reason_code)
 
 
 def toolpack_connect(tool: str, host: str, *, allowed: bool, reason_code: str | None = None) -> Ticket:

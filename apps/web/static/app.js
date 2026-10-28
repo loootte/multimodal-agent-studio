@@ -61,6 +61,7 @@ document.querySelector("#toggle-runtime").addEventListener("click", () => {
   document.querySelector(".app").classList.toggle("runtime-collapsed");
 });
 document.querySelector("#export-egress").addEventListener("click", exportEgress);
+document.querySelector("#refresh-dataflow").addEventListener("click", refreshDataflow);
 document.querySelector("#close-runtime").addEventListener("click", () => {
   document.querySelector(".app").classList.add("runtime-collapsed");
 });
@@ -299,6 +300,7 @@ function onEvent(event) {
   renderTranscript();
   renderRuntime();
   renderEgress();
+  if (event.type === "message.completed" || event.type === "run.failed") scheduleDataflow();
   updateButtons();
 }
 
@@ -409,6 +411,7 @@ function render() {
   renderTranscript();
   renderRuntime();
   renderEgress();
+  scheduleDataflow();
   renderPending();
   updateButtons();
 }
@@ -604,7 +607,93 @@ function egressSummaryNode(summary) {
   const text = document.createElement("span");
   text.textContent = summary.text || (summary.network ? "会联网。" : "不联网，只在本机执行。");
   box.append(title, text);
+  // 12.E 固定区块：出站主机 / 含本地派生内容 / 句柄用途，三项总在，顺序固定，值由宿主生成。
+  const fixed = Array.isArray(summary.fixed) ? summary.fixed : [];
+  if (fixed.length) {
+    const list = document.createElement("dl");
+    list.className = "confirm-fixed";
+    for (const row of fixed) {
+      const term = document.createElement("dt");
+      term.textContent = String(row.label || row.key || "");
+      const value = document.createElement("dd");
+      value.textContent = String(row.value || "");
+      value.dataset.key = String(row.key || "");
+      list.append(term, value);
+    }
+    box.append(list);
+  }
+  if (summary.local_to_third_party) {
+    const warn = document.createElement("p");
+    warn.className = "confirm-warn";
+    warn.textContent = "本地提示词将发往第三方出图服务（不会发给对话模型）。";
+    box.append(warn);
+  }
   return box;
+}
+
+// 12.E 会话级数据流图：GET /api/dataflow 由宿主从出站审计和句柄元数据拼出来，这里只按泳道列出节点和边。
+const DATAFLOW_EDGE = { holds: "持有", uses: "使用", egress: "出站" };
+let dataflowTimer = null;
+
+function scheduleDataflow() {
+  clearTimeout(dataflowTimer);
+  dataflowTimer = setTimeout(refreshDataflow, 300);
+}
+
+async function refreshDataflow() {
+  const graph = document.querySelector("#dataflow-graph");
+  const status = document.querySelector("#dataflow-status");
+  if (!graph || !status) return;
+  if (!state.currentId) {
+    graph.replaceChildren();
+    return;
+  }
+  let flow;
+  try {
+    const response = await fetch(`/api/dataflow?session_id=${encodeURIComponent(state.currentId)}`);
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).message || "读不了数据流图。");
+    flow = await response.json();
+  } catch (error) {
+    status.textContent = error.message || "读不了数据流图。";
+    return;
+  }
+  renderDataflow(flow, graph, status);
+}
+
+function renderDataflow(flow, graph, status) {
+  const nodes = {};
+  for (const node of flow.nodes || []) nodes[node.id] = node;
+  const sum = flow.summary || {};
+  status.textContent = `本会话：${sum.handles || 0} 个句柄；出站 已发 ${sum.sent || 0} · 拦下 ${sum.blocked || 0} · 失败 ${sum.failed || 0}` +
+    (sum.local_derived_to_third_party ? `；本地派生内容发往第三方 ${sum.local_derived_to_third_party} 次` : "") + "。";
+  graph.replaceChildren();
+  for (const edge of flow.edges || []) {
+    const from = nodes[edge.from] || {};
+    const to = nodes[edge.to] || {};
+    const item = document.createElement("li");
+    const counts = edge.counts || {};
+    if (to.destination === "third_party") item.classList.add("flow-third-party");
+    if (counts.blocked) item.classList.add("flow-blocked");
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = DATAFLOW_EDGE[edge.kind] || edge.kind || "";
+    const body = document.createElement("span");
+    const parts = [`${from.label || edge.from} → ${to.label || edge.to}`];
+    if (from.purpose_label) parts.push(`用途：${from.purpose_label}`);
+    if (to.purpose_label) parts.push(`用途：${to.purpose_label}`);
+    if (edge.kind !== "holds") parts.push(`已发 ${counts.sent || 0} · 拦下 ${counts.blocked || 0} · 失败 ${counts.failed || 0}`);
+    if (edge.local_derived) parts.push(`含本地派生 ${edge.local_derived} 次`);
+    body.textContent = parts.join(" · ");
+    item.append(kind, body);
+    const reasons = Object.entries(edge.reasons || {});
+    if (reasons.length) {
+      const reason = document.createElement("p");
+      reason.className = "egress-reason";
+      reason.textContent = reasons.map(([code, n]) => `${EGRESS_REASONS[code] || code}（${n}）`).join(" ");
+      item.append(reason);
+    }
+    graph.append(item);
+  }
 }
 
 // markdown.js 只产出转义后的白名单 HTML；万一没加载，退回纯文本转义。
@@ -1643,6 +1732,21 @@ function renderToolForm(view, errors) {
     hint.className = "hint";
     hint.textContent = `${field.description || ""} ${SOURCE_LABEL[current.source] || ""}`.trim();
     label.append(hint);
+    // 12.E：放宽隐私的取值（如 remote_local_prompt=confirm）选中时显示强警示，保存前还要再确认一次。
+    const warned = (view.warnings || {})[field.name];
+    if (warned && control.tagName === "SELECT") {
+      const warning = document.createElement("p");
+      warning.className = "tool-warning";
+      warning.setAttribute("role", "alert");
+      const sync = () => {
+        const text = warned[control.value];
+        warning.hidden = !text;
+        warning.textContent = text ? `⚠ ${text}` : "";
+      };
+      control.addEventListener("change", sync);
+      sync();
+      label.append(warning);
+    }
     const problem = errors && errors[field.name];
     if (problem) {
       const bad = document.createElement("span");
@@ -1669,8 +1773,23 @@ async function saveToolConfig(event) {
   event.preventDefault();
   const view = state.toolView;
   if (!view) return;
+  const values = toolFormValues();
+  const put = (acknowledge) =>
+    api("PUT", `/api/tools/${encodeURIComponent(view.name)}/config`, acknowledge ? { values, acknowledge } : { values });
   try {
-    state.toolView = await api("PUT", `/api/tools/${encodeURIComponent(view.name)}/config`, { values: toolFormValues() });
+    try {
+      state.toolView = await put(null);
+    } catch (error) {
+      // 宿主要求显式确认放宽隐私的设置：把宿主给的警示原样给人看，同意了才带 acknowledge 重发。
+      if (error.code !== "acknowledge_required") throw error;
+      const warnings = (error.payload && error.payload.warnings) || {};
+      const text = Object.values(warnings).join("\n");
+      if (!window.confirm(`${text}\n\n确定要放宽这项隐私设置吗？`)) {
+        toolNote("没有保存：放宽隐私的设置需要你确认。");
+        return;
+      }
+      state.toolView = await put(Object.keys(warnings));
+    }
     renderToolForm(state.toolView);
     toolNote("已保存，下一次运行就会用新配置。");
   } catch (error) {

@@ -43,7 +43,10 @@ def execute_tool(name: str, arguments: dict) -> dict:
         problem = validate_tool(name, arguments)
         if problem:
             return problem
-        return call_tool(name, arguments)
+        from services.gateway import egress
+
+        with egress.note(tool=name):  # 12.E：出站记录带上工具名，数据流图按它连边
+            return call_tool(name, arguments)
     checked = validate_external(name, arguments)
     if not checked.get("ok"):
         return checked
@@ -81,6 +84,16 @@ def tool_mutates(name: str, arguments=None) -> bool:
     return packs.needs_confirm(pack, arguments)
 
 
+def confirm_every_call(name: str) -> bool:
+    """12.E：联网 / 读本地内容的第三方工具每次调用都要确认，不复用同一轮里之前的同意。
+    内置工具（如一轮连出 N 张图的 generate_image）仍然一轮问一次；本地提示词发第三方另有按句柄和主机的确认。"""
+    _ensure()
+    from tools import packs
+
+    pack = packs.find(name)
+    return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
+
+
 def egress_preview(name: str, arguments=None) -> dict:
     """确认卡上的出站摘要（#57）：由宿主按工具清单的 permissions 生成，不用模型的解释文字。
 
@@ -97,6 +110,7 @@ def egress_preview(name: str, arguments=None) -> dict:
         "reads_local": bool(permissions.get("read_local_content")),
         "sends_local_to_model": bool(permissions.get("send_local_to_model")),
         "sandboxed": bool(pack is not None and not pack.builtin),
+        "sensitive": bool(pack is not None and packs.sensitive(pack)),
     }
 
 

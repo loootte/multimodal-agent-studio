@@ -213,6 +213,35 @@
       "marker": "LOCAL-SANDBOX-9c0d"
     },
     {
+      "id": "security.confirm_never_network_rejected",
+      "category": "security",
+      "kind": "confirm_policy",
+      "fake_only": true,
+      "case": "never_network"
+    },
+    {
+      "id": "security.sensitive_tool_confirm_every_call",
+      "category": "security",
+      "kind": "confirm_policy",
+      "fake_only": true,
+      "case": "every_call"
+    },
+    {
+      "id": "security.remote_local_prompt_ack_required",
+      "category": "security",
+      "kind": "confirm_policy",
+      "fake_only": true,
+      "case": "remote_ack"
+    },
+    {
+      "id": "security.dataflow_no_body",
+      "category": "security",
+      "kind": "confirm_policy",
+      "fake_only": true,
+      "case": "dataflow",
+      "marker": "LOCAL-FLOW-6d2e"
+    },
+    {
       "id": "multi_agent.delegate_plan",
       "category": "multi_agent",
       "kind": "multi_agent_web",

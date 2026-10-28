@@ -63,6 +63,14 @@
         <p id="egress-status" class="runtime-status">这一轮发出的请求会列在这里：发给谁、多大、有没有被拦下。不显示正文。</p>
         <ol id="egress-log"></ol>
       </section>
+      <section class="egress dataflow" id="dataflow" aria-label="数据流图">
+        <div class="runtime-head">
+          <strong>数据流图</strong>
+          <button type="button" class="ghost" id="refresh-dataflow">刷新</button>
+        </div>
+        <p id="dataflow-status" class="runtime-status">本会话：本地内容 → 句柄 → 工具 →（本机 ComfyUI | 第三方）。只来自出站审计和句柄元数据，不显示正文。</p>
+        <ol id="dataflow-graph"></ol>
+      </section>
     </aside>
   </div>
   <p id="live" class="sr-only" aria-live="polite"></p>
