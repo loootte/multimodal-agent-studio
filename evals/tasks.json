@@ -149,6 +149,12 @@
       "category": "image",
       "kind": "image_skill",
       "fake_only": true
+    },
+    {
+      "id": "image.character",
+      "category": "image",
+      "kind": "character",
+      "fake_only": true
     }
   ]
 }

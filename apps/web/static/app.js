@@ -146,12 +146,31 @@ async function sendMessage() {
   if (!text.trim() && !state.pending.length) return;
   if (!state.currentId) await createSession(false);
   const attachments = state.pending.slice();
+  input.value = "";
+  state.pending = [];
+  await runTurn(`/api/sessions/${state.currentId}/messages`, {
+    text,
+    attachments: attachments.map((item) => ({ handle: item.handle })),
+    ...(document.querySelector("#multi-agent").checked ? { mode: "multi" } : {}),
+  }, text.trim(), attachments);
+}
+
+// #53 定制角色表单：同样的流式回合，只是请求发到 /character，不经过对话模型。
+async function sendCharacter(body, label) {
+  if (state.sending) return false;
+  if (!state.currentId) await createSession(false);
+  await runTurn(`/api/sessions/${state.currentId}/character`, body, label, []);
+  return true;
+}
+window.sendCharacter = sendCharacter;
+
+async function runTurn(url, body, userText, attachments) {
   state.stopped = false;
   state.sending = true;
   state.session.messages.push({
     message_id: "local-user",
     role: "user",
-    text: text.trim(),
+    text: userText,
     status: "completed",
     error: null,
     attachments,
@@ -165,19 +184,13 @@ async function sendMessage() {
     events: [],
     runtime: [],
   });
-  input.value = "";
-  state.pending = [];
   showNote("");
   render();
   try {
-    const response = await fetch(`/api/sessions/${state.currentId}/messages`, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        attachments: attachments.map((item) => ({ handle: item.handle })),
-        ...(document.querySelector("#multi-agent").checked ? { mode: "multi" } : {}),
-      }),
+      body: JSON.stringify(body),
     });
     if (!response.ok || !response.body) {
       const problem = await response.json().catch(() => ({}));
