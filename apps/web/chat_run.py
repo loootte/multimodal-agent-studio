@@ -41,7 +41,7 @@ from packages.contracts.events import (
 from services import telemetry
 from services.gateway import GatewayError, egress, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
-from services.runtime.tools import egress_preview, tool_mutates
+from services.runtime.tools import authorize as authorize_tool, egress_preview, tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
@@ -988,7 +988,12 @@ def _follow_local_tool(app, session_id, message_id, run, provider, user_text, to
 
 def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None:
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
-    if name == "list_local_content":
+    denied = authorize_tool(name) if name in ("list_local_content", "retrieve_local", "forget_local_content") else None
+    ok = denied is None
+    if denied:  # 12.D：清单没声明它要的权限（例如被改过），不碰会话存储
+        result = denied
+        arguments = {}
+    elif name == "list_local_content":
         try:
             items = app.sessions.list_content(session_id)
         except StoreError:
@@ -1016,10 +1021,10 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         result = execute_tool(name, arguments)
     else:
         return None
-    telemetry.record("tool", name=name, ms=0, ok=True, via="web")
+    telemetry.record("tool", name=name, ms=0, ok=ok, via="web", error_code=None if ok else "permission_denied")
     _emit_runtime(
         app, session_id, message_id, run,
-        {"kind": "tool", "name": name, "ms": 0, "ok": True},
+        {"kind": "tool", "name": name, "ms": 0, "ok": ok},
         persist=True,
     )
     _push_saved(app, session_id, message_id, run, {
@@ -1027,7 +1032,7 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         "tool": name,
         "arguments": arguments,
         "result": result,
-        "status": "success",
+        "status": "success" if ok else "failed",
         "message_id": message_id,
         "run_id": run.run_id,
     })
@@ -1219,6 +1224,9 @@ def _finish_image_inner(app, session_id: str, message_id: str, run: Run, text: s
 
 
 def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict:
+    denied = authorize_tool(name)  # 12.D：宿主执行器按清单降权，越权返回 permission_denied，不执行
+    if denied:
+        return denied
     if name == "stage_prompt":
         return _execute_stage_prompt(app, session_id, run, arguments)
     if name == "plan_images":

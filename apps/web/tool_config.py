@@ -432,7 +432,12 @@ def install(store: ToolConfigStore) -> None:
     comfy_poc.CONFIG_OVERLAY = comfy_overlay
     import comfy_client
 
-    _packs().CONFIG_SOURCE = lambda name: store.effective(name) if _ACTIVE is store and name in tool_declarations() else {}
+    packs = _packs()
+    from tools import sandbox
+
+    # 12.D：tools.json 所在的数据目录（会话、句柄、审计都在这里）对第三方包的沙箱一律不可读写。
+    sandbox.DATA_DIR = os.path.dirname(os.path.abspath(store.path))
+    packs.CONFIG_SOURCE = lambda name: store.effective(name) if _ACTIVE is store and name in tool_declarations() else {}
     comfy_client.TOKEN_SOURCE = lambda: store.effective("comfyui").get("auth_token") if _ACTIVE is store else None
 
 

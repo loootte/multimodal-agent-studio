@@ -66,12 +66,25 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 错误码拆为 `local_content`（明文 / 规范化命中）、`local_content_encoded`（解码后命中）、`egress_policy_denied`（策略不符或适配器没走中间件）；都不可重试，遥测记 `security.egress_denied`。
 - 统一出口中间件：注册时要求 `audits_egress = True` 或 `offline = True`；网关预检一次，并在适配器产出第一个事件前核对已开 ticket。
 
+### 12.D 实现定稿的沙箱
+
+细节见 [tool-sandbox.md](../tool-sandbox.md)。
+
+- 第三方包每次调用起一个子进程（`python -I -B -X utf8 poc/tools/sandbox_runner.py`），JSON 行协议；子进程装 `sys.addaudithook` 钩子强制权限：没 `network` 拦所有连接和域名解析；写只许临时目录和（授权 `write_files` 后）`<data_dir>/toolpack_data/<名字>/`；数据目录禁读禁列；起进程、ctypes 拒绝。超时 `MAS_TOOLPACK_TIMEOUT_SEC`（默认 30 秒）。
+- 环境变量白名单 + 配置显式注入：子进程拿不到 API key、令牌；密钥只经 `config`。
+- 出网：子进程每次连接经 IPC 问宿主。宿主裁决（无 `network` → `permission_denied`；回环 / 未指定 / 链路本地 / 解析不出 → `egress_policy_denied`；其余放行）并记 12.A 审计，新渠道 `toolpack`（策略不透明：只看权限和目的地，不看载荷），记录新增 `tool` 字段。
+- 越权结果：`permission_denied` 带 `violations`（`network` / `write_files` / `read_local_content` / `process` / `native`），不写 `executed`，遥测 `security.sandbox_denied`。另有 `tool_timeout`、`tool_error`、`sandbox_error`；进程内装载第三方代码报 `sandbox_required`。
+- 运行时二次核对：授权记录升级为 `mas.grant/2`（权限 + 版本 + 包内容摘要）；缺失、旧格式、内容被改都是 `permission_denied`（`grant: missing / outdated / changed`）。生效权限 = 声明 ∩ 授权。内置工具收紧为名单 `HOST_TOOLS` / `BUILTIN_PYTHON`（各自写明需要的权限，需要 ⊆ 声明 ⊆ 授权），内置模块必须在 `poc/tools/internal/`。
+- 安装前权限审阅：`inspect` 返回 `review`，网页逐项勾选后才能安装。
+- 例外：内置工具不进沙箱；`generate_image` / `generate_video` 访问本机 ComfyUI 是唯一允许的本机出网，仍走 12.A 审计和 12.C 策略。
+- 局限：审计钩子是 Python 层尽力而为，C 扩展可绕过；操作系统级隔离（Job Object / seccomp / namespace）和第三方包的句柄 API 留作后续。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
 - 网关适配器必须挂同一出口钩子，否则评测失败。
 - 过严的指纹匹配可能误伤短句巧合——实现侧用「已入库指纹 + 长度阈值」，UI 只说明原因码、不回显正文。
-- 完整进程沙箱、落盘加密不在本 ADR 范围，见 12.D / 12.F。
+- 12.D 的子进程沙箱见上；操作系统级隔离和落盘加密不在本 ADR 范围，见后续与 12.F。
 
 ## 未决（接受前拍板）
 

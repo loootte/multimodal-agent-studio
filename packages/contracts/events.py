@@ -40,7 +40,8 @@ EGRESS_EVENTS = (EVENT_EGRESS_PLANNED, EVENT_EGRESS_BLOCKED, EVENT_EGRESS_SENT, 
 EGRESS_SCHEMA = "mas.egress/1"
 # 出站渠道：对话模型、第三方出图、ComfyUI 提交（通常在本机）。
 # other 是给未登记出口留的渠道名：策略为空，一律 egress_policy_denied（12.C #59）。
-EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local", "other")
+# toolpack（12.D #60）：第三方工具包在沙箱子进程里自己发起的连接。宿主看不到载荷，只按权限和目的地裁决、记主机名。
+EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local", "toolpack", "other")
 # 目的地范围：本机回环、局域网（私有地址）、第三方。
 EGRESS_SCOPES = ("local", "lan", "third_party")
 # 审计记录允许出现的全部字段。新增字段先在这里登记，并确认它不是正文、提示词、密钥或路径。
@@ -49,7 +50,7 @@ EGRESS_FIELDS = (
     "modality", "char_count", "byte_count", "message_count", "tool_contract_bytes",
     "contains_local_derived", "content_fingerprint", "handle_id_prefix", "model",
     "session_id", "trace_id", "run_id", "agent_run_id", "reason_code", "http_status",
-    "policy", "exempt_bytes",
+    "policy", "exempt_bytes", "tool",
 )
 
 # 出站策略（12.C #59）。fields：允许出现的顶层字段；exempt：豁免本地正文检查的字段（工具契约），字节数记进 exempt_bytes；
@@ -73,6 +74,14 @@ EGRESS_POLICIES = {
         "exempt": (),
         "raw_upload": True,
     },
+    # 不透明出口：载荷在子进程里，宿主只裁决「有没有 network 授权、是不是回环地址」。没有 network 授权的包一律拒绝。
+    "toolpack": {
+        "fields": (),
+        "exempt": (),
+        "opaque": True,
+        "requires_permission": "network",
+        "deny_loopback": True,
+    },
     "other": None,
 }
 # 这些键的值是结构标记（角色、类型、模型名、编号），不当作正文参与短正文全文匹配。
@@ -95,6 +104,7 @@ EGRESS_REASONS = {
     "handle_forbidden": "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
     "local_content_encoded": "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
     "egress_policy_denied": "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
+    "permission_denied": "这个工具包没有联网权限（或试图连本机地址），已在沙箱里拦下，没有打开连接。",
 }
 
 # 句柄（ADR 0009，路线图 12.B #58）：本地内容句柄是短时能力令牌，绑定会话、用途（purpose）、可选运行和过期时间。

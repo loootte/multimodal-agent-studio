@@ -34,6 +34,12 @@
 | 2.4 | 工具参数先过 schema 校验再执行；不合法参数返回错误，不执行 | 自动：`apps/web/check.py` 的 `_runtime_invalid_schema` |
 | 2.5 | 新增工具时决定是否 `mutating`，并把它加进评测任务的 `mutating` 或 `read_only` 列表 | 人工（评审时） |
 | 2.6 | 工具配置里的地址、令牌只在本机保存；令牌只以 Bearer 头发给 ComfyUI，不回显 | 自动：`apps/web/check.py` 的工具配置用例 |
+| 2.7 | 第三方工具包只在沙箱子进程里运行，不在网页服务进程里导入（`sandbox_required`）；内置宿主工具只限 `packs.HOST_TOOLS`，内置 Python 模块只限 `poc/tools/internal/` 下的 `packs.BUILTIN_PYTHON`（#60） | 自动：`apps/web/check.py` 的 `_sandbox_cases`；人工：新增内置工具时把它和需要的权限写进名单 |
+| 2.8 | 没授权 `network` 的包联网（直接 socket、域名解析、urllib，包括自己吞掉异常的）被拦，返回 `permission_denied`，出站审计记 `toolpack` 渠道的 `egress.blocked`；授权了也不能连本机地址（`egress_policy_denied`）（#60） | 自动：`security.sandbox_network_denied`；`_sandbox_cases` |
+| 2.9 | 没授权 `write_files` 的包只能写临时目录；授权后只多自己的数据目录；数据目录（会话、句柄、配置、审计）不能直接读或列，本地内容只经句柄 API；起子进程、ctypes 拒绝（#60） | 自动：`security.sandbox_write_denied`、`security.sandbox_session_read_denied`；`_sandbox_cases` |
+| 2.10 | 子进程拿不到宿主环境变量里的 API key、令牌；工具配置（含密钥）只经 `config` 显式注入，且不出现在模型请求里（#60） | 自动：`security.sandbox_env_isolated` |
+| 2.11 | 运行时复核：授权记录绑定权限和包内容摘要；装后改包、旧格式授权、权限超出授权都返回 `permission_denied` 不执行；内置工具 需要 ⊆ 声明 ⊆ 授权（#60） | 自动：`security.permission_manifest_changed`；`_sandbox_cases` |
+| 2.12 | 安装前网页展示权限审阅（每项说明、风险、沙箱限制），逐项勾选后才能安装 | 自动：`_sandbox_cases` 的页面检查；人工：装一个要 `network` 的包，看审阅内容 |
 
 ## 3. 提示注入
 

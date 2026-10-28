@@ -167,31 +167,28 @@ def _internal(pack) -> Tool | None:
 
     if pack.manifest["entry"]["kind"] != "python":
         return None
-    module = packs.load_module(pack)
     if pack.builtin:
+        module = packs.load_module(pack)
         for item in module.tools():
             if isinstance(item, Tool) and item.name == pack.name:
                 item.pack = pack
                 return item
         raise ToolSpecError(f"{pack.module_path()} 没有导出 {pack.name}。")
-    call = getattr(module, "call", None)
-    if not callable(call):
-        raise ToolSpecError(f"工具包 {pack.name} 的入口没有 call(arguments, config)。")
+    # 第三方包（12.D #60）：代码不在宿主进程里 import（连模块顶层代码都不跑），每次调用在沙箱子进程里执行。
+    if not os.path.isfile(pack.module_path() or ""):
+        raise ToolSpecError(f"工具包 {pack.name} 的入口文件不存在。")
     parameters = packs.resolve_parameters(pack)
 
     def validate(arguments, _pack=pack, _parameters=parameters):
         return packs.gate(_pack) or check_schema(_pack.name, _parameters, arguments)
 
-    def run(arguments, _pack=pack, _call=call, _validate=validate):
+    def run(arguments, _pack=pack, _validate=validate):
+        from tools import sandbox
+
         problem = _validate(arguments)
         if problem:
             return problem
-        try:
-            result = _call(dict(arguments), packs.config_for(_pack))
-        except Exception as exc:  # 第三方工具包出错不拖垮整轮对话
-            return tool_error(_pack.name, "tool_error", f"工具运行出错（{type(exc).__name__}）。")
-        if not isinstance(result, dict):
-            return tool_error(_pack.name, "tool_error", "工具没有返回对象。")
+        result = sandbox.run(_pack, dict(arguments), packs.config_for(_pack), _pack.effective())
         result.setdefault("tool", _pack.name)
         result.setdefault("ok", True)
         return result
@@ -200,6 +197,7 @@ def _internal(pack) -> Tool | None:
                 order=pack.manifest.get("order", 1000), mutating=pack.manifest["mutating"],
                 validate=validate, call=run)
     tool.pack = pack
+    tool.sandboxed = True
     return tool
 
 

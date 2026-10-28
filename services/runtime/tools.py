@@ -14,10 +14,31 @@ def _ensure() -> None:
         sys.path.append(POC)
 
 
+def authorize(name: str) -> dict | None:
+    """12.D（#60）每次调用前的二次核对：工具要用的权限 ⊆ 清单声明 ⊆ 授权记录，第三方包的授权还要绑定包内容。
+
+    返回 None 放行；否则是 permission_denied 的工具结果（不执行）。不认识的工具交给后面的 unknown_tool。
+    网页宿主的 host 工具（_execute_web_tool）和这里的 python 工具都先过它。
+    """
+    _ensure()
+    from tools import packs
+
+    try:
+        pack = packs.find(name)
+    except packs.PackError as exc:
+        return {"ok": False, "tool": name, "executed": False, "error": {"code": exc.code, "message": exc.message}}
+    if pack is None:
+        return None
+    return packs.authorize(pack)
+
+
 def execute_tool(name: str, arguments: dict) -> dict:
     _ensure()
     from tools.registry import audience_tools, call_tool, validate_external, validate_tool
 
+    denied = authorize(name)
+    if denied:
+        return denied
     if any(item.name == name for item in audience_tools("internal")):
         problem = validate_tool(name, arguments)
         if problem:
@@ -75,6 +96,7 @@ def egress_preview(name: str, arguments=None) -> dict:
         "network": bool(permissions.get("network")),
         "reads_local": bool(permissions.get("read_local_content")),
         "sends_local_to_model": bool(permissions.get("send_local_to_model")),
+        "sandboxed": bool(pack is not None and not pack.builtin),
     }
 
 

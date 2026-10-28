@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -40,6 +41,42 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _FIELDS = {"schema", "name", "version", "description", "order", "parameters", "mutating", "confirm",
            "confirm_args", "entry", "config", "requires", "permissions", "parameter_sources", "mcp"}
+
+# 内置工具名单（12.D #60）：只有这些名字能用 entry.kind=host 或仓库里的 python 模块，在宿主进程里跑。
+# 值是这个工具实际要用的权限：运行时二次核对「清单声明 ⊇ 实际需要」，清单少声明了就 permission_denied。
+HOST_TOOLS = {
+    "accept_local_content": frozenset({"read_local_content", "write_files"}),
+    "list_local_content": frozenset({"read_local_content"}),
+    "forget_local_content": frozenset({"read_local_content", "write_files"}),
+    "retrieve_local": frozenset({"read_local_content"}),
+    "build_skill_page": frozenset({"write_files"}),
+    "plan_images": frozenset(),
+    "stage_prompt": frozenset(),
+    "character_image": frozenset(),
+}
+BUILTIN_PYTHON = {
+    "generate_image": frozenset({"network", "read_local_content", "write_files"}),
+    "generate_video": frozenset({"network", "read_local_content", "write_files"}),
+    "lookup_demo": frozenset(),
+    "read_skill": frozenset(),
+}
+BUILTIN_MODULES = "poc/tools/internal/"
+GRANT_SCHEMA = "mas.grant/2"
+# 每种权限给人看的说明（安装前的权限审阅界面显示这些）。
+PERMISSION_REVIEW = {
+    "network": ("联网", "high", "可以连接互联网或局域网上的服务（不能连本机地址）。每次连接的主机名记进「数据出站」。"),
+    "write_files": ("写文件", "medium", "可以在它自己的数据目录里写文件（data/toolpack_data/<名字>/），别处不能写。"),
+    "read_local_content": ("读本地内容", "high",
+                           "第三方工具包暂时拿不到本地内容：沙箱禁止它直接读会话和数据目录，句柄接口还没开放给第三方包。"),
+    "send_local_to_model": ("把本地内容发给模型", "forbidden", "不允许。"),
+}
+SANDBOX_FACTS = (
+    "在单独的子进程里运行，超时会被停止。",
+    "拿不到你电脑上的环境变量（API key、令牌）；它的配置和密钥由本程序显式传给它。",
+    "不能读会话、本地内容和配置文件；本地内容只能经句柄接口。",
+    "不能启动别的程序，不能加载原生库。",
+    "没有联网权限时，任何联网尝试都会被拦下并记进「数据出站」。",
+)
 
 # 由 apps/web/tool_config.install 设置：name -> 生效配置（含密钥）。没有时用清单默认值。
 CONFIG_SOURCE = None
@@ -118,6 +155,11 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
         problems.append("entry.kind 只能是 python 或 host。")
     elif entry["kind"] == "host" and not builtin:
         problems.append("只有内置工具可以用 entry.kind=host。")
+    elif entry["kind"] == "host" and data.get("name") not in HOST_TOOLS:
+        problems.append("entry.kind=host 只限内置工具名单（packs.HOST_TOOLS）。")
+    elif entry["kind"] == "python" and builtin and (
+            data.get("name") not in BUILTIN_PYTHON or not str(entry.get("module") or "").startswith(BUILTIN_MODULES)):
+        problems.append(f"内置 python 工具只限名单（packs.BUILTIN_PYTHON），模块要在 {BUILTIN_MODULES} 下。")
     elif entry["kind"] == "python":
         module = entry.get("module")
         if not isinstance(module, str) or not module.endswith(".py"):
@@ -192,15 +234,41 @@ class Pack:
     def name(self) -> str:
         return self.manifest["name"]
 
-    def granted(self) -> set:
-        if self.builtin:
-            return {key for key, value in self.manifest["permissions"].items() if value}
+    def declared(self) -> set:
+        return {key for key, value in self.manifest["permissions"].items() if value is True}
+
+    def grant_record(self) -> dict:
         try:
             with open(os.path.join(self.folder, GRANTS), encoding="utf-8") as handle:
                 data = json.load(handle)
         except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def grant_state(self) -> str:
+        """ok / missing（没有授权记录）/ outdated（12.D 之前装的，没有指纹）/ changed（装好后包被改过）。"""
+        if self.builtin:
+            return "ok"
+        record = self.grant_record()
+        if not record:
+            return "missing"
+        if not record.get("digest"):
+            return "outdated"
+        if record.get("digest") != pack_digest(self.folder):
+            return "changed"
+        return "ok"
+
+    def granted(self) -> set:
+        if self.builtin:
+            return self.declared()
+        if self.grant_state() != "ok":
             return set()
-        return set(data.get("permissions") or []) if isinstance(data, dict) else set()
+        perms = self.grant_record().get("permissions") or []
+        return {p for p in perms if p in PERMISSIONS} if isinstance(perms, list) else set()
+
+    def effective(self) -> set:
+        """生效权限 = 清单声明 ∩ 授权记录。沙箱只按这个放行。"""
+        return self.declared() & self.granted()
 
     def module_path(self) -> str | None:
         entry = self.manifest["entry"]
@@ -208,6 +276,21 @@ class Pack:
             return None
         base = ROOT if self.builtin else self.folder
         return os.path.normpath(os.path.join(base, entry["module"]))
+
+
+def pack_digest(folder: str) -> str:
+    """包内容指纹：除授权记录、缓存和点文件以外所有文件的相对路径和字节。装好后改了任何文件（包括 tool.json）都会变。"""
+    digest = hashlib.sha256()
+    for base, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in _export_ignore(base, dirs))
+        for filename in sorted(files):
+            if filename in _export_ignore(base, [filename]):
+                continue
+            full = os.path.join(base, filename)
+            digest.update(os.path.relpath(full, folder).replace(os.sep, "/").encode("utf-8") + b"\0")
+            with open(full, "rb") as handle:
+                digest.update(hashlib.sha256(handle.read()).digest())
+    return digest.hexdigest()
 
 
 def _read(path: str):
@@ -293,8 +376,51 @@ def missing_dependencies(pack: Pack) -> list[str]:
 
 
 def denied_permissions(pack: Pack) -> list[str]:
-    wanted = {key for key, value in pack.manifest["permissions"].items() if value}
-    return sorted(wanted - pack.granted())
+    return sorted(pack.declared() - pack.granted())
+
+
+GRANT_TEXT = {
+    "missing": "没有授权记录，请重新安装并确认权限。",
+    "outdated": "这个包是旧版本装的，授权没有绑定包内容，请重新安装并确认权限。",
+    "changed": "装好以后包里的文件被改过，授权作废，请重新安装并确认权限。",
+}
+
+
+def needed_permissions(pack: Pack) -> set:
+    """内置工具实际要用的权限（名单里写死）。第三方包的需要就是它声明的。"""
+    if pack.builtin:
+        return set(HOST_TOOLS.get(pack.name, BUILTIN_PYTHON.get(pack.name, frozenset({"__unlisted__"}))))
+    return pack.declared()
+
+
+def authorize(pack: Pack) -> dict | None:
+    """12.D 运行时二次核对：要用的权限 ⊆ 清单声明 ⊆ 授权记录，授权绑定的包内容没变。不过关返回 permission_denied。"""
+    state = pack.grant_state()
+    if state != "ok":
+        return {"ok": False, "tool": pack.name, "executed": False,
+                "error": {"code": "permission_denied", "message": GRANT_TEXT[state], "grant": state}}
+    needed = needed_permissions(pack)
+    over = sorted(needed - pack.declared())
+    if over:
+        return {"ok": False, "tool": pack.name, "executed": False,
+                "error": {"code": "permission_denied",
+                          "message": f"清单没有声明 {'、'.join(over)}，不能执行。", "denied": over}}
+    denied = denied_permissions(pack)
+    if denied:
+        return {"ok": False, "tool": pack.name, "executed": False,
+                "error": {"code": "permission_denied", "message": f"没有授权：{'、'.join(denied)}。", "denied": denied}}
+    return None
+
+
+def review(data: dict) -> dict:
+    """安装前的权限审阅：每个权限的白话说明和风险，加上沙箱会怎样限制它。"""
+    wanted = sorted(k for k, v in (data.get("permissions") or {}).items() if v is True and k in PERMISSIONS)
+    items = []
+    for key in wanted:
+        label, risk, effect = PERMISSION_REVIEW[key]
+        items.append({"permission": key, "label": label, "risk": risk, "effect": effect})
+    denied = [PERMISSION_REVIEW[k][0] for k in PERMISSIONS if k not in wanted and k != "send_local_to_model"]
+    return {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
 
 
 def gate(pack: Pack) -> dict | None:
@@ -303,11 +429,7 @@ def gate(pack: Pack) -> dict | None:
     if missing:
         return {"ok": False, "tool": pack.name, "executed": False,
                 "error": {"code": "dependency_missing", "message": f"缺少依赖：{'、'.join(missing)}。", "missing": missing}}
-    denied = denied_permissions(pack)
-    if denied:
-        return {"ok": False, "tool": pack.name, "executed": False,
-                "error": {"code": "permission_denied", "message": f"没有授权：{'、'.join(denied)}。", "denied": denied}}
-    return None
+    return authorize(pack)
 
 
 def needs_confirm(pack: Pack, arguments=None) -> bool:
@@ -322,28 +444,25 @@ def needs_confirm(pack: Pack, arguments=None) -> bool:
 
 
 def load_module(pack: Pack):
+    """只装载内置工具的模块。第三方包的代码一律不进宿主进程（12.D），由 tools/sandbox.py 在子进程里跑。"""
+    if not pack.builtin:
+        raise PackError("sandbox_required", f"{pack.name} 是第三方工具包，只能在沙箱子进程里运行。")
     path = pack.module_path()
     if not path or not os.path.isfile(path):
         raise PackError("dependency_missing", f"{pack.name} 的入口文件不存在。")
     key = (path, os.path.getmtime(path))
     if key in _modules:
         return _modules[key]
-    if pack.builtin:
-        stem = os.path.splitext(os.path.basename(path))[0]
-        full_name = f"tools.internal.{stem}"
-        prefix = "tools.internal"
-    else:
-        full_name = f"toolpacks_installed.{pack.name}"
-        prefix = None
-    if full_name in sys.modules and pack.builtin:
+    stem = os.path.splitext(os.path.basename(path))[0]
+    full_name = f"tools.internal.{stem}"
+    if full_name in sys.modules:
         loaded = sys.modules[full_name]
     else:
         spec = importlib.util.spec_from_file_location(full_name, path)
         if spec is None or spec.loader is None:
             raise PackError("invalid_manifest", f"无法装载 {path}。")
         loaded = importlib.util.module_from_spec(spec)
-        if prefix:
-            loaded.__package__ = prefix
+        loaded.__package__ = "tools.internal"
         sys.modules[full_name] = loaded
         try:
             spec.loader.exec_module(loaded)
@@ -417,7 +536,8 @@ def inspect(source: str) -> dict:
                 problems.append("entry.module 指向的文件不在包里。")
         summary = {"name": data.get("name"), "version": data.get("version"), "description": data.get("description"),
                    "permissions": sorted(k for k, v in (data.get("permissions") or {}).items() if v is True),
-                   "requires": data.get("requires") or {}, "problems": problems}
+                   "requires": data.get("requires") or {}, "problems": problems,
+                   "review": review(data) if isinstance(data, dict) else None}
         if not problems:
             if find(data["name"]) is not None and not os.path.isdir(os.path.join(installed_dir(), data["name"])):
                 summary["problems"] = problems = ["和内置工具重名。"]
@@ -447,8 +567,10 @@ def install(source: str, accept_permissions) -> dict:
         staging = target + ".installing"
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(folder, staging, ignore=_export_ignore)
+        record = {"schema": GRANT_SCHEMA, "permissions": wanted, "version": summary["version"],
+                  "digest": pack_digest(staging)}
         with open(os.path.join(staging, GRANTS), "w", encoding="utf-8") as handle:
-            json.dump({"permissions": wanted, "version": summary["version"]}, handle)
+            json.dump(record, handle)
         shutil.rmtree(target, ignore_errors=True)
         os.replace(staging, target)
     finally:
@@ -499,4 +621,6 @@ def summary(pack: Pack) -> dict:
         "denied": denied_permissions(pack), "missing": missing_dependencies(pack),
         "backends": list((m.get("requires") or {}).get("backends") or []),
         "configurable": bool(m.get("config")),
+        "sandbox": "host" if pack.builtin else "subprocess",
+        "grant": pack.grant_state(),
     }

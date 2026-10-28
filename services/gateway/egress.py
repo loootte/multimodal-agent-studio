@@ -471,6 +471,25 @@ def blocked(channel: str, url, reason_code: str, *, local_derived: bool | None =
     return Ticket(channel, url, local_derived=local_derived, handle=handle).blocked(reason_code)
 
 
+def toolpack_connect(tool: str, host: str, *, allowed: bool, reason_code: str | None = None) -> Ticket:
+    """12.D：沙箱里的第三方工具包要连某个主机。宿主看不到载荷，只记工具名、主机名和裁决。
+
+    放行记 planned + sent（sent 表示「连接已放行」，不代表对方收到了什么）；拒绝记 blocked 并记安全事件。
+    host 只取主机名或 IP，不带端口以外的任何东西。"""
+    host = str(host or "").strip()[:253]
+    ticket = Ticket("toolpack", "//" + (f"[{host}]" if ":" in host else host) if host else "", local_derived=False)
+    if isinstance(tool, str) and tool:
+        ticket.base["tool"] = tool[:48]
+    if not allowed:
+        ticket.reason_code = reason_code or "permission_denied"
+        ticket.hit = True
+        ticket.blocked(ticket.reason_code)
+        security_event(ticket.reason_code, "toolpack")
+        return ticket
+    ticket.planned()
+    return ticket.sent()
+
+
 def emit(kind: str, base: dict, **extra) -> dict:
     trace_id = telemetry.current()
     run_id = telemetry.current_run() or trace_id

@@ -363,6 +363,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("lookup_demo", {"topic": "runtime"})
             return
+        if mode == "probe":  # 12.D：模型调用装好的探针工具包，参数来自 server.probe
+            if self._tool_result_count("sandbox_probe"):
+                self._piece(_delta(content="探针完成"))
+                self._done()
+                return
+            self._emit_tool("sandbox_probe", dict(getattr(self.server, "probe", None) or {"act": "scratch"}))
+            return
         if mode == "confirm":
             user = self._last_user()
             if "工具结果" in user or "需要确认" in user:
@@ -630,6 +637,7 @@ def self_check() -> None:
         _runtime_cases()
         _skill_cases()
         _toolpack_cases()
+        _sandbox_cases()
         _agent_cases()
         _tool_pack_guide_cases()
         _live()
@@ -5264,6 +5272,189 @@ def _toolpack_cases() -> None:
         shutil.rmtree(source, ignore_errors=True)
     if set(item["function"]["name"] for item in openai_tools()) != BUILTIN_TOOLS - {"generate_video"}:
         fail("测试装的工具包没有清干净")
+
+
+PROBE = os.path.join(ROOT, "evals", "fixtures", "sandbox_probe")
+
+
+def _sandbox_module():
+    _packs_module()
+    from tools import sandbox
+
+    return sandbox
+
+
+def _probe_copy(folder: str, name: str = "sandbox_probe", **permissions) -> str:
+    """把探针包拷一份，按需改名和改权限声明。"""
+    target = os.path.join(folder, name)
+    shutil.copytree(PROBE, target)
+    with open(os.path.join(target, "tool.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    manifest["name"] = name
+    manifest["permissions"].update(permissions)
+    with open(os.path.join(target, "tool.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False)
+    return target
+
+
+def _sandbox_cases() -> None:
+    """12.D #60：第三方包在子进程里跑；没授权的联网、写别处、读数据目录、起进程都被拦成 permission_denied；
+    环境变量不继承、配置显式注入；授权绑定包内容；内置工具名单和运行时二次核对。"""
+    packs = _packs_module()
+    sandbox = _sandbox_module()
+    from services.gateway import egress
+    from services.runtime.tools import authorize, execute_tool
+
+    # 内置工具名单：host 入口只给名单里的名字；内置 python 模块必须在名单里、在 poc/tools/internal/ 下。
+    host = _pack_manifest("rogue_host", entry={"kind": "host"})
+    if not any("名单" in item for item in packs.validate_manifest(host, builtin=True)):
+        fail(f"不在名单里的 host 工具没有被拒绝：{packs.validate_manifest(host, builtin=True)}")
+    outside = _pack_manifest("lookup_demo", entry={"kind": "python", "module": "toolpacks/examples/dice_roll/tool.py"})
+    if not packs.validate_manifest(outside, builtin=True):
+        fail("内置 python 工具的模块不在 poc/tools/internal/ 也通过了")
+    for name, needs in packs.HOST_TOOLS.items():
+        pack = packs.find(name)
+        if pack is None or not pack.builtin:
+            fail(f"名单里的内置工具 {name} 不存在")
+        if not needs <= pack.declared():
+            fail(f"{name} 的清单少声明了实际要用的权限：{sorted(needs - pack.declared())}")
+        if authorize(name) is not None:
+            fail(f"内置工具 {name} 没通过运行时核对：{authorize(name)}")
+    # 清单少声明 → 运行时 permission_denied（模拟有人把内置清单的权限删了）。
+    real = packs.find("list_local_content")
+    shrunk = packs.Pack(dict(real.manifest, permissions=dict(real.manifest["permissions"], read_local_content=False)),
+                        real.folder, True)
+    denied = packs.authorize(shrunk)
+    if not denied or denied["error"]["code"] != "permission_denied" or denied["error"].get("denied") != ["read_local_content"]:
+        fail(f"内置工具清单少声明权限时没有 permission_denied：{denied}")
+    if authorize("no_such_tool") is not None:
+        fail("未知工具的核对应该交给原来的 unknown_tool 处理")
+
+    folder = tempfile.mkdtemp(prefix="sandbox-packs-")
+    source = tempfile.mkdtemp(prefix="sandbox-src-")
+    data = tempfile.mkdtemp(prefix="sandbox-data-")
+    saved = {name: os.environ.get(name) for name in ("MAS_TOOLPACKS_DIR", "OPENAI_API_KEY", "MAS_FAKE_TOKEN")}
+    saved_data, saved_egress = sandbox.DATA_DIR, egress.path()
+    os.environ["MAS_TOOLPACKS_DIR"] = folder
+    os.environ["OPENAI_API_KEY"] = SECRET
+    os.environ["MAS_FAKE_TOKEN"] = "tok-should-not-leak"
+    sandbox.DATA_DIR = data
+    audit = os.path.join(data, "egress.jsonl")
+    egress.configure(audit)
+    session_file = os.path.join(data, "sessions", "s_probe.json")
+    os.makedirs(os.path.dirname(session_file))
+    with open(session_file, "w", encoding="utf-8") as handle:
+        handle.write('{"secret": "LOCAL-SANDBOX-SECRET"}')
+    try:
+        info = packs.inspect(PROBE)
+        review = info.get("review") or {}
+        if info.get("problems") or review.get("mode") != "subprocess" or not review.get("sandbox") or review.get("permissions"):
+            fail(f"安装前的权限审阅不对：{info}")
+        packs.install(_probe_copy(source), [])
+        pack = packs.find("sandbox_probe")
+        if pack.grant_state() != "ok" or packs.summary(pack).get("sandbox") != "subprocess":
+            fail(f"探针包装好后授权或沙箱标记不对：{packs.summary(pack)}")
+        try:
+            packs.load_module(pack)
+        except packs.PackError as exc:
+            if exc.code != "sandbox_required":
+                fail(f"第三方包进宿主进程的错误码不对：{exc.code}")
+        else:
+            fail("第三方包的代码被装进了宿主进程")
+        # 正常：临时目录可写；环境变量不继承；配置显式注入。
+        if execute_tool("sandbox_probe", {"act": "scratch"}).get("ok") is not True:
+            fail("沙箱里写临时目录被拦了")
+        saved_source = packs.CONFIG_SOURCE
+        packs.CONFIG_SOURCE = lambda name: {"api_key": "probe-config-key"} if name == "sandbox_probe" else {}
+        try:
+            env = execute_tool("sandbox_probe", {"act": "env"})
+        finally:
+            packs.CONFIG_SOURCE = saved_source
+        if env.get("leaked") != [] or env.get("has_config_key") is not True or env.get("sandbox") != sandbox.SCHEMA:
+            fail(f"子进程继承了环境变量或没收到配置：{env}")
+        # 越权：每一种都是 permission_denied，带越权种类，不带路径或正文。
+        cases = {
+            "net": "network", "net_host": "network", "swallow_net": "network",
+            "write_out": "write_files", "read_data": "read_local_content", "list_data": "read_local_content",
+            "spawn": "process",
+        }
+        for act, kind in cases.items():
+            target = session_file if act == "read_data" else os.path.dirname(session_file) if act == "list_data" else ""
+            arguments = {"act": act, **({"target": target} if target else {})}
+            result = execute_tool("sandbox_probe", arguments)
+            error = result.get("error") or {}
+            if error.get("code") != "permission_denied" or kind not in (error.get("violations") or []):
+                fail(f"沙箱没拦住 {act}：{result}")
+            if "LOCAL-SANDBOX-SECRET" in json.dumps(result, ensure_ascii=False) or data in json.dumps(result):
+                fail(f"{act} 的拒绝结果带出了正文或路径")
+        if os.path.exists(os.path.join(folder, "sandbox_probe", "escaped.txt")):
+            fail("没授权写文件的包写到了自己的安装目录")
+        with open(audit, encoding="utf-8") as handle:
+            records = [json.loads(line) for line in handle if line.strip()]
+        blocked = [r for r in records if r.get("channel") == "toolpack" and r["type"] == "egress.blocked"]
+        if not blocked or any(r.get("tool") != "sandbox_probe" or r.get("reason_code") != "permission_denied" for r in blocked):
+            fail(f"没授权的联网没有记进出站审计：{blocked}")
+        if not any(r.get("destination_host") == "203.0.113.7" for r in blocked) or SECRET in json.dumps(records):
+            fail(f"出站审计的主机名不对或带出了密钥：{[r.get("destination_host") for r in blocked]}")
+        # 授权了 network + write_files：回环地址仍拒绝（egress_policy_denied）；能写自己的数据目录；仍读不了会话。
+        packs.install(_probe_copy(source, "probe_net", network=True, write_files=True), ["network", "write_files"])
+        result = execute_tool("probe_net", {"act": "loopback", "port": 9})
+        if (result.get("error") or {}).get("violations") != ["network"]:
+            fail(f"有联网权限的包连上了本机回环地址：{result}")
+        with open(audit, encoding="utf-8") as handle:
+            last = [json.loads(line) for line in handle if line.strip()][-1]
+        if last.get("reason_code") != "egress_policy_denied" or last.get("tool") != "probe_net":
+            fail(f"回环地址的拒绝原因不对：{last}")
+        if execute_tool("probe_net", {"act": "write_own"}).get("ok") is not True:
+            fail("授权了 write_files 的包写不了自己的数据目录")
+        if not os.path.isfile(os.path.join(data, "toolpack_data", "probe_net", "note.txt")):
+            fail("包自己的数据目录里没有写出的文件")
+        result = execute_tool("probe_net", {"act": "read_data", "target": session_file})
+        if (result.get("error") or {}).get("code") != "permission_denied":
+            fail(f"有写权限的包读到了会话文件：{result}")
+        # 授权绑定包内容：装好后改代码 → permission_denied（grant=changed）；旧格式授权 → outdated。
+        with open(os.path.join(folder, "probe_net", "tool.py"), "a", encoding="utf-8") as handle:
+            handle.write("\n# changed after install\n")
+        result = execute_tool("probe_net", {"act": "scratch"})
+        if (result.get("error") or {}).get("grant") != "changed" or result.get("executed") is not False:
+            fail(f"装好后被改过的包还能跑：{result}")
+        with open(os.path.join(folder, "sandbox_probe", ".granted.json"), "w", encoding="utf-8") as handle:
+            json.dump({"permissions": []}, handle)
+        if (execute_tool("sandbox_probe", {"act": "scratch"}).get("error") or {}).get("grant") != "outdated":
+            fail("没有内容摘要的旧授权没有被拒绝")
+        packs.install(_probe_copy(os.path.join(source, "again")), [])
+        if execute_tool("sandbox_probe", {"act": "scratch"}).get("ok") is not True:
+            fail("重新安装后还是被拒")
+        # 超时：杀掉子进程，tool_timeout。
+        slow = _write_pack(source, _pack_manifest("probe_slow"), "import time\ndef call(arguments, config):\n    time.sleep(30)\n")
+        packs.install(slow, [])
+        os.environ["MAS_TOOLPACK_TIMEOUT_SEC"] = "1"
+        try:
+            result = execute_tool("probe_slow", {})
+        finally:
+            os.environ.pop("MAS_TOOLPACK_TIMEOUT_SEC", None)
+        if (result.get("error") or {}).get("code") != "tool_timeout":
+            fail(f"超时没有停下：{result}")
+    finally:
+        sandbox.DATA_DIR = saved_data
+        egress.configure(saved_egress)
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        for path in (folder, source, data):
+            shutil.rmtree(path, ignore_errors=True)
+    # 页面：安装前的权限审阅，逐项勾选后才能装；数据出站认得 toolpack 渠道。
+    script = open(os.path.join(WEB_DIR, "static", "app.js"), encoding="utf-8").read()
+    page = open(os.path.join(WEB_DIR, "static", "index.html"), encoding="utf-8").read()
+    for needle in ("showToolPackReview", "toolpack-perm", "accept_permissions: accepted", 'toolpack: "工具包"',
+                   "permission_denied", "在沙箱子进程"):
+        if needle not in script:
+            fail(f"页面缺少工具包权限审阅的部分：{needle}")
+    if 'id="toolpack-review"' not in page or "toolpack-review-accept" not in page:
+        fail("页面没有工具包权限审阅区")
+    print("sandbox ok")
 
 
 def _resources_case(base: str, provider, directory: str) -> None:

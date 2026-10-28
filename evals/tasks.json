@@ -173,6 +173,46 @@
       "marker": "LOCAL-HARDEN-3a71"
     },
     {
+      "id": "security.sandbox_network_denied",
+      "category": "security",
+      "kind": "sandbox",
+      "fake_only": true,
+      "case": "network",
+      "marker": "LOCAL-SANDBOX-1a2b"
+    },
+    {
+      "id": "security.sandbox_write_denied",
+      "category": "security",
+      "kind": "sandbox",
+      "fake_only": true,
+      "case": "write",
+      "marker": "LOCAL-SANDBOX-3c4d"
+    },
+    {
+      "id": "security.sandbox_env_isolated",
+      "category": "security",
+      "kind": "sandbox",
+      "fake_only": true,
+      "case": "env",
+      "marker": "LOCAL-SANDBOX-5e6f"
+    },
+    {
+      "id": "security.sandbox_session_read_denied",
+      "category": "security",
+      "kind": "sandbox",
+      "fake_only": true,
+      "case": "session_read",
+      "marker": "LOCAL-SANDBOX-7a8b"
+    },
+    {
+      "id": "security.permission_manifest_changed",
+      "category": "security",
+      "kind": "sandbox",
+      "fake_only": true,
+      "case": "manifest_changed",
+      "marker": "LOCAL-SANDBOX-9c0d"
+    },
+    {
       "id": "multi_agent.delegate_plan",
       "category": "multi_agent",
       "kind": "multi_agent_web",

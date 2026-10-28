@@ -156,6 +156,7 @@ Agent 运行时
 | --- | --- |
 | `poc/comfyui/agent_tools.py` | 本机工具的导入和命令入口。名单来自 `poc/tools/internal/` 的扫描。网页目前只调用 `generate_image` |
 | `poc/tools/registry.py`、`poc/tools/packs.py` | 只从 `toolpacks/` 清单注册工具，见 [tool-packs.md](tool-packs.md)。安装的包重启后可用 |
+| `poc/tools/sandbox.py`、`poc/tools/sandbox_runner.py` | 12.D：第三方工具包在子进程沙箱里运行，权限强制、环境变量白名单、出网经宿主裁决并记 `toolpack` 渠道审计，见 [tool-sandbox.md](tool-sandbox.md) |
 | `poc/tools/internal/image.py` | 本机 `generate_image`。参数含画面描述。会改外部状态 |
 | `poc/tools/internal/video.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图。会改外部状态 |
 | `poc/tools/internal/demo.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
@@ -207,7 +208,7 @@ Agent 运行时
 
 ### 出站审计（#57）
 
-`services/gateway/egress.py`：对话模型、第三方出图、ComfyUI 提交共用一个出口钩子，记 `egress.planned` / `blocked` / `sent` / `failed`（只有主机名、渠道、字节数、是否含本地派生、指纹前缀、运行标识和原因码，无正文和密钥）。写到 `<data_dir>/egress.jsonl`，同时存进助手消息的 `egress` 列表并经 SSE 推给页面「数据出站」时间线。确认卡附宿主生成的出站摘要。本机只读接口 `GET /api/egress`、`GET /api/egress/export`。审计写失败不打断主流程，告警并计数。说明见 [egress-audit.md](egress-audit.md)，决策见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md)。12.C（#59）起每个渠道按 `EGRESS_POLICIES` 只放行登记字段，内容检查做规范化、分片拼接和 base64 / 百分号解码，适配器必须挂这个出口钩子才能注册，见 [egress-policy.md](egress-policy.md)。
+`services/gateway/egress.py`：对话模型、第三方出图、ComfyUI 提交共用一个出口钩子，记 `egress.planned` / `blocked` / `sent` / `failed`（只有主机名、渠道、字节数、是否含本地派生、指纹前缀、运行标识和原因码，无正文和密钥）。写到 `<data_dir>/egress.jsonl`，同时存进助手消息的 `egress` 列表并经 SSE 推给页面「数据出站」时间线。确认卡附宿主生成的出站摘要。本机只读接口 `GET /api/egress`、`GET /api/egress/export`。审计写失败不打断主流程，告警并计数。说明见 [egress-audit.md](egress-audit.md)，决策见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md)。12.C（#59）起每个渠道按 `EGRESS_POLICIES` 只放行登记字段，内容检查做规范化、分片拼接和 base64 / 百分号解码，适配器必须挂这个出口钩子才能注册，见 [egress-policy.md](egress-policy.md)。12.D（#60）起沙箱里的第三方工具包每次连接也经这个钩子记账（渠道 `toolpack`），见 [tool-sandbox.md](tool-sandbox.md)。
 
 ### 轨迹（#39）
 
