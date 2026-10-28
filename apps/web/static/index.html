@@ -119,6 +119,20 @@
         <div class="dialog-actions">
           <button type="button" id="toolpack-install">检查并安装</button>
         </div>
+        <section id="toolpack-review" class="toolpack-review" hidden aria-live="polite">
+          <h4 id="toolpack-review-title">权限审阅</h4>
+          <p id="toolpack-review-desc" class="hint"></p>
+          <p class="hint">它要的权限（逐项勾选才能安装）：</p>
+          <ul id="toolpack-review-perms"></ul>
+          <p class="hint">它拿不到的：<span id="toolpack-review-none"></span></p>
+          <p class="hint">沙箱会这样限制它：</p>
+          <ul id="toolpack-review-sandbox"></ul>
+          <p id="toolpack-review-missing" class="hint" hidden></p>
+          <div class="dialog-actions">
+            <button type="button" id="toolpack-review-accept" disabled>同意这些权限并安装</button>
+            <button type="button" id="toolpack-review-cancel">取消</button>
+          </div>
+        </section>
         <p class="hint">什么样的工具能装、怎么写：<a href="https://github.com/loootte/multimodal-agent-studio/blob/main/docs/tool-pack-guide.md" target="_blank" rel="noopener">工具包编写指南</a></p>
       </details>
       <details id="agent-box">

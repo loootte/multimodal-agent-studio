@@ -472,7 +472,7 @@ const EGRESS_FIELDS = [
   "type", "egress_id", "ts", "channel", "destination_host", "destination_scope", "modality",
   "char_count", "byte_count", "message_count", "tool_contract_bytes", "contains_local_derived",
   "content_fingerprint", "handle_id_prefix", "model", "session_id", "run_id", "agent_run_id",
-  "reason_code", "http_status",
+  "reason_code", "http_status", "policy", "exempt_bytes", "tool",
 ];
 const EGRESS_STATES = {
   "egress.planned": "准备发出",
@@ -484,6 +484,7 @@ const EGRESS_CHANNELS = {
   chat_completion: "对话模型",
   remote_image: "第三方出图",
   comfyui_local: "ComfyUI",
+  toolpack: "工具包",
   other: "其他出口",
 };
 const EGRESS_SCOPES = { local: "本机", lan: "局域网", third_party: "第三方" };
@@ -501,6 +502,7 @@ const EGRESS_REASONS = {
   handle_forbidden: "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
   local_content_encoded: "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
   egress_policy_denied: "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
+  permission_denied: "这个工具包没有联网权限（或试图连本机地址），已在沙箱里拦下，没有打开连接。",
 };
 
 function rememberEgress(assistant, event) {
@@ -528,7 +530,7 @@ function egressRows(items) {
 }
 
 function egressLine(row) {
-  const channel = EGRESS_CHANNELS[row.channel] || row.channel || "出站";
+  const channel = (EGRESS_CHANNELS[row.channel] || row.channel || "出站") + (row.tool ? `（${row.tool}）` : "");
   const scope = EGRESS_SCOPES[row.destination_scope] || "";
   const host = row.destination_host || "未配置的地址";
   const parts = [`${channel} → ${scope ? scope + " " : ""}${host}`];
@@ -1418,6 +1420,8 @@ document.querySelector("#tool-select").addEventListener("change", (event) => loa
 document.querySelector("#tool-export").addEventListener("click", exportToolPack);
 document.querySelector("#tool-uninstall").addEventListener("click", uninstallToolPack);
 document.querySelector("#toolpack-install").addEventListener("click", installToolPack);
+document.querySelector("#toolpack-review-accept").addEventListener("click", acceptToolPack);
+document.querySelector("#toolpack-review-cancel").addEventListener("click", closeToolPackReview);
 document.querySelector("#agent-install").addEventListener("click", installAgent);
 (() => {
   const box = document.querySelector("#multi-agent");
@@ -1557,6 +1561,13 @@ function renderToolMeta(view) {
   line(`版本 ${pack.version} · ${pack.builtin ? "内置" : "已安装"} · ${pack.exposed ? "模型可调用" : "只在本机使用"} · 确认：${{ always: "每次确认", never: "不用确认", by_args: "按参数" }[pack.confirm] || pack.confirm}`);
   const perms = (pack.permissions || []).map((key) => PERMISSION_LABEL[key] || key);
   line(`权限：${perms.length ? perms.join("、") : "无"}`);
+  if (pack.sandbox === "subprocess") line("运行方式：沙箱子进程（拿不到你的环境变量和本地内容，越权会被拦下）");
+  const GRANT_STATE = {
+    missing: "没有授权记录，请重新安装并确认权限。",
+    outdated: "旧版本装的包，授权没有绑定包内容，请重新安装并确认权限。",
+    changed: "装好后包里的文件被改过，授权已作废，请重新安装。",
+  };
+  if (pack.grant && GRANT_STATE[pack.grant]) line(GRANT_STATE[pack.grant]).className = "note";
   if ((pack.denied || []).length) line(`未授权：${pack.denied.map((key) => PERMISSION_LABEL[key] || key).join("、")}`).className = "note";
   if ((pack.missing || []).length) line(`缺少依赖：${pack.missing.join("、")}`).className = "note";
   for (const backend of pack.backend_status || []) {
@@ -1719,6 +1730,10 @@ async function uninstallToolPack() {
   }
 }
 
+// 12.D（#60）：安装第三方工具包前的权限审阅。逐项列出它要的权限、白话说明、它拿不到的东西和沙箱限制；
+// 每个权限都勾上才能点“同意并安装”，提交的就是勾上的那几项（服务端要求和清单完全一致）。
+let pendingToolPack = null;
+
 async function installToolPack() {
   const source = document.querySelector("#toolpack-source").value.trim();
   if (!source) {
@@ -1731,13 +1746,72 @@ async function installToolPack() {
       toolNote(`工具包不合格：${info.problems.join("；")}`);
       return;
     }
-    const perms = (info.permissions || []).map((key) => PERMISSION_LABEL[key] || key);
-    const missing = (info.missing || []).length ? `\n缺少依赖：${info.missing.join("、")}（装上后调用会报 dependency_missing）` : "";
-    const ok = window.confirm(`安装 ${info.name} ${info.version}？\n${info.description}\n要的权限：${perms.length ? perms.join("、") : "无"}${missing}`);
-    if (!ok) return;
-    await api("POST", "/api/toolpacks/install", { source, accept_permissions: info.permissions || [] });
+    showToolPackReview(source, info);
+  } catch (error) {
+    toolNote(error.message || "安装失败。");
+  }
+}
+
+function showToolPackReview(source, info) {
+  pendingToolPack = { source, info };
+  const review = info.review || { permissions: [], not_granted: [], sandbox: [] };
+  document.querySelector("#toolpack-review-title").textContent = `权限审阅：${info.name} ${info.version}`;
+  document.querySelector("#toolpack-review-desc").textContent = info.description || "";
+  const perms = document.querySelector("#toolpack-review-perms");
+  perms.replaceChildren();
+  for (const item of review.permissions || []) {
+    const row = document.createElement("li");
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "toolpack-perm";
+    box.value = item.permission;
+    box.addEventListener("change", syncToolPackReview);
+    const text = document.createElement("span");
+    text.textContent = ` ${item.label || PERMISSION_LABEL[item.permission] || item.permission}（风险：${item.risk === "high" ? "高" : "中"}）：${item.effect}`;
+    label.append(box, text);
+    row.append(label);
+    perms.append(row);
+  }
+  if (!(review.permissions || []).length) {
+    const row = document.createElement("li");
+    row.textContent = "不要任何权限：不能联网、不能写临时目录以外的文件、拿不到本地内容。";
+    perms.append(row);
+  }
+  document.querySelector("#toolpack-review-none").textContent = (review.not_granted || []).join("、") || "无";
+  const sandbox = document.querySelector("#toolpack-review-sandbox");
+  sandbox.replaceChildren(...(review.sandbox || []).map((fact) => {
+    const row = document.createElement("li");
+    row.textContent = fact;
+    return row;
+  }));
+  const missing = document.querySelector("#toolpack-review-missing");
+  missing.hidden = !(info.missing || []).length;
+  missing.textContent = missing.hidden ? "" : `缺少依赖：${info.missing.join("、")}（装上后调用会报 dependency_missing）`;
+  document.querySelector("#toolpack-review").hidden = false;
+  syncToolPackReview();
+}
+
+function syncToolPackReview() {
+  const boxes = [...document.querySelectorAll("#toolpack-review-perms .toolpack-perm")];
+  document.querySelector("#toolpack-review-accept").disabled = !pendingToolPack || boxes.some((box) => !box.checked);
+}
+
+function closeToolPackReview() {
+  pendingToolPack = null;
+  document.querySelector("#toolpack-review").hidden = true;
+}
+
+async function acceptToolPack() {
+  if (!pendingToolPack) return;
+  const { source, info } = pendingToolPack;
+  const accepted = [...document.querySelectorAll("#toolpack-review-perms .toolpack-perm")]
+    .filter((box) => box.checked).map((box) => box.value);
+  try {
+    await api("POST", "/api/toolpacks/install", { source, accept_permissions: accepted });
+    closeToolPackReview();
     await refreshToolList(info.name);
-    toolNote(`已安装 ${info.name}。`);
+    toolNote(`已安装 ${info.name}（在沙箱子进程里运行）。`);
   } catch (error) {
     toolNote(error.message || "安装失败。");
   }
