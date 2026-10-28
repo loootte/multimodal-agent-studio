@@ -538,3 +538,46 @@ dialog select { font: inherit; padding: 0.35rem; }
 .char-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.7rem 0 0.3rem; align-items: center; }
 .char-options input[type=number] { width: 4.5rem; }
 .char-preview { white-space: pre-wrap; background: #f4f4f4; padding: 0.5rem; border-radius: 4px; max-height: 10rem; overflow: auto; font-size: 0.85rem; }
+
+/* 数据出站时间线（#57）：拦下的行高亮，失败的行弱提示。 */
+.egress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.55rem;
+  max-height: 40%;
+  min-height: 0;
+}
+#egress-status { margin: 0; }
+#egress-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  min-height: 0;
+}
+#egress-log li {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 0.45rem 0.65rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+#egress-log .kind {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.12rem;
+}
+#egress-log li.egress-blocked {
+  border-color: #b4492f;
+  background: #fbe9e3;
+}
+#egress-log li.egress-blocked .kind { color: #8f2f18; font-weight: 600; }
+#egress-log li.egress-failed { border-style: dashed; }
+.egress-reason { margin: 0.2rem 0 0; font-size: 0.82rem; }
+.confirm-egress { flex-basis: 100%; margin: 0; font-size: 0.9em; }
+.confirm-egress strong { margin-right: 0.25rem; }
