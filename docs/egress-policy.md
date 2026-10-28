@@ -13,6 +13,7 @@
 | `chat_completion` | `model` `stream` `messages` `tools` `tool_choice` `temperature` `max_tokens` `stop` | 消息只能有 `role` `content` `tool_calls` `tool_call_id` `name`；`tools` 豁免内容检查，但字节数记进 `exempt_bytes`；本地内容只能以句柄出现 |
 | `remote_image` | `model` `prompt` `n` `size` `response_format` | `n` 最多 1（一次 `generate_image` 只出一张） |
 | `comfyui_local` | `prompt` `client_id` | 上传原图（`raw_upload`）是唯一允许携带本地字节的出口，范围仍照实记 |
+| `toolpack` | 无（不透明） | 12.D：载荷在沙箱子进程里，宿主只看工具包有没有 `network` 授权（没有 → `permission_denied`）、目的地是不是本机地址（是 → `egress_policy_denied`），见 [tool-sandbox.md](tool-sandbox.md) |
 | `other` | 无 | 默认拒绝；没登记的渠道名一律归到这里 |
 
 策略外的字段、一次多张、`other` 渠道都返回 `egress_policy_denied`。

@@ -2,7 +2,7 @@
 
 这份指南写给想给本项目**加一个新工具**的人：什么样的工具能装、包里放什么、`tool.json` 每个字段怎么写、入口函数怎么写、怎么在网页里安装、配置、在对话里用、导出和卸载，以及常见报错怎么改。
 
-字段的简明参考见 [tool-packs.md](tool-packs.md)。本文内容以代码为准：`poc/tools/packs.py`（清单校验、安装、导出）、`poc/tools/registry.py`（注册和调用）、`poc/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
+字段的简明参考见 [tool-packs.md](tool-packs.md)，沙箱细节见 [tool-sandbox.md](tool-sandbox.md)。本文内容以代码为准：`poc/tools/packs.py`（清单校验、安装、授权）、`poc/tools/sandbox.py` 和 `poc/tools/sandbox_runner.py`（子进程沙箱）、`poc/tools/registry.py`（注册和调用）、`poc/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
 
 ## 1. 工具包是什么
 
@@ -10,7 +10,7 @@
 
 - 工具出现在网页右上角“工具”对话框的下拉框里（“工具”分组），可以看版本、权限、依赖，填配置。
 - 第三方模型在对话里能看到它的名字、说明和参数（JSON Schema），需要时会调用它。
-- 调用时本机先检查依赖和权限、按参数模式校验，再执行你的 `call(arguments, config)`，把返回的对象交回模型。
+- 调用时本机先检查依赖和权限、按参数模式校验，再在**单独的沙箱子进程**里执行你的 `call(arguments, config)`，把返回的对象交回模型。
 
 装上就生效，**不用重启**网页服务：每次列工具、调用工具时都会重新读清单。
 
@@ -18,7 +18,7 @@
 
 | 可以 | 说明 |
 | --- | --- |
-| 纯 Python 的工具，入口是包里的 `.py` 文件 | `entry.kind` 写 `python`。只读查询、计算、调本机或网络上的服务、写本机文件都行 |
+| 纯 Python 的工具，入口是包里的 `.py` 文件 | `entry.kind` 写 `python`。只读查询、计算、调网络或局域网上的服务（要 `network`）、在自己的数据目录里写文件（要 `write_files`）都行 |
 | 只用 Python 标准库，或用已经装在运行环境里的第三方库 | 第三方库写进 `requires.python`，缺了会报 `dependency_missing`。系统**不会**替你 `pip install` |
 | 需要自己的配置项和密钥 | 写在 `config` 里，用户在对话框里填，存在本机 `tools.json`，导出时不带走 |
 | 依赖共享后端（目前只有 `comfyui`） | 写进 `requires.backends`。注意：只做“后端已声明”的检查，**后端的地址、令牌不会传给你的工具**（见 §4.4） |
@@ -27,19 +27,22 @@
 
 | 不可以 | 原因 |
 | --- | --- |
-| `entry.kind: "host"` 的工具 | 宿主工具的实现写在网页进程 `apps/web/chat_run.py` 里（例如 `accept_local_content`、`retrieve_local`、`plan_images`、`build_skill_page`）。只有内置工具能用，第三方包会被拒：“只有内置工具可以用 entry.kind=host。” |
+| `entry.kind: "host"` 的工具 | 宿主工具的实现写在网页进程 `apps/web/chat_run.py` 里（例如 `accept_local_content`、`retrieve_local`、`plan_images`、`build_skill_page`）。只有内置工具能用，第三方包会被拒：“只有内置工具可以用 entry.kind=host。”；内置工具也只限名单 `packs.HOST_TOOLS` |
+| 连本机地址（`127.0.0.1`、`localhost`，包括本机的 ComfyUI 和本程序自己的接口） | 沙箱一律拒绝，有 `network` 权限也不行（`egress_policy_denied`） |
+| 起子进程、用 `ctypes` 加载原生库 | 沙箱拒绝，整次调用变成 `permission_denied` |
 | 要读本会话本地内容（用户留下的正文、文件）的工具 | 没有给工具包开放读本地内容的接口。`permissions.read_local_content` 可以声明，但目前拿不到任何本地内容 |
 | 要把本地内容交给模型的工具 | `send_local_to_model` 必须是 `false`，否则清单不合格 |
 | 给模型的参数里带 `prompt`、`text`、`body`、`content`、`bytes`、`path`、`filename` | 这些名字被拒，本地正文不经过第三方模型 |
 | MCP 服务器 | `mcp` 字段是保留字段，填了也不会启动或连接任何 MCP 服务 |
 | 不给模型用、只在本机用的第三方工具（`parameters: null`） | 第三方工具必须声明 `parameters` |
-| 多文件、包内相对导入的代码 | 入口文件按单个文件装载，不在 `sys.path` 上，`from . import x` 和 `import 同目录文件` 都不行。把代码写在一个文件里 |
+| 包内相对导入的代码 | 入口文件按单个文件装载，`from . import x` 不行；同目录的模块可以 `import 文件名`（包目录在子进程的 `sys.path` 最前面） |
 | 和内置工具或后端同名 | 安装被拒 |
 
 ### 安全边界（请先读）
 
-- **没有沙箱，也没有进程隔离。** 工具包的代码在网页服务进程里直接运行，和服务有同样的文件和网络权限。
-- 权限只是**声明 + 安装时确认 + 调用前核对授权记录**，不会真的拦住代码联网或写文件。只装你信得过、看过代码的包。
+- **第三方包在沙箱子进程里运行（12.D，#60）。** 代码不进网页服务进程；子进程只拿到白名单环境变量（不含任何 API key、令牌），配置和密钥由本程序显式传进 `config`。
+- 权限会被**强制**：没授权 `network` 就连不了网（包括域名解析），授权了也连不了本机地址；没授权 `write_files` 只能写本次调用的临时目录，授权了再加上自己的数据目录；会话、句柄、配置、审计所在的数据目录不能读也不能写；不能起子进程、不能加载原生库。越权一次，这次调用就返回 `permission_denied`。
+- 沙箱是**进程内审计钩子 + 子进程**，不是操作系统级隔离：用 C 扩展直接发系统调用的代码能绕过。所以仍然只装你信得过、看过代码的包。详见 [tool-sandbox.md](tool-sandbox.md)。
 - 工具返回的对象会原样（JSON）交给第三方模型。不要在返回值里放密钥、本机路径或隐私内容。
 
 ## 2. 目录结构
@@ -149,21 +152,24 @@ return {"ok": False, "executed": False, "error": {"code": "bad_input", "message"
 
 | 键 | 页面显示 | 现在的含义 |
 | --- | --- | --- |
-| `network` | 联网 | 工具会访问网络 |
-| `write_files` | 写文件 | 工具会写本机文件 |
-| `read_local_content` | 读本机内容 | 可以声明，但目前没有接口给工具包读本地内容 |
+| `network` | 联网 | 能连互联网和局域网（不能连本机地址）。没授权时任何连接和域名解析都被拦下，记进「数据出站」（渠道「工具包」） |
+| `write_files` | 写文件 | 能写自己的数据目录 `<数据目录>/toolpack_data/<名字>/`（路径在环境变量 `MAS_TOOLPACK_DATA` 里）。没授权时只能写本次调用的临时目录（`tempfile` 默认就在那里，调用结束删除） |
+| `read_local_content` | 读本机内容 | 可以声明，但第三方包目前拿不到本地内容：沙箱禁止直接读数据目录，句柄接口还没开放给第三方包 |
 | `send_local_to_model` | 把本机内容交给模型 | 必须 `false`，写 `true` 清单不合格 |
 
-安装时，页面先调用“检查”，弹出确认框：
+安装时，页面先调用“检查”，在对话框里展开**权限审阅**：
 
-```
-安装 dice_roll 0.1.0？
-示例工具包：掷骰子……
-要的权限：无
-缺少依赖：……（只有缺依赖时才有这一行）
-```
+- 每个要的权限一行：名字、风险（高 / 中）、白话说明（例如“可以连接互联网或局域网上的服务（不能连本机地址）……”），前面一个勾选框；
+- “不会得到”：没声明的权限；
+- “沙箱限制”：子进程运行、拿不到环境变量、不能读会话、不能起程序等几条；
+- 缺依赖时列出缺什么。
 
-点“确定”才会安装，同意的权限写进包目录的 `.granted.json`。每次调用都会核对：清单要的权限都在授权记录里才放行，否则返回 `permission_denied`。所以手工改了已安装包的 `tool.json`、加了新权限，要重新安装一次。授权记录不随导出走，别人装你的包时要自己再确认一次。
+每个权限都勾上，“同意这些权限并安装”按钮才可用；点“取消”什么都不装。同意的权限和**包内容的摘要**一起写进包目录的 `.granted.json`（`mas.grant/2`）。每次调用都会核对：
+
+1. 授权记录存在、是新格式、包内容（`tool.json`、代码和其他文件）和安装时一样；
+2. 清单要的权限都在授权记录里。
+
+任何一条不过就返回 `permission_denied`，不会执行。所以**装好以后手工改了包里任何文件，都要重新安装一次**；12.D 之前装的包（授权记录没有摘要）也要重装一次。授权记录不随导出走，别人装你的包时要自己再确认一次。
 
 ### 确认策略
 
@@ -230,7 +236,7 @@ def call(arguments: dict, config: dict) -> dict:
 
 可以先在命令行试一下函数本身：`python -c "import tool; print(tool.call({'times': 3}, {'default_sides': 6}))"`。
 
-**第 4 步：安装。** 打开网页 → 右上角“工具” → 展开“安装工具包” → 填目录路径（如 `D:\toolpacks\dice_roll`）或 zip 路径 → “检查并安装” → 在确认框里看权限 → 确定。路径是**运行网页服务的那台机器**上的路径；不支持从浏览器上传。
+**第 4 步：安装。** 打开网页 → 右上角“工具” → 展开“安装工具包” → 填目录路径（如 `D:\toolpacks\dice_roll`）或 zip 路径 → “检查并安装” → 在下面展开的「权限审阅」里逐项看、逐项勾选 → “同意这些权限并安装”（这个包不要任何权限，直接点即可）。路径是**运行网页服务的那台机器**上的路径；不支持从浏览器上传。
 
 **第 5 步：配置。** 下拉框“工具”分组里选 `dice_roll`，能看到“版本 0.1.0 · 已安装 · 模型可调用 · 确认：不用确认”和“权限：无”。把“默认面数”改成 20，填一个演示密钥，保存。下一次调用就生效。
 
@@ -287,11 +293,11 @@ def call(arguments: dict, config: dict) -> dict:
         return {"ok": False, "executed": True, "error": {"code": "unreachable", "message": "连不上这个地址。"}}
 ```
 
-安装时确认框会写“要的权限：联网”。
+安装时权限审阅会列出“联网（高风险）”一行，要勾上才能装。
 
 ### 进阶例子 2：写本机文件（要确认）
 
-注意参数名不能叫 `text`、`content`、`path`、`filename`，所以这里用 `note` 和 `title`；文件保存的目录由用户在配置里定，不让模型指定路径。
+注意参数名不能叫 `text`、`content`、`path`、`filename`，所以这里用 `note` 和 `title`；文件只能写在包自己的数据目录 `<数据目录>/toolpack_data/save_note/`（12.D 沙箱规定，写别处会 `permission_denied`），不让模型指定路径。
 
 <!-- validate:manifest -->
 ```json
@@ -313,13 +319,22 @@ def call(arguments: dict, config: dict) -> dict:
   "mutating": true,
   "confirm": "always",
   "entry": {"kind": "python", "module": "tool.py"},
-  "config": [
-    {"name": "notes_dir", "type": "path", "default": "", "required": true, "secret": false, "must_exist": true,
-     "description": "笔记文件所在目录。"}
-  ],
+  "config": [],
   "requires": {"backends": [], "python": []},
   "permissions": {"write_files": true}
 }
+```
+
+```python
+import os
+
+
+def call(arguments: dict, config: dict) -> dict:
+    # 沙箱只许写自己的数据目录（授权了 write_files 才有这个环境变量）。
+    path = os.path.join(os.environ["MAS_TOOLPACK_DATA"], "notes.md")
+    with open(path, "w" if arguments.get("overwrite") else "a", encoding="utf-8") as handle:
+        handle.write(f"## {arguments['title']}\n{arguments['note']}\n\n")
+    return {"ok": True, "executed": True}
 ```
 
 `mutating: true` 所以不能用 `never`；如果只想在清空时才问，可以改成 `"confirm": "by_args", "confirm_args": ["overwrite"]`。
@@ -347,6 +362,8 @@ def call(arguments: dict, config: dict) -> dict:
 ```
 
 对话框里会显示 ComfyUI 后端的状态和“去配置 ComfyUI”按钮；入口函数用自己的 `config["comfy_url"]` 去请求 `/queue`。
+
+**注意（12.D）**：沙箱不许第三方包连本机地址，所以 `comfy_url` 指向 `127.0.0.1` / `localhost` 时会得到 `permission_denied`（出站审计里原因是 `egress_policy_denied`）；局域网里另一台机器上的 ComfyUI（例如 `http://192.168.1.20:8188`）可以连。本机 ComfyUI 只由内置的 `generate_image` / `generate_video` 在宿主进程里访问，这是名单里的例外，见 [tool-packs.md](tool-packs.md#沙箱与本机-comfyui-例外)。
 
 ### 6.x 内置示例：`character_image`（预设 + 配置覆盖）
 
@@ -386,16 +403,20 @@ def call(arguments: dict, config: dict) -> dict:
 | permissions 只能包含布尔值的 …。 | 只用四个键，值用 `true`/`false` |
 | send_local_to_model 必须是 false：本地内容不能交给第三方模型。 | 改成 `false` |
 | 和内置工具重名。 / 和后端重名。 | 换个名字（同名的已安装包会被覆盖升级，这是允许的） |
-| 安装前要确认权限：… | 通过接口安装时 `accept_permissions` 要正好列出清单要的权限；在网页里点确认框的“确定”即可 |
+| 安装前要确认权限：… | 通过接口安装时 `accept_permissions` 要正好列出清单要的权限；在网页里把权限审阅里的每一项都勾上再点“同意这些权限并安装” |
 
 装上以后调用时可能遇到：
 
 | 错误码 | 原因 | 怎么改 |
 | --- | --- | --- |
 | `dependency_missing` | 后端没声明、Python 包没装、入口文件不见了 | 装好依赖；对话框里会列出缺什么 |
-| `permission_denied` | 清单要的权限不在授权记录里（例如手改了清单） | 重新安装并确认权限 |
+| `permission_denied`（带 `grant`） | 授权记录缺失（`missing`）、是 12.D 之前的旧格式（`outdated`）、或装好后包里的文件被改过（`changed`） | 重新安装并确认权限 |
+| `permission_denied`（带 `denied`） | 清单要的权限不在授权记录里 | 重新安装并确认权限 |
+| `permission_denied`（带 `violations`） | 代码在沙箱里越权：`network`（没授权就联网，或连本机地址）、`write_files`（写临时目录和自己数据目录以外的地方）、`read_local_content`（读数据目录）、`process`（起子进程）、`native`（ctypes）。自己吞掉异常也算 | 声明并授权需要的权限；文件写到 `MAS_TOOLPACK_DATA` 或临时目录；不要直接读会话 |
 | `invalid_parameter` / `unexpected_parameter` | 模型传的参数不符合 `parameters` | 把 `description` 写清楚，或放宽范围 |
-| `tool_error` | 入口抛了异常或没返回对象 | 看服务端日志，修代码，自己返回 `error` |
+| `tool_error` | 入口抛了异常、没返回对象、或子进程异常退出 | 修代码，自己返回 `error`（包的 print 输出被丢弃，不进日志） |
+| `tool_timeout` | 超过 `MAS_TOOLPACK_TIMEOUT_SEC`（默认 30 秒，1–300）没返回，子进程被停止 | 缩短耗时，或调大这个环境变量 |
+| `sandbox_error` | 沙箱子进程没能启动 | 看服务端日志 |
 
 卸载时可能遇到“没有这个工具。”（`not_found`）或“内置工具不能卸载。”（`builtin_tool`）；导出内置工具会得到“内置工具依赖本仓库代码，不导出。”（`not_exportable`）。如果某个已安装包的清单坏了，列工具时会整体报错并写出是哪个包，删掉或修好 `toolpacks/installed/<name>/tool.json` 即可。
 
@@ -413,7 +434,9 @@ def call(arguments: dict, config: dict) -> dict:
 
 **能接 MCP 服务器吗？** 现在不能，`mcp` 字段只是保留。
 
-**权限写 `network: false` 是不是就联不了网？** 不是。没有沙箱，权限只是声明和确认，靠代码审查。
+**权限写 `network: false` 是不是就联不了网？** 是（12.D 起）。socket 连接和域名解析都会被沙箱拦下，这次调用返回 `permission_denied`，「数据出站」里留一条被拦的记录。沙箱基于 Python 审计钩子，C 扩展能绕过，所以仍要审查代码。
+
+**为什么我的工具读不到 `OPENAI_API_KEY` 之类的环境变量？** 子进程只继承白名单环境变量。需要密钥就在 `config` 里声明 `secret` 字段（可以用 `env` 指定从哪个环境变量取），由本程序显式传进来。
 
 **模型为什么不调用我的工具？** 多半是 `description` 没说清什么时候该用。写清楚用途和参数含义；也可以在对话里直接点名工具。
 
