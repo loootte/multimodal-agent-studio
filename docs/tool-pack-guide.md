@@ -71,7 +71,7 @@ dice_roll/              ← 目录名必须和 name 一样
 | `order` | 否 | 整数 | 列表排序，越小越靠前，默认 1000 | `900` |
 | `parameters` | 是* | 对象 | 给模型的参数，JSON Schema。必须 `type: "object"` 且 `additionalProperties: false`。*内置工具可以写 `null` | 见下文 |
 | `mutating` | 是 | 布尔 | 是否会改外部状态（写文件、提交任务、发请求改数据） | `false` |
-| `confirm` | 是 | 字符串 | 调用前是否要用户确认：`always`、`never`、`by_args`。`mutating: true` 时不能写 `never` | `"never"` |
+| `confirm` | 是 | 字符串 | 调用前是否要用户确认：`always`、`never`、`by_args`。`mutating: true` 时不能写 `never`；声明了 `network` 或 `read_local_content` 时只能写 `always`（12.E） | `"never"` |
 | `confirm_args` | `by_args` 时必填 | 字符串列表 | 参数里出现这些名字时才确认 | `["overwrite"]` |
 | `entry` | 是 | 对象 | `{"kind": "python", "module": "tool.py"}`。`module` 是包内相对路径、以 `.py` 结尾。`kind: "host"` 只给内置工具 | 见上 |
 | `config` | 否 | 列表 | 配置字段，见下表。默认空 | 见下文 |
@@ -175,9 +175,9 @@ return {"ok": False, "executed": False, "error": {"code": "bad_input", "message"
 
 | `confirm` | 对话里会怎样 |
 | --- | --- |
-| `never` | 直接执行。只能用于 `mutating: false` 的工具 |
-| `always` | 每轮对话第一次调用前，页面弹出确认，用户点允许才执行；同一轮里再调用同一个工具不再问 |
-| `by_args` | 只有参数里出现 `confirm_args` 中的某个名字时才确认，例如带 `overwrite` 才问 |
+| `never` | 直接执行。只能用于 `mutating: false`、且不联网不读本地内容的工具 |
+| `always` | 调用前页面弹出确认，用户点允许才执行。不联网不读本地内容的工具同一轮里再调用不再问；声明了 `network` / `read_local_content` 的第三方工具**每次调用都问**（12.E） |
+| `by_args` | 只有参数里出现 `confirm_args` 中的某个名字时才确认，例如带 `overwrite` 才问。联网 / 读本地内容的工具不能用 |
 
 用户拒绝时工具不会执行，模型收到错误码 `rejected`（“这个工具需要确认后才能执行。”）。
 
@@ -264,7 +264,7 @@ def call(arguments: dict, config: dict) -> dict:
     }
   },
   "mutating": false,
-  "confirm": "never",
+  "confirm": "always",
   "entry": {"kind": "python", "module": "tool.py"},
   "config": [
     {"name": "timeout_sec", "type": "int", "default": 5, "required": true, "secret": false, "min": 1, "max": 60,
@@ -294,6 +294,8 @@ def call(arguments: dict, config: dict) -> dict:
 ```
 
 安装时权限审阅会列出“联网（高风险）”一行，要勾上才能装。
+
+**为什么是 `confirm: "always"`（12.E #61）**：声明了 `network` 或 `read_local_content` 的工具必须写 `always`，写 `never` / `by_args` 会在安装和注册时被拒（“联网或读本地内容的工具必须 confirm=always（不能 never / by_args）。”）。这类第三方工具每次调用都弹确认，同一轮里也不复用上一次的同意。
 
 ### 进阶例子 2：写本机文件（要确认）
 
@@ -350,7 +352,7 @@ def call(arguments: dict, config: dict) -> dict:
   "description": "查看 ComfyUI 队列里还有几个任务。只读。",
   "parameters": {"type": "object", "additionalProperties": false, "properties": {}},
   "mutating": false,
-  "confirm": "never",
+  "confirm": "always",
   "entry": {"kind": "python", "module": "tool.py"},
   "config": [
     {"name": "comfy_url", "type": "string", "default": "http://127.0.0.1:8188", "required": true, "secret": false,
@@ -392,6 +394,7 @@ def call(arguments: dict, config: dict) -> dict:
 | confirm 只能是 always、never、by_args。 | 改成其中之一 |
 | 改外部状态的工具不能 confirm=never。 | 改 `always` 或 `by_args` |
 | confirm=by_args 时 confirm_args 必须是非空的参数名列表。 | 加 `confirm_args` |
+| 联网或读本地内容的工具必须 confirm=always（不能 never / by_args）。 | 声明了 `network` 或 `read_local_content` 就写 `"confirm": "always"`（12.E #61） |
 | entry.kind 只能是 python 或 host。 | 写 `{"kind": "python", "module": "tool.py"}`（是 `kind` 不是 `type`） |
 | 只有内置工具可以用 entry.kind=host。 | 第三方包只能用 `python`，要把逻辑写进 `call` |
 | entry.module 必须是 .py 文件。 / entry.module 必须是包内的相对路径。 / entry.module 指向的文件不在包里。 | 写包内相对路径，例如 `tool.py`，并确认文件存在 |
