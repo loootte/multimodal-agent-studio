@@ -858,6 +858,121 @@ def run_sandbox(h: Harness, task: dict, live: bool) -> dict:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def run_confirm_policy(h: Harness, task: dict, live: bool) -> dict:
+    """确认与隐私策略（12.E #61）。
+    never_network：联网却 confirm=never 的第三方包在检查和安装时被拒（invalid_manifest），没装上；
+    every_call：联网的第三方包一轮里调两次就确认两次（不复用）；
+    remote_ack：把 remote_local_prompt 放宽到 confirm 必须显式 acknowledge，否则 409 不改；改了留安全事件；
+    dataflow：一轮本地提示词出图后，会话数据流图连出 本地→句柄→generate_image→本机 ComfyUI，且没有正文和完整句柄。"""
+    import re
+
+    case = task.get("case")
+    marker = task.get("marker") or "LOCAL-POLICY-0000"
+    if case == "never_network":
+        source = tempfile.mkdtemp(prefix="evals-pack-src-")
+        folder = tempfile.mkdtemp(prefix="evals-toolpacks-")
+        saved = os.environ.get("MAS_TOOLPACKS_DIR")
+        os.environ["MAS_TOOLPACKS_DIR"] = folder
+        try:
+            results = {}
+            for confirm in ("never", "by_args"):
+                extra = {"confirm_args": ["n"]} if confirm == "by_args" else {}
+                manifest = check._pack_manifest("net_" + confirm.replace("_", ""), confirm=confirm,
+                                                permissions={"network": True}, **extra)
+                target = check._write_pack(source, manifest, check._PACK_CODE)
+                status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": target})
+                problems = json.loads(body).get("problems") or []
+                expect(any("confirm=always" in item for item in problems), f"{confirm}：检查没有拒绝：{problems}")
+                status, body = check.request("POST", h.base + "/api/toolpacks/install",
+                                             {"source": target, "accept_permissions": ["network"]})
+                expect(status != 200 and json.loads(body).get("code") == "invalid_manifest", f"{confirm}：装上了：{status} {body[:200]}")
+                expect(not os.path.exists(os.path.join(folder, manifest["name"])), f"{confirm}：被拒的包留在了安装目录")
+                results[confirm] = "invalid_manifest"
+            return results
+        finally:
+            if saved is None:
+                os.environ.pop("MAS_TOOLPACKS_DIR", None)
+            else:
+                os.environ["MAS_TOOLPACKS_DIR"] = saved
+            shutil.rmtree(folder, ignore_errors=True)
+            shutil.rmtree(source, ignore_errors=True)
+    if case == "every_call":
+        source = tempfile.mkdtemp(prefix="evals-pack-src-")
+        folder = tempfile.mkdtemp(prefix="evals-toolpacks-")
+        saved = os.environ.get("MAS_TOOLPACKS_DIR")
+        os.environ["MAS_TOOLPACKS_DIR"] = folder
+        target = check._probe_copy(source, network=True)
+        try:
+            status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": target})
+            review = json.loads(body).get("review") or {}
+            expect(review.get("confirm_every_call"), f"审阅没有说明每次调用都确认：{body[:200]}")
+            status, body = check.request("POST", h.base + "/api/toolpacks/install",
+                                         {"source": target, "accept_permissions": ["network"]})
+            expect(status == 200, f"装探针失败：{status} {body[:200]}")
+            session_id = check._fresh_session(h.base)
+            h.provider.mode = "probe"
+            h.provider.probe = {"act": "scratch"}
+            h.provider.probe_times = 2
+            try:
+                events = check._speak(h.base, session_id, "调用探针工具两次", timeout=20)
+            except SystemExit as exc:
+                raise Failed(str(exc)) from None
+            expect(_status(events) == "completed", f"状态是 {_status(events)}")
+            asks = [e for e in events if e.get("type") == "tool.confirm" and (e.get("name") or e.get("tool")) == "sandbox_probe"]
+            expect(len(asks) == 2, f"联网的第三方包一轮里调两次，确认了 {len(asks)} 次")
+            expect(all((e.get("egress") or {}).get("fixed") for e in asks), "确认卡没有固定出站区块")
+            return {"calls": 2, "confirms": len(asks)}
+        finally:
+            h.provider.mode = "ok"
+            h.provider.probe = None
+            h.provider.probe_times = 1
+            check.request("POST", h.base + "/api/toolpacks/sandbox_probe/uninstall")
+            if saved is None:
+                os.environ.pop("MAS_TOOLPACKS_DIR", None)
+            else:
+                os.environ["MAS_TOOLPACKS_DIR"] = saved
+            shutil.rmtree(folder, ignore_errors=True)
+            shutil.rmtree(source, ignore_errors=True)
+    if case == "remote_ack":
+        url = h.base + "/api/tools/generate_image/config"
+        status, body = check.request("PUT", url, {"values": {"remote_local_prompt": "confirm"}})
+        expect(status == 409 and json.loads(body).get("code") == "acknowledge_required", f"没确认就放宽了：{status} {body[:200]}")
+        status, body = check.request("GET", url)
+        expect(json.loads(body)["values"]["remote_local_prompt"]["value"] == "refuse", "409 之后配置被改了")
+        try:
+            status, body = check.request("PUT", url, {"values": {"remote_local_prompt": "confirm"}, "acknowledge": ["remote_local_prompt"]})
+            expect(status == 200, f"确认后仍改不了：{status} {body[:200]}")
+        finally:
+            check.request("PUT", url, {"values": {"remote_local_prompt": "refuse"}})
+        status, body = check.request("GET", h.base + "/api/telemetry?limit=5000")
+        changes = [(e.get("from_value"), e.get("to_value")) for e in json.loads(body)["events"]
+                   if e.get("kind") == "security.policy_changed" and e.get("field") == "remote_local_prompt"]
+        expect(changes[-2:] == [("refuse", "confirm"), ("confirm", "refuse")], f"安全事件不对：{changes[-2:]}")
+        return {"unacknowledged": 409, "audited": len(changes[-2:])}
+    if case == "dataflow":
+        h.provider.mode = "image"
+        h.box.set_mode("ok")
+        session_id = check._fresh_session(h.base)
+        try:
+            events = check._speak(h.base, session_id, "画一只茶壶", timeout=12, content=f"一只蓝色茶壶 {marker}")
+        except SystemExit as exc:
+            raise Failed(str(exc)) from None
+        finally:
+            h.provider.mode = "ok"
+        expect(_status(events) == "completed", f"状态是 {_status(events)}")
+        status, body = check.request("GET", h.base + f"/api/dataflow?session_id={session_id}")
+        expect(status == 200, f"读不了数据流图：{status}")
+        expect(marker not in body and check.SECRET not in body, "数据流图里出现了正文或密钥")
+        expect(not re.search(r"c_[0-9a-f]{12,}", body), "数据流图里出现了完整句柄")
+        flow = json.loads(body)
+        kinds = {(e["from"].split(":")[0], e["to"].split(":")[0], e["kind"]) for e in flow["edges"]}
+        expect({("local", "h", "holds"), ("h", "t", "uses"), ("t", "d", "egress")} <= kinds, f"数据流图没连通：{kinds}")
+        comfy = [e for e in flow["edges"] if e["from"] == "t:generate_image" and e["to"] == "d:local_comfyui"]
+        expect(comfy and comfy[0]["counts"]["sent"] >= 1 and comfy[0]["local_derived"] >= 1, f"没有 generate_image → 本机 ComfyUI：{comfy}")
+        return {"nodes": len(flow["nodes"]), "edges": len(flow["edges"])}
+    raise Failed(f"未知 case：{case}")
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -880,6 +995,7 @@ RUNNERS = {
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,
     "sandbox": run_sandbox,
+    "confirm_policy": run_confirm_policy,
 }
 
 
