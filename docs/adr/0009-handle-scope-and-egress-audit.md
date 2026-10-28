@@ -2,7 +2,7 @@
 
 ## 状态
 
-提议中（草稿）。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
+部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已在 `issue-57` 分支实现（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B）仍为提议中。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
 
 本文件在接受前可随实现微调字段名；**不得**把本地正文、文件字节或密钥写入任何审计事件。
 
@@ -40,6 +40,14 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 写操作 / `network=true` / 触及本地读后再可能出网的路径：确认卡必须展示宿主生成的出站摘要（工具名、是否出网、目的地主机、是否含本地派生），**不**使用模型或工具返回文本作为确认文案来源。
 - `remote_local_prompt` 默认仍为 `refuse`；改为 `confirm` 必须可审计且每次出图仍确认。
 
+### 12.A 实现定稿的事件形状
+
+- 事件：`egress.planned` / `egress.blocked` / `egress.sent`，另加 `egress.failed`（连接已开但失败）。同一请求共用 `egress_id`，`schema` 为 `mas.egress/1`。
+- 渠道：`chat_completion` / `remote_image` / `comfyui_local`（ComfyUI 提交也算出站，范围照实记 `local` / `lan` / `third_party`）。
+- 字段白名单 `EGRESS_FIELDS`（`packages/contracts/events.py`）：`destination_host`、`destination_scope`、`modality`、`char_count`、`byte_count`、`message_count`、`tool_contract_bytes`（工具 schema 单独计字节）、`contains_local_derived`、`handle_id_prefix`（前 6 字符）、`content_fingerprint`（请求体 sha256 前 16 个十六进制字符）、`model`、`session_id`、`trace_id`、`run_id`、`agent_run_id`、`reason_code`、`http_status`。
+- 原因码：`local_content`、`local_prompt_remote_refused`、`user_declined`、`http_error`、`connect_error`、`timeout`、`cancelled`、`rejected`；白话说明在 `EGRESS_REASONS`。
+- 存储：`<data_dir>/egress.jsonl`；本机只读接口 `GET /api/egress`、`GET /api/egress/export`（`mas.egress.export/1`）。审计写失败不打断主流程，stderr 告警并计数。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
@@ -51,4 +59,4 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 
 - `purpose` 枚举的最终集合与是否允许用户自定义 purpose。
 - 默认 TTL 与「会话结束是否立即作废全部句柄」。
-- `content_fingerprint` 算法（建议 BLAKE2b/SHA-256 截断）与是否对工具 schema 豁免字节单独计数。
+- ~~`content_fingerprint` 算法与工具 schema 字节是否单独计数~~：12.A 定为 SHA-256 前 16 个十六进制字符，工具契约单独记 `tool_contract_bytes`。

@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -30,6 +31,7 @@ import store
 import tool_config
 from packages.artifacts import ArtifactStore
 from services import telemetry
+from services.gateway import egress
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_CHARACTER = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/character$")
@@ -59,6 +61,7 @@ class App:
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
         telemetry.configure(os.path.join(data_dir, "telemetry.jsonl"))
+        egress.configure(os.path.join(data_dir, "egress.jsonl"))
         self.timeout_sec = timeout_sec
         self.provider = store.ProviderStore(os.path.join(data_dir, "provider.json"))
         self.tools = tool_config.ToolConfigStore(os.path.join(data_dir, "tools.json"))
@@ -157,6 +160,44 @@ def _trajectories(handler, app, query) -> None:
                            mode=one("mode"), session=one("session"), since=one("since"), until=one("until"),
                            limit=limit, full=one("brief") is None)
     _send_json(handler, 200, {"schema": "mas.trajectory/1", "export": stats, "trajectories": items})
+
+
+def _egress_route(handler, path, query) -> None:
+    """出站审计（#57）：只读、仅本机，和本地资源面板同一道回环检查。记录里本来就没有正文、提示词、密钥和路径。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in resources.LOOPBACK:
+        _send_json(handler, 403, {"code": "forbidden", "message": "出站审计只给本机看。"})
+        return
+    session_id = ((query.get("session_id") or [""])[0]).strip()
+    if session_id and not re.fullmatch(r"s_[0-9a-f]{32}", session_id):
+        _send_json(handler, 400, {"code": "invalid_session_id", "message": "session_id 不合法。"})
+        return
+    try:
+        limit = max(1, min(5000, int((query.get("limit") or ["2000"])[0])))
+    except ValueError:
+        limit = 2000
+    items = egress.read(session_id or None, limit)
+    payload = {
+        "schema": "mas.egress.export/1",
+        "session_id": session_id or None,
+        "exported_at": round(time.time(), 3),
+        "events": items,
+        "summary": egress.summary(items),
+        "write_failures": egress.failures().get("write", 0),
+    }
+    if path == "/api/egress":
+        _send_json(handler, 200, payload)
+        return
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    name = f"egress-{session_id or 'all'}.json"
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Disposition", f'attachment; filename="{name}"')
+    handler.end_headers()
+    handler.wfile.write(raw)
 
 
 def _resource_route(handler, app, method, path, query) -> None:
@@ -302,6 +343,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             return
         if method == "GET" and path.startswith("/api/meta/candidates/"):
             _meta_candidates(handler, app, urllib.parse.parse_qs(parsed.query), path[len("/api/meta/candidates/"):])
+            return
+        if method == "GET" and path in ("/api/egress", "/api/egress/export"):
+            _egress_route(handler, path, urllib.parse.parse_qs(parsed.query))
             return
         if method == "GET" and (path == "/api/telemetry" or path.startswith("/api/telemetry/")):
             query = urllib.parse.parse_qs(parsed.query)

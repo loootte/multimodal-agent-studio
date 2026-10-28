@@ -205,6 +205,10 @@ Agent 运行时
 
 每条遥测还带当前运行的 `run_id`（子 Agent 的工具和模型调用记到子运行上），工具记录带参数摘要 `args`（只有句柄、数字和键名）。
 
+### 出站审计（#57）
+
+`services/gateway/egress.py`：对话模型、第三方出图、ComfyUI 提交共用一个出口钩子，记 `egress.planned` / `blocked` / `sent` / `failed`（只有主机名、渠道、字节数、是否含本地派生、指纹前缀、运行标识和原因码，无正文和密钥）。写到 `<data_dir>/egress.jsonl`，同时存进助手消息的 `egress` 列表并经 SSE 推给页面「数据出站」时间线。确认卡附宿主生成的出站摘要。本机只读接口 `GET /api/egress`、`GET /api/egress/export`。审计写失败不打断主流程，告警并计数。说明见 [egress-audit.md](egress-audit.md)，决策见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md)。
+
 ### 轨迹（#39）
 
 `services/meta/`：把会话事件和 `telemetry.jsonl` 规范化成 `mas.trajectory/1`，一次运行一条，写到 `<data_dir>/trajectories/`，并维护按工具、Agent、技能、结果、时间查询的索引。增量幂等，导出前脱敏（本地内容只留句柄、密钥和路径替换、最后断言）。入口是 `python -m services.meta.export [query ...]` 和只接受本机的 `GET /api/trajectories`。字段、隐私规则和示例见 [trajectory.md](trajectory.md)，决策见 [ADR 0006](adr/0006-trajectories.md)。

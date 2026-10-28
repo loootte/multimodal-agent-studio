@@ -55,6 +55,14 @@
       </div>
       <p id="runtime-status" class="runtime-status">发送后会列出这一次的模型和工具步骤。</p>
       <ol id="runtime-log"></ol>
+      <section class="egress" id="egress" aria-label="数据出站">
+        <div class="runtime-head">
+          <strong>数据出站</strong>
+          <button type="button" class="ghost" id="export-egress">导出审计 JSON</button>
+        </div>
+        <p id="egress-status" class="runtime-status">这一轮发出的请求会列在这里：发给谁、多大、有没有被拦下。不显示正文。</p>
+        <ol id="egress-log"></ol>
+      </section>
     </aside>
   </div>
   <p id="live" class="sr-only" aria-live="polite"></p>

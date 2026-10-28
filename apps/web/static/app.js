@@ -60,6 +60,7 @@ document.querySelector("#close-settings").addEventListener("click", () => settin
 document.querySelector("#toggle-runtime").addEventListener("click", () => {
   document.querySelector(".app").classList.toggle("runtime-collapsed");
 });
+document.querySelector("#export-egress").addEventListener("click", exportEgress);
 document.querySelector("#close-runtime").addEventListener("click", () => {
   document.querySelector(".app").classList.add("runtime-collapsed");
 });
@@ -183,6 +184,7 @@ async function runTurn(url, body, userText, attachments) {
     error: null,
     events: [],
     runtime: [],
+    egress: [],
   });
   showNote("");
   render();
@@ -245,10 +247,13 @@ function onEvent(event) {
     assistant.error = null;
     assistant.events = [];
     assistant.runtime = [];
+    assistant.egress = [];
     state.session.run_id = event.run_id;
     state.session.running = true;
   } else if (event.type === "runtime.step") {
     rememberRuntime(assistant, event);
+  } else if (typeof event.type === "string" && event.type.startsWith("egress.")) {
+    rememberEgress(assistant, event);
   } else if (event.type === "message.delta") {
     if (state.stopped) return;
     assistant.text += event.text || "";
@@ -293,6 +298,7 @@ function onEvent(event) {
   }
   renderTranscript();
   renderRuntime();
+  renderEgress();
   updateButtons();
 }
 
@@ -302,6 +308,7 @@ function resetAssistantForReplay() {
   assistant.text = "";
   assistant.events = [];
   assistant.runtime = [];
+  assistant.egress = [];
   assistant.error = null;
 }
 
@@ -372,6 +379,10 @@ function rememberAgentEvent(assistant, event) {
     purpose: event.purpose,
     kind: event.kind,
     run_id: event.run_id,
+    notice: event.notice,
+    egress: event.egress,
+    agent: event.agent,
+    agent_run_id: event.agent_run_id,
   });
 }
 
@@ -397,6 +408,7 @@ function render() {
   renderChrome();
   renderTranscript();
   renderRuntime();
+  renderEgress();
   renderPending();
   updateButtons();
 }
@@ -453,6 +465,138 @@ function renderRuntime() {
     log.append(item);
   }
   log.scrollTop = log.scrollHeight;
+}
+
+// 数据出站（#57）：网关和出图代码在请求离开本进程前后记下的审计记录。只显示主机、大小和白话原因，不显示正文。
+const EGRESS_FIELDS = [
+  "type", "egress_id", "ts", "channel", "destination_host", "destination_scope", "modality",
+  "char_count", "byte_count", "message_count", "tool_contract_bytes", "contains_local_derived",
+  "content_fingerprint", "handle_id_prefix", "model", "session_id", "run_id", "agent_run_id",
+  "reason_code", "http_status",
+];
+const EGRESS_STATES = {
+  "egress.planned": "准备发出",
+  "egress.sent": "已发出",
+  "egress.blocked": "已拦下",
+  "egress.failed": "发出失败",
+};
+const EGRESS_CHANNELS = {
+  chat_completion: "对话模型",
+  remote_image: "第三方出图",
+  comfyui_local: "ComfyUI",
+};
+const EGRESS_SCOPES = { local: "本机", lan: "局域网", third_party: "第三方" };
+const EGRESS_REASONS = {
+  local_content: "请求里混进了本地内容，已在发出前拦下；本地内容没有离开本机。",
+  local_prompt_remote_refused: "本地提示词默认不发给第三方出图服务，已拦下。",
+  user_declined: "你没有同意把本地提示词发给第三方出图服务，已拦下。",
+  http_error: "对方返回了错误。",
+  connect_error: "连接失败，请求没有送达。",
+  timeout: "等待超时。",
+  cancelled: "已停止。",
+  rejected: "对方拒绝了这次请求。",
+};
+
+function rememberEgress(assistant, event) {
+  const items = assistant.egress || (assistant.egress = []);
+  if (items.some((item) => item.egress_id === event.egress_id && item.type === event.type)) return;
+  const entry = {};
+  for (const key of EGRESS_FIELDS) if (event[key] !== undefined) entry[key] = event[key];
+  items.push(entry);
+}
+
+// 同一次请求（egress_id）只画一行，状态取最新的那条。
+function egressRows(items) {
+  const rows = [];
+  const byId = {};
+  for (const item of items || []) {
+    const key = item.egress_id || `${rows.length}`;
+    if (byId[key]) {
+      Object.assign(byId[key], item);
+    } else {
+      byId[key] = { ...item };
+      rows.push(byId[key]);
+    }
+  }
+  return rows;
+}
+
+function egressLine(row) {
+  const channel = EGRESS_CHANNELS[row.channel] || row.channel || "出站";
+  const scope = EGRESS_SCOPES[row.destination_scope] || "";
+  const host = row.destination_host || "未配置的地址";
+  const parts = [`${channel} → ${scope ? scope + " " : ""}${host}`];
+  if (row.byte_count != null) parts.push(`${row.byte_count} 字节`);
+  if (row.message_count != null) parts.push(`${row.message_count} 条消息`);
+  if (row.contains_local_derived) parts.push("含本地派生内容");
+  if (row.http_status != null) parts.push(`HTTP ${row.http_status}`);
+  return parts.join(" · ");
+}
+
+function renderEgress() {
+  const log = document.querySelector("#egress-log");
+  const status = document.querySelector("#egress-status");
+  if (!log || !status) return;
+  const assistant = currentAssistant();
+  const rows = egressRows(assistant && assistant.egress);
+  log.replaceChildren();
+  if (!rows.length) {
+    status.textContent = "这一轮发出的请求会列在这里：发给谁、多大、有没有被拦下。不显示正文。";
+    return;
+  }
+  const blocked = rows.filter((row) => row.type === "egress.blocked").length;
+  const sent = rows.filter((row) => row.type === "egress.sent").length;
+  status.textContent = `这一轮 ${rows.length} 次出站：已发出 ${sent}，拦下 ${blocked}。`;
+  for (const row of rows) {
+    const item = document.createElement("li");
+    item.className = "egress-row";
+    if (row.type === "egress.blocked") item.classList.add("egress-blocked");
+    if (row.type === "egress.failed") item.classList.add("egress-failed");
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = EGRESS_STATES[row.type] || row.type || "";
+    const body = document.createElement("span");
+    body.textContent = egressLine(row);
+    item.append(kind, body);
+    if (row.reason_code) {
+      const reason = document.createElement("p");
+      reason.className = "egress-reason";
+      reason.textContent = EGRESS_REASONS[row.reason_code] || `原因：${row.reason_code}`;
+      item.append(reason);
+    }
+    log.append(item);
+  }
+}
+
+async function exportEgress() {
+  const query = state.currentId ? `?session_id=${encodeURIComponent(state.currentId)}` : "";
+  try {
+    const response = await fetch(`/api/egress/export${query}`);
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).message || "导出失败。");
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `egress-${state.currentId || "all"}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  } catch (error) {
+    showNote(error.message || "导出失败。");
+  }
+}
+
+// 确认卡上的出站摘要由宿主生成（会不会联网、发给谁、读不读本地内容、句柄用途），不是模型的解释文字。
+function egressSummaryNode(summary) {
+  if (!summary || typeof summary !== "object") return null;
+  const box = document.createElement("div");
+  box.className = "confirm-egress";
+  const title = document.createElement("strong");
+  title.textContent = "数据出站：";
+  const text = document.createElement("span");
+  text.textContent = summary.text || (summary.network ? "会联网。" : "不联网，只在本机执行。");
+  box.append(title, text);
+  return box;
 }
 
 // markdown.js 只产出转义后的白名单 HTML；万一没加载，退回纯文本转义。
@@ -927,6 +1071,8 @@ function confirmRow(message, call) {
     notice.textContent = call.notice;
     row.append(notice);
   }
+  const summary = egressSummaryNode(call && call.egress);
+  if (summary) row.append(summary);
   row.append(yes, no);
   return row;
 }

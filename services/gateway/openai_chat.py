@@ -10,6 +10,8 @@ reasoning_content 不进入回答正文。
 local_bodies 里长度不少于 8 的正文一旦出现在请求里，连接还没打开就失败。
 调用方把已入库的文字、文件的文本和文件字节的 base64 放进这个列表。
 工具契约本身不参与这道检查，避免说明文字被当成正文。
+每次出站都经过 services.gateway.egress 的同一个钩子：先记 egress.planned（或 egress.blocked），
+拿到响应状态后记 egress.sent，连不上或对方报错记 egress.failed（ADR 0009，#57）。
 图像部件按工件标识解析，写成 data URL。音频和视频由能力声明拒绝。
 能力按模型名区分：已知纯文本模型不声明图像输入，避免把图发给看不见图的接口。
 """
@@ -26,6 +28,7 @@ import urllib.parse
 
 from packages.contracts.events import HUMAN, RETRYABLE
 from packages.contracts.request import AUDIO, FILE, IMAGE, TEXT, VIDEO, capabilities, message_parts, normalize
+from services.gateway import egress
 
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_MODEL = "grok-4.7"
@@ -48,6 +51,7 @@ class GatewayError(Exception):
 
 class OpenAIAdapter:
     name = "openai"
+    audits_egress = True  # 真正联网的适配器必须走出站钩子；apps/web/check.py 会检查默认注册的适配器
 
     def capabilities(self, model: str) -> dict:
         vision = _accepts_image(model)
@@ -90,11 +94,17 @@ class OpenAIAdapter:
             payload["max_tokens"] = req["max_output"]
         if isinstance(req.get("stop"), list):
             payload["stop"] = req["stop"]
-        _reject_local_content(payload, local_bodies or [])
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        deadline = time.monotonic() + timeout_sec
         upstream = base_url or DEFAULT_BASE_URL
-        conn = _open(upstream, min(10.0, timeout_sec))
+        ticket = egress.guard("chat_completion", upstream, payload, local_bodies=local_bodies or [], body=body)
+        if ticket.hit:
+            raise GatewayError("local_content", HUMAN["local_content"])
+        deadline = time.monotonic() + timeout_sec
+        try:
+            conn = _open(upstream, min(10.0, timeout_sec))
+        except GatewayError as exc:
+            ticket.failed("connect_error")
+            raise exc
         yielded = False
         calls = _ToolCalls()
         try:
@@ -115,7 +125,10 @@ class OpenAIAdapter:
                 },
             )
             response = conn.getresponse()
-            if response.status != 200:
+            if response.status == 200:
+                ticket.sent(http_status=200)
+            else:
+                ticket.failed("http_error", http_status=response.status)
                 raw = response.read(65536)
                 raise _http_error(response.status, raw, api_key)
             for piece in _deltas(response, conn, cancel, deadline, api_key, calls):
@@ -134,11 +147,14 @@ class OpenAIAdapter:
                 raise GatewayError("cancelled", HUMAN["cancelled"])
             if not yielded:
                 raise GatewayError("provider_error", "模型没有返回文字。")
-        except GatewayError:
+        except GatewayError as exc:
+            ticket.failed(exc.code)
             raise
         except (TimeoutError, socket.timeout):
+            ticket.failed("timeout")
             raise GatewayError("timeout", HUMAN["timeout"])
         except (OSError, http.client.HTTPException, AttributeError):
+            ticket.failed("connect_error")
             if cancel.is_set():
                 raise GatewayError("cancelled", HUMAN["cancelled"])
             if time.monotonic() >= deadline:
@@ -351,20 +367,9 @@ def _open(base_url: str, timeout: float) -> http.client.HTTPConnection:
 
 
 def _reject_local_content(payload: dict, bodies: list[str]) -> None:
-    scanned = {key: value for key, value in payload.items() if key != "tools"}
-    for secret in bodies:
-        if isinstance(secret, str) and len(secret) >= 8 and _value_has(scanned, secret):
-            raise GatewayError("local_content", HUMAN["local_content"])
-
-
-def _value_has(value, secret: str) -> bool:
-    if isinstance(value, str):
-        return secret in value
-    if isinstance(value, dict):
-        return any(_value_has(key, secret) or _value_has(item, secret) for key, item in value.items())
-    if isinstance(value, list):
-        return any(_value_has(item, secret) for item in value)
-    return False
+    """旧入口，保留给直接调用者；判定逻辑在出站钩子里（egress.contains_local）。"""
+    if egress.contains_local(payload, bodies, exempt=("tools",)):
+        raise GatewayError("local_content", HUMAN["local_content"])
 
 
 class _ToolCalls:

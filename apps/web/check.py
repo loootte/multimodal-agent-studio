@@ -1012,10 +1012,116 @@ def _gateway_cases() -> None:
         _gateway_retryable()
         _gateway_ignored_params(provider, upstream)
         _gateway_legacy_stream_chat(provider, upstream)
+        _gateway_egress(provider, upstream)
     finally:
         install_defaults()
         provider.shutdown()
         provider.server_close()
+
+
+def _gateway_egress(provider, upstream: str) -> None:
+    """#57：网关出口的审计记录。只有元数据；混进本地正文时记 blocked 且不发出；写失败不影响请求。"""
+    import io
+    import contextlib
+    from packages.contracts import events as contract
+    from services.gateway import egress
+    from services.gateway.openai_chat import OpenAIAdapter
+
+    if not getattr(OpenAIAdapter, "audits_egress", False):
+        fail("OpenAI 适配器没有声明走出站审计")
+    if egress.scope_of("127.0.0.1") != "local" or egress.scope_of("localhost") != "local":
+        fail("本机地址的范围不对")
+    if egress.scope_of("192.168.1.20") != "lan" or egress.scope_of("api.x.ai") != "third_party":
+        fail("局域网/第三方范围不对")
+    if egress.destination("https://user:pw@api.example.com:8443/v1/chat?k=v") != ("api.example.com", "third_party"):
+        fail("目的地应只留主机名")
+    saved = egress.path()
+    directory = tempfile.mkdtemp(prefix="egress-unit-")
+    try:
+        log = os.path.join(directory, "egress.jsonl")
+        egress.configure(log)
+        marker = "LOCAL-EGRESS-MARKER-5b1e"
+        before = len(provider.requests)
+        gen = openai_chat.stream_chat(
+            base_url=upstream, api_key=SECRET, model="demo-model",
+            messages=[{"role": "user", "content": f"请画出{marker}"}],
+            timeout_sec=2, cancel=threading.Event(), local_bodies=[marker],
+        )
+        try:
+            next(gen)
+            fail("含本地正文的请求被发给了模型")
+        except openai_chat.GatewayError as exc:
+            if exc.code != "local_content":
+                fail(f"出站拦截的错误码不对：{exc.code}")
+        finally:
+            gen.close()
+        if len(provider.requests) != before:
+            fail("出站拦截后仍然打开了连接")
+        provider.mode = "ok"
+        _gateway_run({"model": "demo-model", "messages": [{"role": "user", "parts": [{"type": "text", "text": "你好审计"}]}]},
+                     upstream)
+        with open(log, encoding="utf-8") as handle:
+            raw = handle.read()
+        records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        kinds = [item["type"] for item in records]
+        if kinds != ["egress.blocked", "egress.planned", "egress.sent"]:
+            fail(f"出站记录顺序不对：{kinds}")
+        if marker in raw or SECRET in raw or "你好审计" in raw or "/v1" in raw:
+            fail("出站审计里出现了正文、密钥或路径")
+        for item in records:
+            if set(item) - set(contract.EGRESS_FIELDS):
+                fail(f"出站记录多了字段：{set(item) - set(contract.EGRESS_FIELDS)}")
+            if item["schema"] != contract.EGRESS_SCHEMA or item["channel"] != "chat_completion":
+                fail("出站记录的 schema/渠道不对")
+            if item["destination_host"] != "127.0.0.1" or item["destination_scope"] != "local":
+                fail("出站记录的目的地不对")
+        blocked, planned, sent = records
+        if blocked.get("reason_code") != "local_content" or not blocked.get("contains_local_derived"):
+            fail("拦截记录没有原因或没标本地派生")
+        if blocked["reason_code"] not in contract.EGRESS_REASONS:
+            fail("拦截原因没有白话说明")
+        if planned["egress_id"] != sent["egress_id"] or sent.get("http_status") != 200:
+            fail("planned/sent 没有共用 egress_id 或缺状态码")
+        if not planned.get("byte_count") or len(planned.get("content_fingerprint") or "") != 16:
+            fail("出站记录缺大小或指纹")
+        if planned.get("message_count") != 1 or planned.get("modality") != ["text"] or planned.get("model") != "demo-model":
+            fail(f"出站记录的消息数/模态/模型不对：{planned}")
+        # 写不进去：请求照常，stderr 告警，计数加一。
+        egress.configure(directory)  # 目录不能当文件写
+        failures = egress.failures()["write"]
+        warn = io.StringIO()
+        with contextlib.redirect_stderr(warn):
+            events = _gateway_run({"model": "demo-model", "messages": [{"role": "user", "parts": [{"type": "text", "text": "你好"}]}]},
+                                  upstream)
+        if events[-1].get("type") != "message.completed":
+            fail("审计写失败拖垮了请求")
+        if egress.failures()["write"] <= failures or "出站审计写入失败" not in warn.getvalue():
+            fail("审计写失败没有告警")
+        # 监听者出错也只告警。
+        egress.configure(log)
+        telemetry_mod = __import__("services.telemetry", fromlist=["bind"])
+        trace = "t_" + "ee" * 16
+        def bad_listener(_entry):
+            raise RuntimeError("boom")
+        egress.attach(trace, session_id="s_" + "ab" * 16, listener=bad_listener)
+        telemetry_mod.bind(trace)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                egress.blocked("remote_image", "https://img.example.com/v1/images", "local_prompt_remote_refused",
+                               local_derived=True, handle="c_0123456789abcdef")
+        finally:
+            telemetry_mod.bind(None)
+            egress.detach(trace)
+        last = egress.read("s_" + "ab" * 16)
+        if not last or last[-1]["reason_code"] != "local_prompt_remote_refused" or last[-1]["handle_id_prefix"] != "c_0123":
+            fail(f"宿主拦截记录不对：{last}")
+        if last[-1]["destination_host"] != "img.example.com" or last[-1]["destination_scope"] != "third_party":
+            fail("宿主拦截记录的目的地不对")
+        if egress.summary(records)["sent_hosts"] != {"127.0.0.1": 1}:
+            fail("出站汇总不对")
+    finally:
+        egress.configure(saved)
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _gateway_text(provider, upstream: str) -> None:
@@ -1583,6 +1689,12 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面没有单用户身份")
     if "确认" not in script or "拒绝" not in script or "重试" not in script:
         fail("页面没有工具确认或失败重试")
+    if "数据出站" not in page or 'id="egress-log"' not in page or 'id="export-egress"' not in page:
+        fail("运行面板没有数据出站时间线或导出按钮")
+    for needle in ('event.type.startsWith("egress.")', "renderEgress", "egress-blocked", "EGRESS_REASONS",
+                   "/api/egress/export", "egressSummaryNode", "notice: event.notice", "egress: event.egress"):
+        if needle not in script:
+            fail(f"页面脚本缺出站审计部分：{needle}")
     if "不能带附件" in script:
         fail("页面仍然拒绝所有附件")
     status, ident = request("GET", base + "/api/identity")
@@ -2125,6 +2237,12 @@ def _multi_agent_turn(base: str, provider) -> None:
     tagged = [e for e in events if e.get("type") == "tool_call" and e.get("tool") == "plan_images"]
     if not tagged or tagged[-1].get("agent") != "planner" or not tagged[-1].get("agent_run_id"):
         fail("子 Agent 的工具调用没有标上是哪个 Agent")
+    audited = _egress_since(base, events, (secret,))
+    sent_chat = [item for item in audited if item["type"] == "egress.sent" and item["channel"] == "chat_completion"]
+    if len(sent_chat) != len(new_requests) or any(item.get("session_id") != session_id for item in audited):
+        fail(f"多智能体的出站记录数或会话不对：{len(sent_chat)} / {len(new_requests)}")
+    if not any(item.get("agent_run_id") for item in sent_chat):
+        fail("子 Agent 的出站记录没有标 agent_run_id")
     stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
     if not any(e.get("type") == "agent" for e in stored["messages"][-1].get("events") or []):
         fail("刷新后子 Agent 树不在")
@@ -2724,10 +2842,13 @@ def _confirm_reject_case(base: str, provider) -> None:
     session_id = _fresh_session(base)
     confirmed = []
 
+    summaries = []
+
     def on_event(event):
         if event.get("type") != "tool.confirm":
             return
         confirmed.append(event.get("name"))
+        summaries.append(event.get("egress"))
         _post_confirm(base, event.get("run_id") or "", False)
 
     status, raw, events = read_sse(
@@ -2741,6 +2862,11 @@ def _confirm_reject_case(base: str, provider) -> None:
         fail("拒绝确认没有收到结束事件")
     if confirmed != ["generate_image"]:
         fail("写操作没有在页面上等待确认")
+    summary = summaries[0] if summaries else None
+    if not isinstance(summary, dict) or summary.get("by") != "host" or not summary.get("text"):
+        fail(f"确认卡没有宿主生成的出站摘要：{summary}")
+    if summary.get("destination") not in ("comfyui", "third_party_image", "none", "unknown"):
+        fail(f"出站摘要的目的地不对：{summary}")
     if _assistant_text(events) != "没有出图":
         fail("拒绝确认后没有继续回答")
     if not any(event.get("type") == "tool.confirm" for event in events):
@@ -3076,6 +3202,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         _local_forget_file(base, provider, comfy.box, directory)
         _local_file_image(base, provider, comfy.box)
         _egress_file(provider)
+        _egress_http_case(base, provider, directory)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
         _local_multi_image_case(base, provider, comfy.box, workflow)
         _local_early_stop_case(base, provider, comfy.box)
@@ -4316,6 +4443,10 @@ def _image_skill_local_remote(base, provider, box, remote) -> None:
         fail("拒绝后不该有成片")
     if secret in json.dumps([item.get("body") for item in requests], ensure_ascii=False):
         fail("本地提示词进入了对话模型请求（拒绝路径）")
+    refused = _egress_since(base, events, (secret,))
+    if not any(item["type"] == "egress.blocked" and item.get("reason_code") == "local_prompt_remote_refused"
+               and item["channel"] == "remote_image" and item.get("contains_local_derived") for item in refused):
+        fail(f"本地提示词被拒没有记出站拦截：{[(i['type'], i.get('reason_code')) for i in refused]}")
     status, body = request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "confirm"}})
     if status != 200:
         fail(f"改不了 remote_local_prompt：{status} {body}")
@@ -4332,8 +4463,27 @@ def _image_skill_local_remote(base, provider, box, remote) -> None:
         config = _config_event(events)
         if config.get("prompt_source") != ["local"] or config.get("backend") != ["remote"]:
             fail(f"确认路径的配置说明不对：{config}")
+        summary = notices[0].get("egress") or {}
+        if summary.get("destination") != "third_party_image" or summary.get("handle_source") != "local" \
+                or summary.get("destination_scope") != "local" or secret in json.dumps(summary, ensure_ascii=False):
+            fail(f"第三方出图确认卡的出站摘要不对：{summary}")
+        sent = _egress_since(base, events, (secret, remote.key))
+        remote_sent = [item for item in sent if item["channel"] == "remote_image" and item["type"] == "egress.sent"]
+        if len(remote_sent) != 1 or not remote_sent[0].get("contains_local_derived") or not remote_sent[0].get("handle_id_prefix"):
+            fail(f"本地提示词发第三方没有记出站：{sent}")
     finally:
         request("PUT", base + "/api/tools/generate_image/config", {"values": {"remote_local_prompt": "refuse"}})
+
+
+def _egress_since(base: str, events: list[dict], secrets=()) -> list[dict]:
+    """这一轮（按事件流里推出来的 egress_id）在审计文件里的记录；顺带确认没有正文和密钥。"""
+    ids = {event.get("egress_id") for event in events if str(event.get("type", "")).startswith("egress.")}
+    status, body = request("GET", base + "/api/egress?limit=5000")
+    if status != 200:
+        fail(f"读出站审计失败：{status}")
+    if SECRET in body or any(secret in body for secret in secrets):
+        fail("出站审计里出现了密钥或本地正文")
+    return [item for item in json.loads(body)["events"] if item.get("egress_id") in ids]
 
 
 def _image_skill_errors(base, provider, remote) -> None:
@@ -4498,6 +4648,62 @@ def _egress_file(provider) -> None:
                 fail("文件出口检查失败后仍然把字节发给了供应商")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def _egress_http_case(base: str, provider, directory: str) -> None:
+    """#57：一次真实聊天留下出站记录；接口只给本机、校验会话 id、导出带附件头；消息上留一份给页面回放。"""
+    import io
+    import server as web_server
+
+    provider.mode = "ok"
+    session_id = _fresh_session(base)
+    events = _speak(base, session_id, "只聊天，随便说一句")
+    pushed = [event for event in events if str(event.get("type", "")).startswith("egress.")]
+    if [event["type"] for event in pushed] != ["egress.planned", "egress.sent"]:
+        fail(f"事件流里没有推出站记录：{[event.get('type') for event in pushed]}")
+    status, body = request("GET", base + f"/api/egress?session_id={session_id}")
+    data = json.loads(body)
+    if status != 200 or data.get("schema") != "mas.egress.export/1":
+        fail(f"出站审计接口不对：{status}")
+    kinds = [item["type"] for item in data["events"]]
+    if kinds != ["egress.planned", "egress.sent"] or any(item.get("session_id") != session_id for item in data["events"]):
+        fail(f"出站审计没按会话归档：{kinds}")
+    if data["events"][0].get("run_id") != pushed[0].get("run_id") or not data["events"][0].get("trace_id"):
+        fail("出站记录缺运行标识")
+    if SECRET in body or "随便说一句" in body:
+        fail("出站审计接口里出现了密钥或正文")
+    if os.path.join(directory, "egress.jsonl") != __import__("services.gateway.egress", fromlist=["path"]).path():
+        fail("出站审计没写进数据目录")
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    if [item["type"] for item in stored["messages"][-1].get("egress") or []] != ["egress.planned", "egress.sent"]:
+        fail("消息上没有留出站记录，刷新后时间线会丢")
+    if [item.get("type") for item in stored["messages"][-1].get("events") or []] != []:
+        fail("出站记录混进了消息事件")
+    req = urllib.request.Request(base + f"/api/egress/export?session_id={session_id}")
+    with urllib.request.urlopen(req, timeout=5) as response:
+        disposition = response.headers.get("Content-Disposition") or ""
+        exported = json.loads(response.read().decode("utf-8"))
+    if f"egress-{session_id}.json" not in disposition or len(exported["events"]) != 2:
+        fail("导出没有附件头或内容不对")
+    status, _ = request("GET", base + "/api/egress?session_id=../x")
+    if status != 400:
+        fail("坏的 session_id 没有被拒")
+
+    class _Fake:
+        client_address = ("10.0.0.5", 1234)
+        def __init__(self):
+            self.status = None
+            self.wfile = io.BytesIO()
+        def send_response(self, code):
+            self.status = code
+        def send_header(self, *_a):
+            pass
+        def end_headers(self):
+            pass
+    fake = _Fake()
+    web_server._egress_route(fake, "/api/egress", {})
+    if fake.status != 403 or b"egress.sent" in fake.wfile.getvalue():
+        fail("非本机能读出站审计")
 
 
 # ---------- #31 工具包 ----------
