@@ -12,6 +12,11 @@
 | 1.2 | 文生图时用户提示词不进入供应商请求 | 自动：`text_to_image.teapot` 的 `prompt_not_in_provider` |
 | 1.3 | 密钥不出现在事件流、会话文件、遥测和日志里 | 自动：`apps/web/check.py`（事件流、遥测）；人工：查看 `data/` 下文件 |
 | 1.4 | 遥测只记种类、耗时、用量、错误码和 ComfyUI prompt_id，不记提示词和回答原文 | 自动：`apps/web/check.py` 的遥测用例；人工：新增遥测字段时复查 |
+| 1.5 | 每次出站请求（对话模型、第三方出图、ComfyUI 提交）都记 `egress.planned/blocked/sent/failed`，记录只含 `EGRESS_FIELDS` 里的元数据，无正文、提示词、密钥、路径（#57） | 自动：`security.egress_audit_normal`、`security.egress_audit_blocked`；`apps/web/check.py` 的网关出站用例 |
+| 1.6 | 网关查到本地正文、本地提示词不许发第三方、用户拒绝时，记 `egress.blocked` 和原因码，连接不打开 | 自动：`security.egress_audit_blocked`；`apps/web/check.py` 的本地提示词出图用例 |
+| 1.7 | `/api/egress` 与导出只接受本机回环，非法 `session_id` 返回 400；导出无正文、无密钥 | 自动：`apps/web/check.py` 的出站接口用例 |
+| 1.8 | 审计写不进去不打断主流程，但 stderr 告警并计入 `write_failures` | 自动：`apps/web/check.py`；人工：发布前看一眼 `/api/egress` 的 `write_failures` 为 0 |
+| 1.9 | 确认卡的出站摘要由宿主生成（`by: "host"`），不取模型或工具返回的文字；多 Agent 冒泡确认同样带摘要 | 自动：`apps/web/check.py` 的确认用例；人工：看确认卡写的目的地主机与配置一致 |
 
 ## 2. 工具权限
 
