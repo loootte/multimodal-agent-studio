@@ -571,6 +571,54 @@ def run_egress_audit(h: Harness, task: dict, live: bool) -> dict:
     return {"records": len(items), "reason": item["reason_code"]}
 
 
+def run_handle_scope(h: Harness, task: dict, live: bool) -> dict:
+    """句柄作用域（12.B #58）。模型点名一枚过期 / 越权 purpose / 跨会话的句柄出图：
+    运行以固定错误码失败、不提交 ComfyUI、本地正文不进模型请求，出站审计记一条 egress.blocked（只有句柄前 6 位）。"""
+    import store
+
+    marker = task.get("marker") or "LOCAL-HANDLE-0000"
+    case = task.get("case")
+    expected = {"expired": "handle_expired", "forbidden_purpose": "handle_forbidden",
+                "cross_session": "handle_not_found"}.get(case)
+    expect(expected is not None, f"未知 case：{case}")
+    owner = check._fresh_session(h.base)
+    session_id = check._fresh_session(h.base) if case == "cross_session" else owner
+    purpose = "keep" if case == "forbidden_purpose" else "image_prompt"
+    handle = h.app.sessions.add_content(owner, f"一只蓝色茶壶 {marker}", purpose)["handle"]
+    h.provider.mode = "named"
+    h.provider.named = handle
+    h.box.set_mode("ok")
+    before = len(h.box.prompts)
+    sent = len(h.provider.requests)
+    real_clock = store.clock
+    if case == "expired":
+        now = real_clock()
+        store.clock = lambda: now + store.handle_ttl() + 1
+    try:
+        events = check._speak(h.base, session_id, "画一张图", timeout=12)
+    except SystemExit as exc:
+        raise Failed(str(exc)) from None
+    finally:
+        store.clock = real_clock
+        h.provider.named = ""
+    expect(_status(events) == expected, f"状态是 {_status(events)}")
+    expect(events[-1].get("type") == "run.failed", "被拒的句柄没有让这次运行失败")
+    codes = [event.get("code") for event in events if event.get("type") == "error"]
+    expect(codes and codes[-1] == expected, f"错误码是 {codes}")
+    expect(len(h.box.prompts) == before, "被拒的句柄提交了 ComfyUI")
+    expect(not any(event.get("type") == "artifact" for event in events), "被拒的句柄出了图")
+    for item in h.provider.requests[sent:]:
+        expect(marker not in json.dumps(item.get("body"), ensure_ascii=False), "本地正文进了模型请求")
+    items, body = _egress_read(h, session_id)
+    blocked = [item for item in items if item["type"] == "egress.blocked"]
+    expect(any(item.get("reason_code") == expected and item.get("handle_id_prefix") == handle[:6]
+               and item.get("contains_local_derived") for item in blocked),
+           f"出站审计没有记句柄被拒：{[(i.get('reason_code'), i.get('handle_id_prefix')) for i in blocked]}")
+    expect(handle not in body, "出站审计里出现了完整句柄")
+    _egress_clean(h, body, [marker, check.SECRET, handle])
+    return {"code": expected, "blocked": len(blocked)}
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -590,6 +638,7 @@ RUNNERS = {
     "image_skill": run_image_skill,
     "character": run_character,
     "egress_audit": run_egress_audit,
+    "handle_scope": run_handle_scope,
 }
 
 

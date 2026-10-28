@@ -243,6 +243,10 @@ def _resource_route(handler, app, method, path, query) -> None:
             body = _read_json(handler)
             _send_json(handler, 200, resources.delete(app, body.get("ids"), bool(body.get("confirm"))))
             return
+        if path == "/api/resources/revoke" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, resources.revoke(app, body.get("id")))
+            return
         if path == "/api/resources/reuse" and method == "POST":
             body = _read_json(handler)
             _send_json(handler, 200, resources.reuse(app, body.get("id"), body.get("session_id") or ""))

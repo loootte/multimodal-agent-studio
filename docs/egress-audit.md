@@ -46,7 +46,7 @@
 - `services/gateway/openai_chat.py`：`stream` 在开连接前 `egress.guard("chat_completion", …, local_bodies=…)`；查到本地正文就记 `blocked/local_content` 并抛 `local_content`，连接不打开。适配器带 `audits_egress = True`。
 - `apps/web/remote_image.py`：第三方出图 `remote_image`。
 - `poc/comfyui/comfy_client.py`：ComfyUI 提交 `comfyui_local`（目的地通常是本机，scope 照实记）。
-- `apps/web/chat_run.py`：`remote_local_prompt=refuse` 拦下、用户拒绝时由宿主记 `blocked`（`local_prompt_remote_refused` / `user_declined`）；本地提示词出图时用 `egress.note(local_derived=True, handle=…)` 给下游请求打标。
+- `apps/web/chat_run.py`：`remote_local_prompt=refuse` 拦下、用户拒绝时由宿主记 `blocked`（`local_prompt_remote_refused` / `user_declined`）；模型点名的句柄过期、越权或跨会话时也记 `blocked`（`handle_*`，12.B）；本地提示词出图时用 `egress.note(local_derived=True, handle=…)` 给下游请求打标。
 
 运行上下文按 `trace_id` 登记（`egress.attach/detach`），会话、运行、子 Agent 运行编号从遥测的当前运行取。
 
@@ -80,4 +80,4 @@
 
 - 指纹是请求体 sha256 前缀，不可逆，但对极短、可猜的提示词理论上可用字典比对确认；导出前请把它当作非公开数据。
 - 只覆盖经过本进程网关和出图客户端的请求；第三方工具包若自己开连接，要到 12.C / 12.D 才统一拦截。
-- 句柄仍是会话主键，作用域、过期见 12.B（#58）。
+- 句柄作用域、过期、撤销见 [handle-scope.md](handle-scope.md)（12.B，#58）：句柄被拒时记 `egress.blocked`，原因码 `handle_not_found` / `handle_expired` / `handle_forbidden`。

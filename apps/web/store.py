@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import urllib.parse
 import uuid
 
 from packages.artifacts import ArtifactError, ArtifactStore
+from packages.contracts.events import HANDLE_ERRORS, HANDLE_PURPOSE_TOOLS, HANDLE_SCHEMA
 from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 
 _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
@@ -28,6 +30,14 @@ MAX_ATTACHMENT = 8 * 1024 * 1024
 MEMORY_KEEP = 6
 MEMORY_LINE = 80
 MEMORY_TOTAL = 800
+# 12.B（#58）：本地内容句柄的默认有效期。环境变量 MAS_HANDLE_TTL_SEC 可改，限定在 60 秒到 7 天。
+HANDLE_TTL_DEFAULT = 4 * 3600
+HANDLE_TTL_MIN = 60
+HANDLE_TTL_MAX = 7 * 86400
+# 宿主可以额外放开的消费工具（例如「定时出图」里用户收下的 keep 文字）。模型不能自己放开。
+_GRANTABLE = ("generate_image",)
+# 评测和检查可以替换时钟。
+clock = time.time
 
 
 class StoreError(Exception):
@@ -127,6 +137,87 @@ def _env_key(base_url: str) -> tuple[str, str | None]:
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _epoch(value) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")))
+    except (ValueError, OverflowError):
+        return None
+
+
+def handle_ttl() -> int:
+    """句柄有效期（秒）。坏值回到默认值，越界的夹到范围内。"""
+    raw = os.environ.get("MAS_HANDLE_TTL_SEC")
+    try:
+        value = int(raw) if raw not in (None, "") else HANDLE_TTL_DEFAULT
+    except ValueError:
+        value = HANDLE_TTL_DEFAULT
+    return max(HANDLE_TTL_MIN, min(HANDLE_TTL_MAX, value))
+
+
+def _purpose_of(record: dict) -> str:
+    purpose = record.get("purpose")
+    if purpose in _PURPOSES:
+        return purpose
+    return "image_prompt" if record.get("message_id") else "keep"
+
+
+def _scope(record: dict, session_id: str, *, run_id: str | None = None, allowed_tools=(), single_use: bool = False) -> dict:
+    """给一条本地内容记录签发能力令牌字段。正文和映射只在本机记录里，令牌本身是随机串。"""
+    now = clock()
+    purpose = _purpose_of(record)
+    scope = {"session_id": session_id, "purpose": purpose}
+    if run_id:
+        scope["run_id"] = run_id
+    record["handle_schema"] = HANDLE_SCHEMA
+    record["scope"] = scope
+    tools = set(HANDLE_PURPOSE_TOOLS.get(purpose, ()))
+    tools.update(tool for tool in allowed_tools or () if tool in _GRANTABLE)
+    record["allowed_tools"] = sorted(tools)
+    record["issued_at"] = _iso(now)
+    record["expires_at"] = _iso(now + handle_ttl())
+    if single_use:
+        record["single_use"] = True
+    else:
+        record.pop("single_use", None)
+    record.pop("revoked_at", None)
+    record.pop("used_at", None)
+    return record
+
+
+def handle_state(record: dict, now: float | None = None) -> str:
+    """active / expired / revoked / used。旧记录（没有 expires_at）读时升级前算 active。"""
+    if record.get("revoked_at"):
+        return "revoked"
+    if record.get("single_use") and record.get("used_at"):
+        return "used"
+    expires = _epoch(record.get("expires_at"))
+    if record.get("expires_at") is not None and expires is None:
+        return "expired"
+    if expires is not None and (clock() if now is None else now) >= expires:
+        return "expired"
+    return "active"
+
+
+def _check_handle(record: dict, session_id: str, tool: str | None, run_id: str | None) -> str:
+    scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+    if scope.get("session_id") != session_id:
+        return "handle_not_found"
+    if handle_state(record) != "active":
+        return "handle_expired"
+    bound = scope.get("run_id")
+    if bound and bound != run_id:
+        return "handle_forbidden"
+    if tool is not None and tool not in (record.get("allowed_tools") or []):
+        return "handle_forbidden"
+    return "ok"
 
 
 def _atomic_write(path: str, payload: dict) -> None:
@@ -301,20 +392,20 @@ def _kind_of(record: dict) -> str:
 
 
 def _public_content(record: dict) -> dict:
+    """公开字段：模型和页面都只见这些。没有正文、会话映射和运行绑定。"""
     kind = _kind_of(record)
     media = record.get("media_type")
     if not isinstance(media, str) or not media:
         media = "text/plain" if kind == "text" else "application/octet-stream"
-    purpose = record.get("purpose")
-    if purpose not in _PURPOSES:
-        purpose = "image_prompt" if record.get("message_id") else "keep"
     return {
         "handle": record.get("handle"),
         "type": kind,
         "kind": kind,
         "media_type": media,
         "size": record.get("size"),
-        "purpose": purpose,
+        "purpose": _purpose_of(record),
+        "expires_at": record.get("expires_at"),
+        "state": handle_state(record),
     }
 
 
@@ -746,6 +837,8 @@ class SessionStore:
             contents = session.setdefault("contents", [])
             for item in contents:
                 if item.get("message_id") == message_id:
+                    if self._renew_if_dead(session, item, session_id):
+                        self._write(session)
                     return _public_content(item)
             record = {
                 "handle": new_id("c_"),
@@ -758,6 +851,7 @@ class SessionStore:
                 "message_id": message_id,
                 "created_at": _now(),
             }
+            _scope(record, session_id)
             contents.append(record)
             session["updated_at"] = _now()
             self._write(session)
@@ -778,6 +872,8 @@ class SessionStore:
                     and item.get("purpose") == purpose
                     and item.get("text") == text
                 ):
+                    if self._renew_if_dead(session, item, session_id):
+                        self._write(session)
                     return _public_content(item)
             record = {
                 "handle": new_id("c_"),
@@ -790,6 +886,7 @@ class SessionStore:
                 "message_id": "",
                 "created_at": _now(),
             }
+            _scope(record, session_id)
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
             self._write(session)
@@ -816,6 +913,8 @@ class SessionStore:
                     and item.get("purpose") == purpose
                     and item.get("checksum") == digest
                 ):
+                    if self._renew_if_dead(session, item, session_id):
+                        self._write(session)
                     return _public_content(item)
             try:
                 self.artifacts.put(data)
@@ -832,6 +931,7 @@ class SessionStore:
                 "message_id": "",
                 "created_at": _now(),
             }
+            _scope(record, session_id)
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
             self._write(session)
@@ -955,6 +1055,159 @@ class SessionStore:
             except OSError:
                 pass
         return "forgotten"
+
+    # ---------- 12.B 作用域句柄（#58） ----------
+
+    def _renew_if_dead(self, session: dict, item: dict, session_id: str) -> bool:
+        """同一正文再次入库时：句柄还有效就复用；过期、撤销或用过就换一枚新令牌（旧串作废），不复活旧串。
+        旧记录（没有 expires_at）就地签发作用域，句柄串不变（双读一期）。返回是否改了记录。"""
+        if not item.get("expires_at"):
+            _scope(item, session_id)
+            item["migrated_at"] = _now()
+            return True
+        if handle_state(item) == "active":
+            return False
+        old = item.get("handle")
+        fresh = new_id("c_")
+        if _kind_of(item) == "file" and not item.get("checksum") and isinstance(old, str):
+            try:
+                os.replace(self._file_path(session_id, old), self._file_path(session_id, fresh))
+            except OSError:
+                pass
+        tools = [tool for tool in item.get("allowed_tools") or [] if tool in _GRANTABLE]
+        item["handle"] = fresh
+        _scope(item, session_id, allowed_tools=tools)
+        session["updated_at"] = _now()
+        return True
+
+    def resolve_content(self, session_id: str, handle: str, *, tool: str | None = None,
+                        run_id: str | None = None, consume: bool = True) -> tuple[dict | None, str]:
+        """宿主消费句柄的唯一入口。校验会话、有效期、撤销、运行绑定、用途允许的工具。
+        返回 (本机记录副本, "ok") 或 (None, 错误码)。错误码只有 HANDLE_ERRORS 里三个。
+        跨会话和伪造的句柄都是 handle_not_found，不暴露它在别处存在。旧记录读时升级。"""
+        if not isinstance(handle, str) or not _ID.fullmatch(handle) or not handle.startswith("c_"):
+            return None, "handle_not_found"
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return None, "handle_not_found"
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return None, "handle_not_found"
+            item = next((i for i in session.get("contents") or []
+                         if isinstance(i, dict) and i.get("handle") == handle), None)
+            if item is None:
+                return None, "handle_not_found"
+            changed = False
+            if not item.get("expires_at"):
+                _scope(item, session_id)
+                item["migrated_at"] = _now()
+                changed = True
+            code = _check_handle(item, session_id, tool, run_id)
+            if code == "ok" and consume and item.get("single_use"):
+                item["used_at"] = _now()
+                changed = True
+            if changed:
+                self._write(session)
+            if code != "ok":
+                return None, code
+            return dict(item), "ok"
+
+    def revoke_content(self, session_id: str, handle: str) -> str:
+        """撤销一枚句柄：正文还在本机（资源面板能看、能复用成新句柄），但这个串再也不能消费。"""
+        if not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return "absent"
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return "absent"
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return "absent"
+            for item in session.get("contents") or []:
+                if isinstance(item, dict) and item.get("handle") == handle:
+                    if not item.get("expires_at"):
+                        _scope(item, session_id)
+                    if item.get("revoked_at"):
+                        return "revoked"
+                    item["revoked_at"] = _now()
+                    session["updated_at"] = _now()
+                    self._write(session)
+                    return "revoked"
+        return "absent"
+
+    def revoke_run(self, session_id: str, run_id: str) -> int:
+        """运行结束时作废绑定到这次运行的句柄。返回作废几枚。"""
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return 0
+        count = 0
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return 0
+            for item in session.get("contents") or []:
+                scope = item.get("scope") if isinstance(item, dict) else None
+                if isinstance(scope, dict) and scope.get("run_id") == run_id and not item.get("revoked_at"):
+                    item["revoked_at"] = _now()
+                    count += 1
+            if count:
+                session["updated_at"] = _now()
+                self._write(session)
+        return count
+
+    def allow_tool(self, session_id: str, handle: str, tool: str) -> bool:
+        """宿主按用户意图放开一个消费工具（只限 _GRANTABLE）。模型没有这个入口。"""
+        if tool not in _GRANTABLE or not isinstance(handle, str) or not _ID.fullmatch(handle):
+            return False
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return False
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return False
+            for item in session.get("contents") or []:
+                if isinstance(item, dict) and item.get("handle") == handle:
+                    if not item.get("expires_at"):
+                        _scope(item, session_id)
+                    tools = set(item.get("allowed_tools") or [])
+                    if tool not in tools:
+                        item["allowed_tools"] = sorted(tools | {tool})
+                        self._write(session)
+                    return True
+        return False
+
+    def bind_run(self, session_id: str, handle: str, run_id: str, *, single_use: bool = False) -> bool:
+        """把一枚句柄收窄到某次运行（可选只能用一次）。只能收窄，不能放宽。"""
+        if not isinstance(handle, str) or not _ID.fullmatch(handle) or not isinstance(run_id, str) or not run_id:
+            return False
+        try:
+            check_id(session_id, "会话")
+        except StoreError:
+            return False
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return False
+            for item in session.get("contents") or []:
+                if isinstance(item, dict) and item.get("handle") == handle:
+                    if not item.get("expires_at"):
+                        _scope(item, session_id)
+                    scope = dict(item.get("scope") or {})
+                    if scope.get("run_id") and scope["run_id"] != run_id:
+                        return False
+                    scope["run_id"] = run_id
+                    item["scope"] = scope
+                    if single_use:
+                        item["single_use"] = True
+                    self._write(session)
+                    return True
+        return False
 
     def content_info(self, session_id: str, handle: str) -> dict | None:
         item = self._find_content(session_id, handle)

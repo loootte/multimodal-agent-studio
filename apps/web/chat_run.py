@@ -146,7 +146,11 @@ _SOURCE_LABEL = {"chat": "聊天原文（1.1）", "model": "模型撰写（1.2�
 _HINTS = {
     "comfyui_error": "确认本机 ComfyUI 已启动、地址正确（设置 → 工具 → comfyui），或改用第三方出图。",
     "invalid_tool_call": "换一个本会话的文字句柄，或重新输入提示词。",
+    "handle_not_found": "换一个本会话的文字句柄（list_local_content 能列出），或重新输入提示词。",
+    "handle_expired": "这枚句柄已过期或被撤销：请调用 accept_local_content 重新收下内容，或在资源面板「复用」这条内容换一枚新句柄。",
+    "handle_forbidden": "出图要用 purpose=image_prompt 的句柄；keep 只存不用。需要时调用 accept_local_content（purpose=image_prompt）。",
 }
+_HANDLE_CODES = ("handle_not_found", "handle_expired", "handle_forbidden")
 
 
 class RequestError(Exception):
@@ -612,11 +616,10 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
         tool_call = None
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    block = _handle_block(app, session_id, tool_call)
-    if block == "missing":
-        return _error_finish(
-            app, session_id, message_id, run, "invalid_tool_call", "这个内容句柄不属于本会话。", ""
-        )
+    block = _handle_block(app, session_id, tool_call, run)
+    if block in _HANDLE_CODES:
+        _deny_handle(app, session_id, run, _named_handle(tool_call), block, _call_backend(tool_call))
+        return _error_finish(app, session_id, message_id, run, block, HUMAN[block], "")
     if block == "file":
         return _refuse_file_image(app, session_id, message_id, run, tool_call)
     return _continue_after_content(
@@ -909,6 +912,9 @@ def _continue_after_content(
     print(f"content {session_id} {handle} {stored_kind} {record.get('size')}", file=sys.stderr)
     session = app.sessions.get(session_id)
     if not image and stored_kind == "text" and _wants_images(purpose, user_text):
+        if purpose != "image_prompt":
+            # 用户这句话本来就要出图（例如定时出图）：宿主按用户意图放开这枚句柄的 generate_image。模型自己放不开。
+            app.sessions.allow_tool(session_id, handle, "generate_image")
         ready_line = _ready_line(handle)
         total = _plan_total(run)
         if total:
@@ -1409,7 +1415,7 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
                 arguments["seed"] = plan["seed"] + index
             tool_call = {"name": "generate_image", "arguments": arguments}
             if source == "local":
-                bound = _bind_image(app, session_id, "", tool_call, False)
+                bound = _bind_image(app, session_id, "", tool_call, False, run)
             else:
                 bound = _bind_submitted(plan["prompt"], tool_call)
             last = _generate_bound(app, session_id, message_id, run, handle, bound, source,
@@ -1557,7 +1563,7 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
         source = staged["source"]
         bound = _bind_submitted(staged["text"], tool_call)
         return _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, bool(raw_backend))
-    block = _handle_block(app, session_id, tool_call)
+    block = _handle_block(app, session_id, tool_call, run)
     if block == "file":
         return {
             "ok": False,
@@ -1565,9 +1571,12 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
             "content_handle": handle,
             "error": {"code": "invalid_tool_call", "message": "文件内容不能用来生成图片。"},
         }
-    bound = _bind_image(app, session_id, "", tool_call, False)
+    code = block if block in _HANDLE_CODES else ""
+    bound = None if code else _bind_image(app, session_id, "", tool_call, False, run)
     if bound is None:
-        return _image_error(handle, "invalid_tool_call", "这个内容句柄不属于本会话。", _HINTS["invalid_tool_call"])
+        code = code or "handle_not_found"
+        _deny_handle(app, session_id, run, handle, code, backend)
+        return _image_error(handle, code, HUMAN[code], _HINTS[code])
     return _generate_bound(app, session_id, message_id, run, handle, bound, "local", backend, bool(raw_backend))
 
 
@@ -2052,7 +2061,8 @@ def _picture_draft(text: str) -> str:
     return draft.strip().strip("\"'“”「」『』 \n\t")
 
 
-def _handle_block(app, session_id: str, tool_call) -> str:
+def _handle_block(app, session_id: str, tool_call, run=None) -> str:
+    """模型点名的句柄能不能拿来出图。返回 "" / "file" / HANDLE_ERRORS 里的错误码。只检查，不消费。"""
     if not isinstance(tool_call, dict) or tool_call.get("name") != "generate_image":
         return ""
     named = _named_handle(tool_call)
@@ -2060,10 +2070,39 @@ def _handle_block(app, session_id: str, tool_call) -> str:
         return ""
     info = app.sessions.content_info(session_id, named)
     if info is None:
-        return "missing"
+        return "handle_not_found"
     if info.get("kind") == "file":
         return "file"
-    return ""
+    _record, code = app.sessions.resolve_content(
+        session_id, named, tool="generate_image", run_id=getattr(run, "run_id", None), consume=False,
+    )
+    return "" if code == "ok" else code
+
+
+def _call_backend(tool_call) -> str:
+    raw = tool_call.get("arguments") if isinstance(tool_call, dict) else None
+    backend = raw.get("backend") if isinstance(raw, dict) else None
+    return backend if backend in ("local", "remote") else "local"
+
+
+def _deny_handle(app, session_id: str, run, handle: str, code: str, backend: str = "local") -> None:
+    """句柄被拒：记一条出站审计（被拦下，没有读正文）和一条安全事件。只记句柄前 6 位。"""
+    try:
+        if backend == "remote":
+            channel, url = "remote_image", image_run.remote_settings().get("remote_base_url")
+        else:
+            channel, url = "comfyui_local", image_run.comfy_base()
+        egress.blocked(channel, url, code, local_derived=True, handle=handle or None)
+    except Exception as exc:  # 审计失败不改变拒绝结果
+        print(f"handle audit failed {type(exc).__name__}", file=sys.stderr)
+    telemetry.record(
+        "security.handle_denied",
+        error_code=code,
+        tool="generate_image",
+        handle_id_prefix=(handle or "")[:6] or None,
+        session_id=session_id,
+        run_id=getattr(run, "run_id", None),
+    )
 
 
 def _refuse_file_image(app, session_id, message_id, run, tool_call) -> str:
@@ -2105,21 +2144,22 @@ def _bind_submitted(submitted: str, tool_call) -> dict:
 
 
 def _run_bound(app, session_id: str, message_id: str, run: Run, user_text: str, tool_call, allow_current: bool) -> str:
-    if _handle_block(app, session_id, tool_call) == "file":
+    block = _handle_block(app, session_id, tool_call, run)
+    if block == "file":
         return _refuse_file_image(app, session_id, message_id, run, tool_call)
-    bound = _bind_image(app, session_id, user_text, tool_call, allow_current)
+    bound = None if block else _bind_image(app, session_id, user_text, tool_call, allow_current, run)
     if bound is None:
-        return _error_finish(
-            app, session_id, message_id, run, "invalid_tool_call", "这个内容句柄不属于本会话。", ""
-        )
+        code = block if block in _HANDLE_CODES else "handle_not_found"
+        _deny_handle(app, session_id, run, _named_handle(tool_call), code, _call_backend(tool_call))
+        return _error_finish(app, session_id, message_id, run, code, HUMAN[code], "")
     named = _named_handle(tool_call) if isinstance(tool_call, dict) else ""
     if named:
         bound["local_handle"] = named
     return _finish_image(app, session_id, message_id, run, "", bound)
 
 
-def _bind_image(app, session_id: str, user_text: str, tool_call, allow_current: bool) -> dict | None:
-    """用本机会话里的正文填 prompt。模型写来的自由文本丢掉。句柄对不上会话则不调用。"""
+def _bind_image(app, session_id: str, user_text: str, tool_call, allow_current: bool, run=None) -> dict | None:
+    """用本机会话里的正文填 prompt。模型写来的自由文本丢掉。句柄对不上会话、过期、撤销或用途不允许则不调用。"""
     source = {}
     if isinstance(tool_call, dict) and tool_call.get("name") == "generate_image":
         raw = tool_call.get("arguments")
@@ -2128,8 +2168,11 @@ def _bind_image(app, session_id: str, user_text: str, tool_call, allow_current: 
     named = source.get("content_handle")
     named = named.strip() if isinstance(named, str) else ""
     if named:
-        prompt = app.sessions.content_text(session_id, named)
-        if prompt is None:
+        record, code = app.sessions.resolve_content(
+            session_id, named, tool="generate_image", run_id=getattr(run, "run_id", None),
+        )
+        prompt = record.get("text") if code == "ok" and record else None
+        if not isinstance(prompt, str):
             return None
     elif allow_current:
         prompt = user_text

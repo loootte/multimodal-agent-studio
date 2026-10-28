@@ -127,6 +127,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "named":
+            self._emit_tool("generate_image", {
+                "content_handle": getattr(self.server, "named", "") or ("c_" + "cd" * 16),
+                "prompt": "模型不该填写的描述",
+                "aspect_ratio": "1:1",
+                "seed": 7,
+            })
+            return
         if mode == "rewrite":
             if not self._ready():
                 self._emit_tool("accept_local_content", {"purpose": "image_prompt"})
@@ -1787,7 +1795,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _confirm_reject_case(base, provider)
     _busy_case(base, session_id, provider)
     _timeout_case(base, session_id, provider, app)
-    _image_cases(base, provider, directory)
+    _image_cases(base, provider, directory, app)
     _trajectory_case(base, directory)
     _mining_case(base, directory)
 
@@ -3156,7 +3164,7 @@ class ComfyHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
-def _image_cases(base: str, provider, directory: str) -> None:
+def _image_cases(base: str, provider, directory: str, app=None) -> None:
     saved = {name: os.environ.get(name) for name in _COMFY_ENV}
     comfy = ThreadingHTTPServer(("127.0.0.1", 0), ComfyHandler)
     comfy.daemon_threads = True
@@ -3191,6 +3199,7 @@ def _image_cases(base: str, provider, directory: str) -> None:
         ]
         _image_uncensored(base, session_id, provider, comfy.box, workflow, directory)
         _image_foreign(base, session_id, provider, comfy.box, directory)
+        _handle_scope_case(base, provider, comfy.box, app)
         _image_history(base, session_id, provider, comfy.box, kept)
         _image_failure(base, session_id, provider, comfy.box)
         _image_stop(base, session_id, provider, comfy.box)
@@ -3438,6 +3447,178 @@ def _image_foreign(base: str, session_id: str, provider, box: ComfyState, direct
         fail("跨会话句柄被当成了出图")
     if not events or events[-1].get("type") != "run.failed":
         fail("跨会话句柄没有让这次运行失败")
+
+
+def _handle_units() -> None:
+    """12.B（#58）句柄作用域的单元检查：会话、用途、过期、撤销、运行绑定、一次性、旧记录读时升级、伪造。"""
+    import packages.contracts.events as contract
+
+    root = tempfile.mkdtemp(prefix="handles-")
+    real_clock = store.clock
+    saved_ttl = os.environ.pop("MAS_HANDLE_TTL_SEC", None)
+    try:
+        sessions = store.SessionStore(os.path.join(root, "sessions"))
+        user = "u_" + "1" * 32
+        sid = sessions.create(user)["session_id"]
+        other = sessions.create(user)["session_id"]
+        secret = "句柄单元检查的本机正文"
+        image = sessions.add_content(sid, secret, "image_prompt")
+        keep = sessions.add_content(sid, "只存不用的正文", "keep")
+        for field in ("expires_at", "state"):
+            if field not in image:
+                fail(f"句柄公开字段缺 {field}")
+        if set(image) - {"handle", "type", "kind", "media_type", "size", "purpose", "expires_at", "state"}:
+            fail(f"句柄公开字段多了东西：{sorted(image)}")
+        if secret in json.dumps(sessions.list_content(sid), ensure_ascii=False) or other in json.dumps(image):
+            fail("句柄公开字段带出了正文或会话映射")
+
+        def code(session, handle, **kw):
+            kw.setdefault("tool", "generate_image")
+            return sessions.resolve_content(session, handle, **kw)[1]
+
+        if code(sid, image["handle"]) != "ok":
+            fail("有效的 image_prompt 句柄不能出图")
+        if code(sid, keep["handle"]) != "handle_forbidden":
+            fail("keep 句柄能拿来出图（越权 purpose）")
+        if code(other, image["handle"]) != "handle_not_found":
+            fail("跨会话句柄没有当成不存在")
+        for forged in ("c_" + "ab" * 16, "c_xyz", "", "x_" + "0" * 32, image["handle"].upper(), None):
+            if code(sid, forged) != "handle_not_found":
+                fail(f"伪造句柄没有被拒：{forged!r}")
+        if not set(contract.HANDLE_ERRORS) <= set(contract.ERROR_CODES) or not set(contract.HANDLE_ERRORS) <= set(contract.EGRESS_REASONS):
+            fail("句柄错误码没有登记到 ERROR_CODES / EGRESS_REASONS")
+        os.environ["MAS_HANDLE_TTL_SEC"] = "5"
+        if store.handle_ttl() != store.HANDLE_TTL_MIN:
+            fail("过小的 TTL 没有夹到下限")
+        os.environ["MAS_HANDLE_TTL_SEC"] = "abc"
+        if store.handle_ttl() != store.HANDLE_TTL_DEFAULT:
+            fail("坏的 TTL 没有回到默认值")
+        os.environ.pop("MAS_HANDLE_TTL_SEC", None)
+        now = real_clock()
+        store.clock = lambda: now + store.HANDLE_TTL_DEFAULT + 1
+        if code(sid, image["handle"]) != "handle_expired":
+            fail("过期句柄还能出图")
+        if sessions.content_info(sid, image["handle"])["state"] != "expired":
+            fail("过期句柄的状态不是 expired")
+        public = set(sessions.content_info(sid, image["handle"]))
+        if public != {"handle", "type", "kind", "media_type", "size", "purpose", "expires_at", "state"}:
+            fail(f"句柄公开字段超出白名单：{sorted(public)}")
+        if secret not in sessions.local_bodies(sid):
+            fail("过期句柄的正文不再参与出口检查")
+        fresh = sessions.add_content(sid, secret, "image_prompt")
+        if fresh["handle"] == image["handle"] or fresh["state"] != "active":
+            fail("同一正文再次收下没有换一枚新句柄")
+        if code(sid, image["handle"]) == "ok" or code(sid, fresh["handle"]) != "ok":
+            fail("换句柄之后新旧句柄的有效性不对")
+        store.clock = real_clock
+        if sessions.revoke_content(sid, fresh["handle"]) != "revoked" or code(sid, fresh["handle"]) != "handle_expired":
+            fail("撤销后的句柄还能出图")
+        if sessions.revoke_content(other, fresh["handle"]) != "absent":
+            fail("别的会话能撤销这枚句柄")
+        bound = sessions.add_content(sid, "绑在一次运行上的正文", "image_prompt")
+        if not sessions.bind_run(sid, bound["handle"], "r_" + "1" * 32, single_use=True):
+            fail("绑定运行失败")
+        if code(sid, bound["handle"], run_id="r_" + "2" * 32) != "handle_forbidden":
+            fail("别的运行能用绑定到这次运行的句柄（子 Agent / 运行作用域）")
+        if code(sid, bound["handle"], run_id="r_" + "1" * 32) != "ok":
+            fail("本次运行不能用自己的句柄")
+        if code(sid, bound["handle"], run_id="r_" + "1" * 32) != "handle_expired":
+            fail("一次性句柄能用第二次")
+        if sessions.bind_run(sid, bound["handle"], "r_" + "3" * 32):
+            fail("运行绑定能被改到别的运行（只能收窄）")
+        if sessions.revoke_run(sid, "r_" + "1" * 32) != 1:
+            fail("按运行撤销句柄的数目不对")
+        if not sessions.allow_tool(sid, keep["handle"], "generate_image") or code(sid, keep["handle"]) != "ok":
+            fail("宿主放开 keep 句柄的 generate_image 失败")
+        if sessions.allow_tool(sid, keep["handle"], "rm_rf"):
+            fail("宿主能放开未登记的工具")
+        # 旧记录（12.B 之前的 c_ 句柄）：读时升级，句柄串不变。
+        legacy = "c_" + "e" * 32
+        path = sessions._path(sid)
+        with open(path, encoding="utf-8") as handle_file:
+            data = json.load(handle_file)
+        data.setdefault("contents", []).append({
+            "handle": legacy, "type": "text", "kind": "text", "media_type": "text/plain", "size": 3,
+            "purpose": "image_prompt", "text": "旧正文", "message_id": "", "created_at": "2026-01-01T00:00:00Z",
+        })
+        with open(path, "w", encoding="utf-8") as handle_file:
+            json.dump(data, handle_file, ensure_ascii=False)
+        if code(sid, legacy) != "ok":
+            fail("旧句柄没有读时升级")
+        upgraded = sessions.content_info(sid, legacy)
+        if not upgraded.get("expires_at") or upgraded["state"] != "active":
+            fail("旧句柄升级后没有过期时间")
+        if code(other, legacy) != "handle_not_found":
+            fail("旧句柄升级后能跨会话")
+    finally:
+        store.clock = real_clock
+        if saved_ttl is not None:
+            os.environ["MAS_HANDLE_TTL_SEC"] = saved_ttl
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _handle_scope_case(base: str, provider, box: ComfyState, app) -> None:
+    """12.B（#58）端到端：模型点名过期、越权 purpose、跨会话、已撤销的句柄出图，都被拒并记进出站审计。"""
+    if app is None:
+        return
+    _handle_units()
+    real_clock = store.clock
+    secret = "作用域检查的本机正文-丙"
+    session_id = _fresh_session(base)
+    other = _fresh_session(base)
+    keep = app.sessions.add_content(session_id, secret + "keep", "keep")["handle"]
+    image = app.sessions.add_content(session_id, secret, "image_prompt")["handle"]
+    revoked = app.sessions.add_content(session_id, secret + "revoked", "image_prompt")["handle"]
+    status, body = request("POST", base + "/api/resources/revoke", {"id": f"prompt:{session_id}:{revoked}"})
+    if status != 200 or json.loads(body).get("state") != "revoked":
+        fail(f"资源面板撤销句柄失败：{status} {body}")
+    listed = json.loads(request("GET", base + f"/api/resources?session={session_id}")[1])["items"]
+    states = {item["handle"]: item.get("state") for item in listed}
+    if states.get(revoked) != "revoked" or states.get(image) != "active":
+        fail(f"资源面板的句柄状态不对：{states}")
+    cases = [
+        ("handle_forbidden", session_id, keep, None),
+        ("handle_expired", session_id, image, store.HANDLE_TTL_DEFAULT + 5),
+        ("handle_not_found", other, image, None),
+        ("handle_expired", session_id, revoked, None),
+    ]
+    provider.mode = "named"
+    box.set_mode("ok")
+    try:
+        for expect, sid, handle, skew in cases:
+            provider.named = handle
+            before = len(box.prompts)
+            sent = len(provider.requests)
+            if skew:
+                now = real_clock()
+                store.clock = lambda: now + skew
+            try:
+                events = _speak(base, sid, "画一张作用域检查的图", timeout=12)
+            finally:
+                store.clock = real_clock
+            if len(box.prompts) != before:
+                fail(f"{expect}：被拒的句柄仍然提交了 ComfyUI")
+            if any(secret in _provider_blob(item) for item in provider.requests[sent:]):
+                fail(f"{expect}：本地正文进了模型请求")
+            errors = [event for event in events if event.get("type") == "error"]
+            if not errors or errors[-1].get("code") != expect:
+                fail(f"{expect}：错误码不对：{[e.get('code') for e in errors]}")
+            if not events or events[-1].get("type") != "run.failed":
+                fail(f"{expect}：被拒的句柄没有让这次运行失败")
+            if any(event.get("type") == "artifact" for event in events):
+                fail(f"{expect}：被拒的句柄出了图")
+            status, raw = request("GET", base + "/api/egress?limit=5000")
+            if secret in raw or handle in raw:
+                fail(f"{expect}：出站审计里出现了正文或完整句柄")
+            rows = [row for row in json.loads(raw)["events"]
+                    if row.get("type") == "egress.blocked" and row.get("reason_code") == expect
+                    and row.get("handle_id_prefix") == handle[:6]]
+            if not rows:
+                fail(f"{expect}：句柄被拒没有记进出站审计")
+    finally:
+        provider.named = ""
+        provider.mode = "ok"
+    print("handle scope ok")
 
 
 def _image_history(base: str, session_id: str, provider, box: ComfyState, prompts: list[str]) -> None:

@@ -82,6 +82,10 @@
       if (item.running) flags.push("会话正在回答");
       if (item.shared) flags.push("字节被多个会话共用");
       if (item.mentions) flags.push(`会话里提到 ${item.mentions} 次`);
+      if (item.state === "expired") flags.push("句柄已过期（复用会换新句柄）");
+      else if (item.state === "revoked") flags.push("句柄已撤销（复用会换新句柄）");
+      else if (item.state === "used") flags.push("句柄已用过");
+      else if (item.expires_at) flags.push(`句柄有效到 ${when(item.expires_at)}`);
       if (flags.length) main.append(el("div", "hint", flags.join(" · ")));
       const actions = el("div", "res-actions");
       const button = (label, fn) => {
@@ -94,6 +98,7 @@
       button("标签", () => relabel(item));
       button("下载", () => { window.location.href = rawUrl(item, true); });
       if (["prompt", "text", "file"].includes(item.type)) button("用在当前对话", () => reuse(item));
+      if (["prompt", "text", "file"].includes(item.type) && item.state === "active") button("撤销句柄", () => revoke(item));
       button("删除", () => remove([item.id]));
       li.append(box, main, actions);
       list.append(li);
@@ -167,6 +172,16 @@
         if (window.confirm(`${error.message}\n\n${[...new Set(lines)].join("\n")}\n\n仍然删除？`)) return remove(ids, true);
         return;
       }
+      say(error.message);
+    }
+  }
+
+  async function revoke(item) {
+    try {
+      await api("POST", "/api/resources/revoke", { id: item.id });
+      say(`句柄 ${item.handle} 已撤销：正文还在本机，这个句柄不能再用来出图。`);
+      load();
+    } catch (error) {
       say(error.message);
     }
   }

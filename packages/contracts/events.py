@@ -56,7 +56,18 @@ EGRESS_REASONS = {
     "timeout": "等待超时。",
     "cancelled": "已停止。",
     "rejected": "对方拒绝了这次请求。",
+    "handle_not_found": "句柄不存在或不属于本会话，已拦下；没有读取任何本地内容。",
+    "handle_expired": "本地内容句柄已过期或已撤销，已拦下；本地内容没有离开本机。",
+    "handle_forbidden": "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
 }
+
+# 句柄（ADR 0009，路线图 12.B #58）：本地内容句柄是短时能力令牌，绑定会话、用途（purpose）、可选运行和过期时间。
+# 消费失败的错误码固定为下面三个；跨会话和伪造的句柄一律当作 handle_not_found（不暴露它在别的会话里存在）。
+HANDLE_SCHEMA = "mas.handle/1"
+HANDLE_ERRORS = ("handle_not_found", "handle_expired", "handle_forbidden")
+HANDLE_STATES = ("active", "expired", "revoked", "used")
+# 每种用途默认允许哪些工具消费正文。keep 只存不用：模型拿它出图会得到 handle_forbidden。
+HANDLE_PURPOSE_TOOLS = {"image_prompt": ("generate_image",), "keep": ()}
 
 TERMINAL_EVENTS = (EVENT_MESSAGE_COMPLETED, EVENT_RUN_FAILED)
 
@@ -71,6 +82,9 @@ ERROR_CODES = (
     "missing_key",
     "local_content",
     "budget_exceeded",
+    "handle_not_found",
+    "handle_expired",
+    "handle_forbidden",
 )
 
 HUMAN = {
@@ -84,6 +98,9 @@ HUMAN = {
     "missing_key": "还没有配置 API key。请在设置里填写。",
     "local_content": "本地内容留在本机，没有发给模型。",
     "budget_exceeded": "超过预算，已经停下。",
+    "handle_not_found": "这个内容句柄不属于本会话。",
+    "handle_expired": "这个本地内容句柄已过期或已撤销，不能再用。",
+    "handle_forbidden": "这个本地内容句柄的用途不允许这样用。",
 }
 
 RETRYABLE = {
@@ -97,4 +114,7 @@ RETRYABLE = {
     "missing_key": False,
     "local_content": False,
     "budget_exceeded": False,
+    "handle_not_found": False,
+    "handle_expired": False,
+    "handle_forbidden": False,
 }

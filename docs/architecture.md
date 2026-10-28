@@ -58,10 +58,10 @@ Agent 运行时
 2. `chat_run.py` 把这句说明交给模型。模型调用 `accept_local_content`。`purpose` 只接受 `image_prompt` 或 `keep`，其他文字丢掉。`kind` 是 `text` 或 `file`，不填则是 `text`。
 3. `content_request` 带到页面。`kind` 为 `text` 时是文本框，为 `file` 时是文件选择。`app.js` 不用 `innerHTML`。提交文件时不带原始文件名。
 4. 页面 `POST /api/runs/{run_id}/content`。文字进 `chat_run.submit_content`，文件进 `chat_run.submit_file`。响应只有 `ok`，不回正文、字节、路径或句柄。
-5. `store.py` 新建随机句柄，形如 `c_` 加十六进制，不用正文或字节的哈希。同一会话里相同正文或相同文件字节复用已有句柄。文字写在会话 JSON 的 `contents`。文件字节写在 `packages/artifacts` 的校验和库里。记录是句柄、种类、媒体类型、大小、用途和校验和。
+5. `store.py` 新建随机句柄，形如 `c_` 加十六进制，不用正文或字节的哈希。句柄是短时能力令牌（12.B，见 [handle-scope.md](handle-scope.md)）：本机记录绑定会话、用途、可选运行和过期时间（默认 4 小时），可撤销。同一会话里相同正文或相同文件字节复用仍有效的句柄；已过期或撤销的换一枚新句柄。文字写在会话 JSON 的 `contents`。文件字节写在 `packages/artifacts` 的校验和库里。记录是句柄、种类、媒体类型、大小、用途和校验和。
 6. 下一次模型请求只有句柄、种类和大小。模型可以调用 `list_local_content`、`retrieve_local` 或 `forget_local_content`。回到模型的结果只有句柄、种类、媒体类型、大小、用途、状态和可打开的地址。检索结果带来源标识，页面能点开。
 7. `forget_content` 删掉本会话的记录和文件字节，并把已经出现在本会话消息里的正文换成一句不含正文的说明。别的会话列出、读取或删除，都像没有这枚句柄。
-8. 若接着调用 `generate_image`：文字句柄按上面的出图注入。文件句柄到此结束，不调用 `image_run.generate`。
+8. 若接着调用 `generate_image`：宿主先用 `resolve_content` 校验句柄（同会话、未过期未撤销、用途允许 `generate_image`、运行绑定相符），通过才把正文按上面的出图注入。失败返回 `handle_not_found` / `handle_expired` / `handle_forbidden`，记 `egress.blocked` 和 `security.handle_denied`，不提交 ComfyUI。`keep` 句柄默认不能出图。文件句柄到此结束，不调用 `image_run.generate`。
 9. `openai_chat.py` 在打开连接前检查。已入库的文字、文件的文本，以及文件字节的 base64，长度不少于 8 且出现在工具契约以外，就以 `local_content` 失败。
 
 日志行是 `content {会话} {句柄} {种类} {大小}`。不记正文、字节、路径、原始文件名和密钥。
