@@ -189,7 +189,32 @@
 
 [#51](https://github.com/loootte/multimodal-agent-studio/issues/51)（进行中，`issue-51` 分支）：侧边栏「本地资源」面板，统一查看本地提示词/文字、本地文件、附件和生成文件：类型、时间、大小、引用会话、本机预览、总占用；筛选搜索、改标签、下载、删除/批量删除（引用提示、共享字节、运行中拒删、轨迹重建）、复用到当前对话（只给句柄）。接口只给本机，数据不进模型。见 [docs/local-resources.md](docs/local-resources.md)。
 
-## 12. 角色图片定制工具
+## 12. 隐私隔离强化
+
+[#56](https://github.com/loootte/multimodal-agent-studio/issues/56)。建立在 [ADR 0003](docs/adr/0003-local-data-isolation.md)、[安全清单](docs/security-checklist.md) 与第 7 阶段工具清单之上。路线图入库见 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。**开工前先写 ADR 0009**（句柄作用域与出站审计事件），草稿见 [docs/adr/0009-handle-scope-and-egress-audit.md](docs/adr/0009-handle-scope-and-egress-audit.md)。
+
+按顺序（上一子阶段完成标准未达不开始下一阶段功能；12.E 可与 12.A 合并 MVP）：
+
+1. [#57](https://github.com/loootte/multimodal-agent-studio/issues/57) **12.A** 出站审计与确认可见（P0，售前优先）：网关 `egress.planned` / `blocked` / `sent` 事件（无正文）、确认卡附出站摘要、运行过程「数据出站」时间线。
+2. [#58](https://github.com/loootte/multimodal-agent-studio/issues/58) **12.B** 作用域句柄（P0）：不透明、短时、带 session/purpose/expiry；跨会话与过期不可消费。
+3. [#61](https://github.com/loootte/multimodal-agent-studio/issues/61) **12.E** 敏感操作强制确认与数据流可视化（P1，可与 A 合并 MVP）：`network`/本地读组合不可 `confirm=never`；会话级数据流图。
+4. [#59](https://github.com/loootte/multimodal-agent-studio/issues/59) **12.C** 网关拦截硬化（P1）：结构化出站策略、编码规范化、适配器统一出口中间件。
+5. [#63](https://github.com/loootte/multimodal-agent-studio/issues/63) **12.G** 提示注入导致的数据外泄防护（P2）：确认文案由宿主模板生成；配置变更不走工具。
+6. [#60](https://github.com/loootte/multimodal-agent-studio/issues/60) **12.D** 工具权限最小化与执行沙箱（P2）：声明权限可强制；第三方 pack 降权执行；ComfyUI 仍为本机白名单客户端。
+7. [#62](https://github.com/loootte/multimodal-agent-studio/issues/62) **12.F** 本地存储加密与会话隔离（P3）：落盘加密、密钥不进 Git；可与第 6 阶段登录衔接。
+
+完成标准：
+
+- 任意一次供应商调用可在界面回放出站摘要与拦截原因，审计导出无正文/密钥。
+- 句柄具备 session/purpose/expiry；跨会话与过期句柄不可消费。
+- `send_local_to_model` 仍为硬禁止；`remote_local_prompt` 默认 `refuse` 且变更可审计。
+- 安全类评测进入 `evals/gate.py`，回退则不发。
+
+本阶段明确不做：多租户 IAM、远程授权、插件市场签名、把 ComfyUI 塞进通用容器沙箱、云端密钥托管。
+
+状态：未开始。
+
+## 13. 角色图片定制工具
 
 [#53](https://github.com/loootte/multimodal-agent-studio/issues/53)（进行中，`issue-53` 分支）：内置工具包 `character_image`，九个字段（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）都有预设也能自填，默认是年轻女性角色；拼成英文提示词后走现有出图流程（`generate_image` 一次一张、`plan_images` 张数、本机/第三方按 #49）。网页「定制角色」对话框和对话调用两条路；本地提示词模式按 ADR 0008；未成年与暴露内容的安全规则。见 [docs/character-image.md](docs/character-image.md)。
 
