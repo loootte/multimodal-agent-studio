@@ -41,7 +41,7 @@ from packages.contracts.events import (
 from services import telemetry
 from services.gateway import GatewayError, egress, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
-from services.runtime.tools import authorize as authorize_tool, egress_preview, tool_mutates
+from services.runtime.tools import authorize as authorize_tool, confirm_every_call, egress_preview, tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
@@ -687,7 +687,8 @@ def _generate_text_turn(
 
     def confirm(name, arguments):
         ok = run.wait_confirm()
-        if ok:
+        # 12.E：联网 / 读本地内容的第三方工具每次都问，不记进「本轮已确认」。
+        if ok and not confirm_every_call(name):
             allowed.add(name)
         return ok
 
@@ -1202,7 +1203,7 @@ def _finish_image_inner(app, session_id: str, message_id: str, run: Run, text: s
     local_handle = tool_call.get("local_handle") if isinstance(tool_call.get("local_handle"), str) else ""
     if local_handle:
         # 提示词来自本机内容：出站审计标成本地派生，只记句柄前缀（#57）。
-        with egress.note(local_derived=True, handle=local_handle):
+        with egress.note(local_derived=True, handle=local_handle, tool="generate_image"):
             result = _run_image(app, session_id, message_id, run, arguments)
     else:
         result = _run_image(app, session_id, message_id, run, arguments)
@@ -1475,8 +1476,16 @@ def _image_error(handle: str, code: str, message: str, hint: str = "", backend: 
 
 
 def _remote_consent(app, session_id, message_id, run, handle: str, base: str) -> bool:
-    """1.3 + 第三方：每轮先请用户明确同意把本地提示词正文发给出图服务（不发给对话模型）。"""
-    if getattr(run, "_remote_local_ok", False):
+    """1.3 + 第三方：每轮先请用户明确同意把本地提示词正文发给出图服务（不发给对话模型）。
+
+    12.E：同意只绑定在（这一轮, 这个句柄, 这个目的主机）上；换句柄、换出图服务主机都要重新问，
+    不跨轮保存（每轮新的 Run 对象），拒绝也不记住（下次调用再问）。"""
+    host, _scope = egress.destination(base)
+    key = (handle, host)
+    granted = getattr(run, "_remote_local_ok", None)
+    if not isinstance(granted, set):
+        granted = run._remote_local_ok = set()
+    if key in granted:
         return True
     lock = getattr(run, "_agent_confirm_lock", None)
     if lock is not None:
@@ -1485,7 +1494,7 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
         run.begin_confirm_wait()
         notice = (
             f"要把本地提示词（{handle}）的正文发给第三方出图服务 {base}。"
-            "正文不会发给对话模型。确认后这一轮不再询问。"
+            "正文不会发给对话模型。确认后这一轮里同一个句柄发给同一个主机不再询问；下一轮还会再问。"
         )
         args = {"content_handle": handle, "backend": "remote"}
         summary = _confirm_egress(app, session_id, run, "generate_image", args, None)
@@ -1504,7 +1513,8 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
                 lock.release()
             except RuntimeError:
                 pass
-    run._remote_local_ok = bool(ok)
+    if ok:
+        granted.add(key)
     return bool(ok)
 
 
@@ -1604,7 +1614,7 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
         if source == "local":
             if settings.get("remote_local_prompt") != "confirm":
                 egress.blocked("remote_image", settings.get("remote_base_url"), "local_prompt_remote_refused",
-                               local_derived=True, handle=handle)
+                               local_derived=True, handle=handle, tool="generate_image")
                 return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "local_prompt_remote_refused",
                     "本地提示词（1.3）默认不发给第三方出图服务。",
@@ -1614,7 +1624,7 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
                 ))
             if not _remote_consent(app, session_id, message_id, run, handle, str(settings.get("remote_base_url") or "")):
                 egress.blocked("remote_image", settings.get("remote_base_url"), "user_declined",
-                               local_derived=True, handle=handle)
+                               local_derived=True, handle=handle, tool="generate_image")
                 return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。", "可以改用本机 ComfyUI 出图。", backend))
     bound_args = dict(bound.get("arguments") or {})
@@ -1627,7 +1637,7 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
             "content_handle": handle,
             "error": {"code": "cancelled", "message": HUMAN["cancelled"]},
         }
-    with egress.note(local_derived=source == "local", handle=handle):
+    with egress.note(local_derived=source == "local", handle=handle, tool="generate_image"):
         result = _run_image(app, session_id, message_id, run, bound_args)
     public = _public_generate_result(result, handle)
     _note_image(run, source, backend, explicit_backend, public)
@@ -1886,8 +1896,44 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
                 summary["handle_source"] = "local"
                 summary["handle_purpose"] = info.get("purpose")
                 summary["reads_local"] = True
+    # 12.E 固定区块：每张确认卡都有这三项，界面按固定顺序显示，模型改不了。
+    summary["destination_host"] = summary.get("destination_host") or ""
+    summary["handle_purpose"] = summary.get("handle_purpose") or ""
+    summary["contains_local_derived"] = bool(
+        summary.get("handle_source") == "local"
+        or (summary.get("sandboxed") and summary.get("reads_local") and summary.get("network"))
+    )
+    summary["local_to_third_party"] = bool(
+        summary["contains_local_derived"] and destination == "third_party_image"
+    )
+    summary["fixed"] = _egress_fixed(summary)
     summary["text"] = _egress_text(summary)
     return summary
+
+
+def _egress_fixed(summary: dict) -> list[dict]:
+    """确认卡固定区块（12.E #61）：出站主机、是否含本地派生内容、句柄用途。值都由宿主生成。"""
+    host = summary.get("destination_host") or ""
+    scope = summary.get("destination_scope") or ""
+    if host:
+        where = {"local": "本机", "lan": "局域网"}.get(scope, "第三方")
+        host_text = f"{host}（{where}）"
+    elif summary.get("network"):
+        host_text = "由工具包运行时决定（每次连接记进「数据出站」）"
+    else:
+        host_text = "无（不联网）"
+    purpose = summary.get("handle_purpose") or ""
+    if purpose:
+        purpose_text = f"{_PURPOSE_LABELS.get(purpose, purpose)}（{purpose}）"
+    elif summary.get("handle_id_prefix"):
+        purpose_text = "不是本地内容句柄"
+    else:
+        purpose_text = "不用句柄"
+    return [
+        {"key": "destination_host", "label": "出站主机", "value": host_text},
+        {"key": "contains_local_derived", "label": "含本地派生内容", "value": "是" if summary.get("contains_local_derived") else "否"},
+        {"key": "handle_purpose", "label": "句柄用途", "value": purpose_text},
+    ]
 
 
 def _egress_text(summary: dict) -> str:
@@ -2103,7 +2149,7 @@ def _deny_handle(app, session_id: str, run, handle: str, code: str, backend: str
             channel, url = "remote_image", image_run.remote_settings().get("remote_base_url")
         else:
             channel, url = "comfyui_local", image_run.comfy_base()
-        egress.blocked(channel, url, code, local_derived=True, handle=handle or None)
+        egress.blocked(channel, url, code, local_derived=True, handle=handle or None, tool="generate_image")
     except Exception as exc:  # 审计失败不改变拒绝结果
         print(f"handle audit failed {type(exc).__name__}", file=sys.stderr)
     telemetry.record(
@@ -2537,7 +2583,7 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
                 run._agent_confirm_lock.release()
             except RuntimeError:
                 pass
-        if ok:
+        if ok and not confirm_every_call(name):
             run._agent_allowed.add((agent.name, name))
         return ok
 

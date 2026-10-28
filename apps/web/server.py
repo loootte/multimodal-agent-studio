@@ -14,6 +14,7 @@ import socket
 import sys
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -160,6 +161,39 @@ def _trajectories(handler, app, query) -> None:
                            mode=one("mode"), session=one("session"), since=one("since"), until=one("until"),
                            limit=limit, full=one("brief") is None)
     _send_json(handler, 200, {"schema": "mas.trajectory/1", "export": stats, "trajectories": items})
+
+
+def _audit_policy_change(tool: str, change: dict) -> None:
+    """12.E：受保护配置项（如 remote_local_prompt）每次变更记一条遥测安全事件。只有名字和前后取值。"""
+    try:
+        telemetry.record(
+            "security.policy_changed", trace_id="cfg_" + uuid.uuid4().hex,
+            tool=tool, field=str(change.get("field") or ""),
+            from_value=str(change.get("from")), to_value=str(change.get("to")), via="web",
+        )
+    except Exception as exc:  # 审计失败不回滚配置，但要看得见
+        print(f"警告：配置变更审计写入失败 {type(exc).__name__}", file=sys.stderr)
+
+
+def _dataflow_route(handler, app, query) -> None:
+    """会话级数据流图（12.E #61）：本地内容 → 句柄 → 工具 →（本机 ComfyUI | 第三方）。
+    只读出站审计和句柄公开字段拼出来；和出站审计同一道回环检查。"""
+    import dataflow
+
+    host = (handler.client_address or ("",))[0]
+    if host not in resources.LOOPBACK:
+        _send_json(handler, 403, {"code": "forbidden", "message": "数据流图只给本机看。"})
+        return
+    session_id = ((query.get("session_id") or [""])[0]).strip()
+    if not re.fullmatch(r"s_[0-9a-f]{32}", session_id):
+        _send_json(handler, 400, {"code": "invalid_session_id", "message": "session_id 不合法。"})
+        return
+    try:
+        contents = app.sessions.list_content(session_id)
+    except store.StoreError:
+        _send_json(handler, 404, {"code": "not_found", "message": "找不到这个会话。"})
+        return
+    _send_json(handler, 200, dataflow.build(session_id, egress.read(session_id, 5000), contents))
 
 
 def _egress_route(handler, path, query) -> None:
@@ -351,6 +385,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         if method == "GET" and path in ("/api/egress", "/api/egress/export"):
             _egress_route(handler, path, urllib.parse.parse_qs(parsed.query))
             return
+        if method == "GET" and path == "/api/dataflow":
+            _dataflow_route(handler, app, urllib.parse.parse_qs(parsed.query))
+            return
         if method == "GET" and (path == "/api/telemetry" or path.startswith("/api/telemetry/")):
             query = urllib.parse.parse_qs(parsed.query)
             trace_id = path[len("/api/telemetry/"):] if path.startswith("/api/telemetry/") else query.get("trace_id", [""])[0]
@@ -409,10 +446,18 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                         body.get("values") or {},
                         reset=bool(body.get("reset")),
                         clear=body.get("clear") if isinstance(body.get("clear"), list) else None,
+                        acknowledge=body.get("acknowledge") if isinstance(body.get("acknowledge"), list) else None,
                     )
+                except tool_config.AckRequired as exc:
+                    # 12.E：放宽隐私默认值要先在界面上看到后果并勾选确认。
+                    _send_json(handler, 409, {"code": "acknowledge_required", "message": str(exc),
+                                              "errors": exc.errors, "warnings": exc.warnings})
+                    return
                 except tool_config.ConfigError as exc:
                     _send_json(handler, 400, {"code": "invalid_tool_config", "message": str(exc), "errors": exc.errors})
                     return
+                for change in view.get("changed_guarded") or []:
+                    _audit_policy_change(name, change)
                 _send_json(handler, 200, view)
                 return
             if parts[1:] == ["test"] and method == "POST":
