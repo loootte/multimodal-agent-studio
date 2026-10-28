@@ -24,7 +24,7 @@ from services.gateway.openai_chat import reject_unsupported
 from services.runtime.budget import Budget, Clock
 from services import telemetry
 from services.runtime import trace
-from services.runtime.tools import execute_tool, openai_tools, tool_mutates, validate_arguments
+from services.runtime.tools import egress_preview, execute_tool, openai_tools, tool_mutates, validate_arguments
 
 
 def new_run_id() -> str:
@@ -221,11 +221,16 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
         "call_id": tool_call.get("call_id"),
     }
     if _asks_confirm(mutating, name, arguments):
+        try:
+            summary = egress_preview(name, arguments)
+        except Exception:  # 摘要拿不到时照样要确认，只是卡上少一块
+            summary = None
         yield {
             "type": EVENT_TOOL_CONFIRM,
             "run_id": run_id,
             "name": name,
             "arguments": arguments,
+            "egress": summary,
         }
         allowed = False
         if callable(confirm):

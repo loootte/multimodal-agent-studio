@@ -60,6 +60,24 @@ def tool_mutates(name: str, arguments=None) -> bool:
     return packs.needs_confirm(pack, arguments)
 
 
+def egress_preview(name: str, arguments=None) -> dict:
+    """确认卡上的出站摘要（#57）：由宿主按工具清单的 permissions 生成，不用模型的解释文字。
+
+    这里只给通用部分（会不会联网、会不会读本地内容）；网页宿主再补上目的地主机和句柄用途。
+    """
+    _ensure()
+    from tools import packs
+
+    pack = packs.find(name)
+    permissions = (pack.manifest.get("permissions") or {}) if pack is not None else {}
+    return {
+        "by": "host",
+        "network": bool(permissions.get("network")),
+        "reads_local": bool(permissions.get("read_local_content")),
+        "sends_local_to_model": bool(permissions.get("send_local_to_model")),
+    }
+
+
 def openai_tools() -> list[dict]:
     _ensure()
     from tools.registry import external_contracts

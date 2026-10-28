@@ -39,9 +39,9 @@ from packages.contracts.events import (
     TERMINAL_EVENTS,
 )
 from services import telemetry
-from services.gateway import GatewayError, stream as gateway_stream
+from services.gateway import GatewayError, egress, stream as gateway_stream
 from services.runtime import execute_tool, traces_for, validate_arguments
-from services.runtime.tools import tool_mutates
+from services.runtime.tools import egress_preview, tool_mutates
 from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
@@ -546,10 +546,12 @@ def _run_error_code(app, session_id: str, message_id: str) -> str | None:
 
 def _traced_generate(app, session_id: str, message_id: str, run: Run, provider: dict) -> None:
     telemetry.bind(run.run_id, owner="web")
+    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run))
     started = time.monotonic()
     try:
         _generate(app, session_id, message_id, run, provider)
     finally:
+        egress.detach(run.run_id)
         status, code = "failed", None
         try:
             for message in (app.sessions.get(session_id) or {}).get("messages") or []:
@@ -793,11 +795,13 @@ def _generate_text_turn(
                 run.begin_confirm_wait()
                 name = event.get("name") or ""
                 args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+                summary = _confirm_egress(app, session_id, run, name, args, event.get("egress"))
                 _push_saved(app, session_id, message_id, run, {
                     "type": EVENT_TOOL_CONFIRM,
                     "name": name,
                     "tool": name,
                     "arguments": _public_args(args),
+                    "egress": summary,
                     "message_id": message_id,
                     "run_id": run.run_id,
                 })
@@ -806,6 +810,7 @@ def _generate_text_turn(
                     "tool": name,
                     "arguments": _public_args(args),
                     "status": "waiting_confirm",
+                    "egress": summary,
                     "message_id": message_id,
                     "run_id": run.run_id,
                 })
@@ -937,12 +942,14 @@ def _continue_after_content(
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
     if image:
         bound = _bind_submitted(submitted, tool_call)
+        bound["local_handle"] = handle
         return _finish_image(app, session_id, message_id, run, "", bound)
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
     if name == "generate_image":
         if stored_kind == "file":
             return _refuse_file_image(app, session_id, message_id, run, tool_call)
         bound = _bind_submitted(submitted, tool_call)
+        bound["local_handle"] = handle
         return _finish_image(app, session_id, message_id, run, reply, bound)
     if name in ("list_local_content", "forget_local_content", "lookup_demo", "retrieve_local"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
@@ -1178,7 +1185,13 @@ def _finish_image_inner(app, session_id: str, message_id: str, run: Run, text: s
         return _error_finish(
             app, session_id, message_id, run, "invalid_tool_call", "这一版只能生成图片。", text
         )
-    result = _run_image(app, session_id, message_id, run, arguments)
+    local_handle = tool_call.get("local_handle") if isinstance(tool_call.get("local_handle"), str) else ""
+    if local_handle:
+        # 提示词来自本机内容：出站审计标成本地派生，只记句柄前缀（#57）。
+        with egress.note(local_derived=True, handle=local_handle):
+            result = _run_image(app, session_id, message_id, run, arguments)
+    else:
+        result = _run_image(app, session_id, message_id, run, arguments)
     if run.cancel.is_set():
         return _error_finish(app, session_id, message_id, run, "cancelled", HUMAN["cancelled"], text)
     if not isinstance(result, dict) or not result.get("ok"):
@@ -1378,6 +1391,8 @@ def start_character(app, session_id: str, body) -> Run:
 def _character_run(app, session_id, message_id, run, plan) -> None:
     started = time.monotonic()
     status = "failed"
+    telemetry.bind(run.run_id, owner="web")
+    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run))
     try:
         if plan["privacy"] == "local":
             record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
@@ -1426,6 +1441,8 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
         telemetry.record("run", trace_id=run.run_id, status=status, ok=status == "completed",
                          ms=int((time.monotonic() - started) * 1000), error_code=None if status == "completed" else status,
                          session_id=session_id)
+        egress.detach(run.run_id)
+        telemetry.bind(None)
 
 
 def _image_error(handle: str, code: str, message: str, hint: str = "", backend: str = "") -> dict:
@@ -1454,13 +1471,14 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
             "正文不会发给对话模型。确认后这一轮不再询问。"
         )
         args = {"content_handle": handle, "backend": "remote"}
+        summary = _confirm_egress(app, session_id, run, "generate_image", args, None)
         _push_saved(app, session_id, message_id, run, {
             "type": EVENT_TOOL_CONFIRM, "name": "generate_image", "tool": "generate_image", "arguments": args,
-            "notice": notice, "message_id": message_id, "run_id": run.run_id,
+            "notice": notice, "egress": summary, "message_id": message_id, "run_id": run.run_id,
         })
         _push_saved(app, session_id, message_id, run, {
             "type": EVENT_TOOL_CALL, "tool": "generate_image", "arguments": args, "status": "waiting_confirm",
-            "notice": notice, "message_id": message_id, "run_id": run.run_id,
+            "notice": notice, "egress": summary, "message_id": message_id, "run_id": run.run_id,
         })
         ok = run.wait_confirm()
     finally:
@@ -1565,6 +1583,8 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
         run._remote_model = str(settings.get("remote_model") or "")
         if source == "local":
             if settings.get("remote_local_prompt") != "confirm":
+                egress.blocked("remote_image", settings.get("remote_base_url"), "local_prompt_remote_refused",
+                               local_derived=True, handle=handle)
                 return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "local_prompt_remote_refused",
                     "本地提示词（1.3）默认不发给第三方出图服务。",
@@ -1573,6 +1593,8 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
                     backend,
                 ))
             if not _remote_consent(app, session_id, message_id, run, handle, str(settings.get("remote_base_url") or "")):
+                egress.blocked("remote_image", settings.get("remote_base_url"), "user_declined",
+                               local_derived=True, handle=handle)
                 return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。", "可以改用本机 ComfyUI 出图。", backend))
     bound_args = dict(bound.get("arguments") or {})
@@ -1585,7 +1607,8 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
             "content_handle": handle,
             "error": {"code": "cancelled", "message": HUMAN["cancelled"]},
         }
-    result = _run_image(app, session_id, message_id, run, bound_args)
+    with egress.note(local_derived=source == "local", handle=handle):
+        result = _run_image(app, session_id, message_id, run, bound_args)
     public = _public_generate_result(result, handle)
     _note_image(run, source, backend, explicit_backend, public)
     public["prompt_source"] = source
@@ -1772,6 +1795,104 @@ def _error_finish(app, session_id: str, message_id: str, run: Run, code: str, me
     })
     _fail(app, session_id, message_id, run, GatewayError(code, message), text)
     return "cancelled" if code == "cancelled" else "failed"
+
+
+def _egress_listener(app, session_id: str, message_id: str, run: Run):
+    """出站审计记录（#57）推到这一轮的「数据出站」时间线，并存进消息的 egress 列表（不混进 events，回放顺序不变）。"""
+
+    def listen(entry: dict) -> None:
+        event = dict(entry)
+        event["message_id"] = message_id
+        event["run_id"] = run.run_id
+        if entry.get("run_id") and entry.get("run_id") != run.run_id:
+            event["agent_run_id"] = entry["run_id"]
+        app.sessions.append_egress(session_id, message_id, event)
+        run.push(event)
+
+    return listen
+
+
+_PURPOSE_LABELS = {
+    "image_prompt": "出图提示词",
+    "keep": "留存的本地内容",
+}
+_SOURCE_LABELS = {
+    "local": "本地提示词（1.3，只在本机）",
+    "chat": "聊天原文（1.1）",
+    "model": "模型写的提示词（1.2）",
+}
+
+
+def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base: dict | None) -> dict:
+    """确认卡上的出站摘要：宿主按工具清单、当前配置和句柄记录生成，不取模型的解释文字。"""
+    summary = dict(base) if isinstance(base, dict) else {}
+    if not summary:
+        try:
+            summary = egress_preview(name, args)
+        except Exception:
+            summary = {"by": "host", "network": False, "reads_local": False}
+    summary["by"] = "host"
+    args = args if isinstance(args, dict) else {}
+    destination, host, scope = "none", "", ""
+    try:
+        if name in ("generate_image", "character_image") and (args.get("backend") or "local") == "remote":
+            settings = image_run.remote_settings()
+            host, scope = egress.destination(settings.get("remote_base_url"))
+            destination = "third_party_image"
+        elif name in ("generate_image", "generate_video", "character_image"):
+            host, scope = egress.destination(image_run.comfy_base())
+            destination = "comfyui"
+    except Exception:
+        destination = "unknown"
+    if destination != "none":
+        summary["network"] = True
+    summary["destination"] = destination
+    if host:
+        summary["destination_host"] = host
+        summary["destination_scope"] = scope
+    handle = args.get("content_handle") if isinstance(args.get("content_handle"), str) else ""
+    if handle:
+        summary["handle_id_prefix"] = handle[:6]
+        staged = (getattr(run, "_staged", None) or {}).get(handle)
+        if staged:
+            summary["handle_source"] = staged.get("source")
+        else:
+            info = None
+            try:
+                info = app.sessions.content_info(session_id, handle)
+            except Exception:
+                info = None
+            if info:
+                summary["handle_source"] = "local"
+                summary["handle_purpose"] = info.get("purpose")
+                summary["reads_local"] = True
+    summary["text"] = _egress_text(summary)
+    return summary
+
+
+def _egress_text(summary: dict) -> str:
+    parts = []
+    destination = summary.get("destination")
+    host = summary.get("destination_host") or "未配置"
+    scope = summary.get("destination_scope")
+    if destination == "third_party_image":
+        parts.append(f"会联网：发给第三方出图服务 {host}")
+    elif destination == "comfyui":
+        where = {"local": "本机", "lan": "局域网"}.get(scope, "第三方主机上的")
+        parts.append(f"{'不出本机' if scope == 'local' else '会联网'}：提交给{where} ComfyUI（{host}）")
+    elif summary.get("network"):
+        parts.append("会联网")
+    else:
+        parts.append("不联网，只在本机执行")
+    parts.append("会读取本地内容" if summary.get("reads_local") else "不读取本地内容")
+    source = summary.get("handle_source")
+    if source:
+        label = _SOURCE_LABELS.get(source, source)
+        purpose = _PURPOSE_LABELS.get(summary.get("handle_purpose") or "", "")
+        parts.append(f"句柄 {summary.get('handle_id_prefix', '')}… 是{label}" + (f"，用途：{purpose}" if purpose else ""))
+    if destination == "third_party_image" and source == "local":
+        parts.append("本地提示词正文会发给出图服务，但不会发给对话模型")
+    return "；".join(parts) + "。"
 
 
 def _push_saved(app, session_id: str, message_id: str, run: Run, event: dict) -> None:
@@ -1991,6 +2112,9 @@ def _run_bound(app, session_id: str, message_id: str, run: Run, user_text: str, 
         return _error_finish(
             app, session_id, message_id, run, "invalid_tool_call", "这个内容句柄不属于本会话。", ""
         )
+    named = _named_handle(tool_call) if isinstance(tool_call, dict) else ""
+    if named:
+        bound["local_handle"] = named
     return _finish_image(app, session_id, message_id, run, "", bound)
 
 
@@ -2310,9 +2434,11 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
     produced: list[str] = []
     tag = {"agent": agent.name, "agent_run_id": run_id, "parent_run_id": parent_run_id}
 
-    def tool_event(name, arguments, status, result=None):
+    def tool_event(name, arguments, status, result=None, egress_summary=None):
         event = {"type": EVENT_TOOL_CALL, "tool": name, "arguments": _public_args(arguments or {}),
                  "status": status, "message_id": message_id, "run_id": run.run_id}
+        if egress_summary:
+            event["egress"] = egress_summary
         event.update(tag)
         if result is not None and name != "generate_image":
             event["result"] = result
@@ -2343,10 +2469,11 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
             name = event.get("name") or ""
             args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
             confirm_event = {"type": EVENT_TOOL_CONFIRM, "name": name, "tool": name, "arguments": _public_args(args),
+                             "egress": _confirm_egress(app, session_id, run, name, args, event.get("egress")),
                              "message_id": message_id, "run_id": run.run_id}
             confirm_event.update(tag)
             _push_saved(app, session_id, message_id, run, confirm_event)
-            tool_event(name, args, "waiting_confirm")
+            tool_event(name, args, "waiting_confirm", egress_summary=confirm_event["egress"])
 
     def confirm(name, arguments):
         try:

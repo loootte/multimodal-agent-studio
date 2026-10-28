@@ -3,6 +3,7 @@
 配置来自 generate_image 工具包的 config（tools.json 或 MAS_IMAGE_API_* 环境变量）：
 remote_base_url、remote_api_key、remote_model、remote_timeout_sec。
 密钥只放进 Authorization 头，不进错误信息、事件或工件记录。
+发出前后经过出站钩子（services.gateway.egress，渠道 remote_image）：记 planned / sent / failed，不记提示词和密钥（#57）。
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import os
 import tempfile
 import urllib.error
 import urllib.request
+
+from services.gateway import egress
 
 TOOL = "generate_image"
 SIZES = {"1:1": (1024, 1024), "16:9": (1536, 1024), "9:16": (1024, 1536)}
@@ -66,15 +69,19 @@ def generate(prompt: str, aspect: str, config: dict | None = None) -> dict:
     model = str(config.get("remote_model") or "gpt-image-1")
     timeout = float(config.get("remote_timeout_sec") or 120)
     width, height = SIZES.get(aspect, SIZES["1:1"])
-    body = json.dumps({"model": model, "prompt": prompt, "n": 1, "size": f"{width}x{height}"}).encode("utf-8")
+    outgoing = {"model": model, "prompt": prompt, "n": 1, "size": f"{width}x{height}"}
+    body = json.dumps(outgoing).encode("utf-8")
+    ticket = egress.guard("remote_image", base, outgoing, body=body, exempt=())
     request = urllib.request.Request(
         base + "/images/generations", data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            ticket.sent(http_status=getattr(response, "status", None))
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        ticket.failed("http_error", http_status=exc.code)
         try:
             detail = exc.read().decode("utf-8", "replace")
         except OSError:
@@ -85,6 +92,7 @@ def generate(prompt: str, aspect: str, config: dict | None = None) -> dict:
         return _error("remote_error", f"第三方出图服务返回 HTTP {exc.code}：{_scrub(detail, key)}",
                       "检查 remote_model 和账户额度；也可以改用本地 ComfyUI 出图。")
     except (urllib.error.URLError, OSError, ValueError) as exc:
+        ticket.failed("connect_error")
         reason = getattr(exc, "reason", None) or exc
         return _error("remote_unreachable", f"连不上第三方出图服务（{base}）：{_scrub(reason, key)}",
                       "检查 remote_base_url、网络或代理；也可以改用本地 ComfyUI 出图。")

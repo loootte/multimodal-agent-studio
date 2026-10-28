@@ -710,6 +710,19 @@ class SessionStore:
             session["updated_at"] = _now()
             self._write(session)
 
+    def append_egress(self, session_id: str, message_id: str, event: dict) -> None:
+        """出站审计记录（#57）单独存一列，不混进 events，事件回放顺序不变。记录里没有正文。"""
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return
+            for message in session["messages"]:
+                if message.get("message_id") == message_id:
+                    message.setdefault("egress", []).append(dict(event))
+                    break
+            session["updated_at"] = _now()
+            self._write(session)
+
     def append_runtime(self, session_id: str, message_id: str, event: dict) -> None:
         with self._lock:
             session = self._load_path(self._path(session_id))

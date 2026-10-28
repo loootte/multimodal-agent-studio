@@ -23,6 +23,36 @@ try:  # 网页和运行时里有统一遥测；单独跑 PoC 时没有也不影�
 except ImportError:  # pragma: no cover
     _telemetry = None
 
+try:  # 出站审计（#57）：提交工作流也算一次出站，渠道 comfyui_local；单独跑 PoC 时没有也不影响
+    from services.gateway import egress as _egress
+except ImportError:  # pragma: no cover
+    _egress = None
+
+
+def _egress_ticket(base: str, payload: dict | None, body: bytes | None = None):
+    if _egress is None:
+        return None
+    try:
+        if payload is None:  # 上传参考图：只有字节，按图片度量，算本地派生内容
+            stats = _egress.measure(None, body=body)
+            stats["modality"] = ["image"]
+            return _egress.Ticket("comfyui_local", base, stats=stats, local_derived=True).planned()
+        return _egress.guard("comfyui_local", base, payload, exempt=())
+    except Exception:
+        return None
+
+
+def _egress_done(ticket, ok: bool, reason: str = "") -> None:
+    if ticket is None:
+        return
+    try:
+        if ok:
+            ticket.sent(http_status=200)
+        else:
+            ticket.failed(reason or "rejected")
+    except Exception:
+        pass
+
 
 def _note(kind: str, **fields) -> None:
     if _telemetry is not None:
@@ -298,10 +328,14 @@ class ComfyClient:
     def submit(self, prompt: dict) -> str:
         """提交工作流并立刻返回 prompt_id。不在这里等待采样结束。"""
         self._ensure_listener()
-        result = self._request_json(
-            self.base + "/prompt",
-            {"prompt": prompt, "client_id": self.client_id},
-        )
+        outgoing = {"prompt": prompt, "client_id": self.client_id}
+        ticket = _egress_ticket(self.base, outgoing)
+        try:
+            result = self._request_json(self.base + "/prompt", outgoing)
+        except ComfyFailure as exc:
+            _egress_done(ticket, False, "connect_error" if getattr(exc, "payload", None) is None else "http_error")
+            raise
+        _egress_done(ticket, True)
         node_errors = result.get("node_errors") or {}
         prompt_id = result.get("prompt_id")
         if node_errors or not prompt_id:
@@ -482,14 +516,18 @@ class ComfyClient:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **self._auth()},
             method="POST",
         )
+        ticket = _egress_ticket(self.base, None, body)
         try:
             with self._urlopen(req, timeout=120) as response:
+                _egress_done(ticket, True)
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            _egress_done(ticket, False, "http_error")
             raw = exc.read().decode("utf-8", errors="replace")
             text = original_error_text(raw) or f"上传参考图失败，HTTP {exc.code}"
             raise ComfyFailure(text, raw) from exc
         except urllib.error.URLError as exc:
+            _egress_done(ticket, False, "connect_error")
             raise ComfyFailure(f"上传参考图失败：{exc.reason}") from exc
         name = payload.get("name")
         if not name:

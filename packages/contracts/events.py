@@ -9,6 +9,11 @@ content_request 也可以收集留在本机的文字或文件。文件不提交�
 这条消息再以 message.completed 或 run.failed 结束，流才算读完。content_request 不是结束。
 missing_key 表示还没配置 API key。
 local_content 表示请求体里出现了本地正文，这次没有发给模型。
+egress.* 是出站审计事件（ADR 0009，路线图 12.A #57）：每次要离开本进程的请求（对话模型、第三方出图、
+本机 ComfyUI 提交）先记 egress.planned，被拦下记 egress.blocked，发出后记 egress.sent，发出失败记 egress.failed。
+同一次请求的几条记录共用 egress_id。字段只有 EGRESS_FIELDS 里这些：只记主机名（不记路径、端口以外的地址部分和密钥）、
+渠道、模态、字数字节数、消息条数、工具契约字节数、是否含本地派生内容、sha256 指纹前缀、运行标识和拦截原因码。
+绝不记正文、提示词、密钥和本地路径。
 """
 
 EVENT_RUN_STARTED = "run.started"
@@ -23,6 +28,35 @@ EVENT_TOOL_CALL = "tool_call"
 EVENT_PROGRESS = "progress"
 EVENT_ARTIFACT = "artifact"
 EVENT_ERROR = "error"
+EVENT_EGRESS_PLANNED = "egress.planned"
+EVENT_EGRESS_BLOCKED = "egress.blocked"
+EVENT_EGRESS_SENT = "egress.sent"
+EVENT_EGRESS_FAILED = "egress.failed"
+
+EGRESS_EVENTS = (EVENT_EGRESS_PLANNED, EVENT_EGRESS_BLOCKED, EVENT_EGRESS_SENT, EVENT_EGRESS_FAILED)
+EGRESS_SCHEMA = "mas.egress/1"
+# 出站渠道：对话模型、第三方出图、ComfyUI 提交（通常在本机）。
+EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local")
+# 目的地范围：本机回环、局域网（私有地址）、第三方。
+EGRESS_SCOPES = ("local", "lan", "third_party")
+# 审计记录允许出现的全部字段。新增字段先在这里登记，并确认它不是正文、提示词、密钥或路径。
+EGRESS_FIELDS = (
+    "schema", "type", "egress_id", "ts", "channel", "destination_host", "destination_scope",
+    "modality", "char_count", "byte_count", "message_count", "tool_contract_bytes",
+    "contains_local_derived", "content_fingerprint", "handle_id_prefix", "model",
+    "session_id", "trace_id", "run_id", "agent_run_id", "reason_code", "http_status",
+)
+# 拦截或失败原因的白话说明（界面只显示这个，不回显正文）。
+EGRESS_REASONS = {
+    "local_content": "请求里混进了本地内容，已在发出前拦下；本地内容没有离开本机。",
+    "local_prompt_remote_refused": "本地提示词默认不发给第三方出图服务，已拦下。",
+    "user_declined": "你没有同意把本地提示词发给第三方出图服务，已拦下。",
+    "http_error": "对方返回了错误。",
+    "connect_error": "连接失败，请求没有送达。",
+    "timeout": "等待超时。",
+    "cancelled": "已停止。",
+    "rejected": "对方拒绝了这次请求。",
+}
 
 TERMINAL_EVENTS = (EVENT_MESSAGE_COMPLETED, EVENT_RUN_FAILED)
 
