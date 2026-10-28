@@ -22,6 +22,7 @@ if ROOT not in sys.path:
 if WEB_DIR not in sys.path:
     sys.path.insert(0, WEB_DIR)
 
+import character
 import chat_run
 import image_run
 import resources
@@ -31,6 +32,7 @@ from packages.artifacts import ArtifactStore
 from services import telemetry
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
+_SESSION_CHARACTER = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/character$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
@@ -42,6 +44,7 @@ _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
 _RUN_CONFIRM = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/confirm$")
 _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
+    "character.js": "text/javascript; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "markdown.js": "text/javascript; charset=utf-8",
     "resources.js": "text/javascript; charset=utf-8",
@@ -368,6 +371,22 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 _send_json(handler, 200, tool_config.test_connection(app.tools, name))
                 return
             _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+            return
+        if path == "/api/character" and method == "GET":
+            _send_json(handler, 200, character.catalog(chat_run._character_config(app)))
+            return
+        if path == "/api/character/preview" and method == "POST":
+            body = _read_json(handler)
+            try:
+                _send_json(handler, 200, character.compose(body.get("fields") or {}, chat_run._character_config(app)))
+            except character.CharacterError as exc:
+                _send_json(handler, 400, exc.public())
+            return
+        matched = _SESSION_CHARACTER.fullmatch(path)
+        if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
+            run = chat_run.start_character(app, session["session_id"], _read_json(handler))
+            _send_sse(handler, run, 0)
             return
         if path == "/api/sessions" and method == "GET":
             user = app.identity.current()

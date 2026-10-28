@@ -214,6 +214,10 @@
 
 状态：未开始。
 
+## 13. 角色图片定制工具
+
+[#53](https://github.com/loootte/multimodal-agent-studio/issues/53)（进行中，`issue-53` 分支）：内置工具包 `character_image`，九个字段（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）都有预设也能自填，默认是年轻女性角色；拼成英文提示词后走现有出图流程（`generate_image` 一次一张、`plan_images` 张数、本机/第三方按 #49）。网页「定制角色」对话框和对话调用两条路；本地提示词模式按 ADR 0008；未成年与暴露内容的安全规则。见 [docs/character-image.md](docs/character-image.md)。
+
 ## 明确延后
 
 这些不进前六个阶段：

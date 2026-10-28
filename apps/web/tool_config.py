@@ -355,6 +355,10 @@ def _coerce(field: dict, raw):
 
 def _cross_check(name: str, merged: dict) -> dict:
     """模板和字段对照要匹配。"""
+    if name == "character_image":
+        import character
+
+        return character.check_config(merged)
     if name != "comfyui":
         return {}
     _ensure_poc()

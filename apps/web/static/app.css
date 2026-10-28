@@ -529,3 +529,12 @@ dialog select { font: inherit; padding: 0.35rem; }
 .res-preview { margin-top: 0.6rem; max-height: 35vh; overflow: auto; }
 .res-preview img, .res-preview video { max-width: 100%; }
 .res-text { white-space: pre-wrap; }
+
+/* #53 定制角色 */
+#character { max-width: 44rem; width: 92vw; }
+.char-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }
+.char-field { display: flex; flex-direction: column; gap: 0.2rem; }
+.char-field input[hidden] { display: none; }
+.char-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.7rem 0 0.3rem; align-items: center; }
+.char-options input[type=number] { width: 4.5rem; }
+.char-preview { white-space: pre-wrap; background: #f4f4f4; padding: 0.5rem; border-radius: 4px; max-height: 10rem; overflow: auto; font-size: 0.85rem; }

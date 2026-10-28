@@ -16,6 +16,7 @@
       <p id="user-line" class="hint">本机用户</p>
       <ul id="session-list"></ul>
       <button type="button" class="ghost" id="open-resources">本地资源</button>
+      <button type="button" class="ghost" id="open-character">定制角色</button>
     </aside>
     <main>
       <header class="top">
@@ -154,8 +155,39 @@
       </div>
     </div>
   </dialog>
+  <dialog id="character" aria-labelledby="character-title">
+    <div id="character-form">
+      <h2 id="character-title">定制角色图片</h2>
+      <p class="hint">每项选一个预设，或选“自定义…”自己写。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → character_image」里改。</p>
+      <div id="char-fields" class="char-fields"></div>
+      <div class="char-options">
+        <label>张数 <input id="char-count" type="number" min="1" max="20" value="1"></label>
+        <label>画幅
+          <select id="char-aspect"><option value="1:1">1:1</option><option value="16:9">16:9</option><option value="9:16">9:16</option></select>
+        </label>
+        <label>出图
+          <select id="char-backend"><option value="local">本机 ComfyUI</option><option value="remote">第三方出图</option></select>
+        </label>
+        <label>提示词
+          <select id="char-privacy">
+            <option value="chat">写进聊天记录（1.1）</option>
+            <option value="local">本地提示词，只留本机（1.3）</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">提示词预览（这次会发给出图服务的英文提示词）：</p>
+      <pre id="char-preview" class="char-preview"></pre>
+      <p id="char-note" class="note" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="char-reset" class="ghost">恢复默认</button>
+        <button type="button" id="char-close" class="ghost">关闭</button>
+        <button type="button" id="char-generate">生成</button>
+      </div>
+    </div>
+  </dialog>
   <script src="/static/markdown.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/resources.js"></script>
+  <script src="/static/character.js"></script>
 </body>
 </html>
