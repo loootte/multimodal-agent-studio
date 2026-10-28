@@ -42,6 +42,7 @@
 
 - 安装：工具对话框填本机目录或 zip 路径 → 先检查（`POST /api/toolpacks/inspect`，返回里多了 `review`：`permissions[{permission,label,risk,effect}]`、`not_granted`、`sandbox`、`mode: "subprocess"`）→ 页面展开「权限审阅」，每个权限逐项勾选 → `POST /api/toolpacks/install {source, accept_permissions}`。同意的权限和包内容摘要记在包目录的 `.granted.json`（`{"schema": "mas.grant/2", "permissions", "version", "digest"}`）。
 - 调用前复核（12.D）：授权记录要存在、是 `mas.grant/2`、摘要和当前包内容一致（否则 `permission_denied`，`grant` 为 `missing` / `outdated` / `changed`）；生效权限 = 清单声明 ∩ 授权。内置工具另有名单 `packs.HOST_TOOLS` / `packs.BUILTIN_PYTHON`，写明每个工具实际需要的权限，运行时要求 需要 ⊆ 声明 ⊆ 授权，缺了返回 `permission_denied`（带 `denied`）。工具列表的 `pack` 里多了 `sandbox`（`subprocess` / `host`）和 `grant`。
+- 强制确认（12.E）：`network` 或 `read_local_content` 为真的包必须 `confirm: "always"`，否则检查 / 安装 / 发现报 `invalid_manifest`；这类包每次调用都确认，不在一轮里复用；`review` 多 `confirm_every_call`，工具列表的 `pack` 多 `sensitive`。见 [sensitive-confirm.md](sensitive-confirm.md)。
 - 导出：`GET /api/toolpacks/<名字>/export` 得到 zip。配置值和密钥留在 `tools.json`，`.granted.json` 不进包。
 - 卸载：`POST /api/toolpacks/<名字>/uninstall`。内置工具拒绝。
 
