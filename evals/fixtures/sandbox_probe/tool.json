@@ -1,0 +1,25 @@
+{
+  "schema": "mas.tool/1",
+  "name": "sandbox_probe",
+  "version": "0.1.0",
+  "description": "评测用的探针工具包（12.D #60）：按 act 故意越权，验证沙箱拦得住。不要装进真实环境。",
+  "order": 990,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "act": {"type": "string", "enum": ["scratch", "env", "net", "net_host", "loopback", "write_out", "write_own", "read_data", "list_data", "spawn", "swallow_net"]},
+      "target": {"type": "string", "maxLength": 1024},
+      "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+    }
+  },
+  "mutating": false,
+  "confirm": "never",
+  "entry": {"kind": "python", "module": "tool.py"},
+  "config": [
+    {"name": "api_key", "type": "secret", "default": "", "required": false, "secret": true,
+     "description": "演示密钥：由宿主显式注入，不靠环境变量。"}
+  ],
+  "requires": {"backends": [], "python": []},
+  "permissions": {"read_local_content": false, "network": false, "write_files": false, "send_local_to_model": false}
+}

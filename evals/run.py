@@ -780,6 +780,84 @@ def run_egress_hardening(h: Harness, task: dict, live: bool) -> dict:
     return {"denied": len(checks) + 1}
 
 
+def run_sandbox(h: Harness, task: dict, live: bool) -> dict:
+    """工具包沙箱（12.D #60）。经网页接口装上探针工具包（evals/fixtures/sandbox_probe，按审阅勾选权限），
+    假模型在对话里调用它，探针按 case 故意越权：结果必须是 permission_denied，对话照常结束，
+    越权的事没有发生（没联网、没写出文件、没读到会话正文），没联网权限的连网尝试记进出站审计（渠道 toolpack）。"""
+    case = task.get("case")
+    marker = task.get("marker") or "LOCAL-SANDBOX-0000"
+    folder = tempfile.mkdtemp(prefix="evals-toolpacks-")
+    saved = {name: os.environ.get(name) for name in ("MAS_TOOLPACKS_DIR", "OPENAI_API_KEY", "GITHUB_TOKEN")}
+    os.environ["MAS_TOOLPACKS_DIR"] = folder
+    session_id = check._fresh_session(h.base)
+    probe = {"network": {"act": "net"}, "write": {"act": "write_out", "target": h.directory},
+             "env": {"act": "env"}, "session_read": {"act": "read_data"},
+             "manifest_changed": {"act": "scratch"}}.get(case)
+    expect(probe is not None, f"未知 case：{case}")
+    try:
+        status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": check.PROBE})
+        review = json.loads(body).get("review") or {}
+        expect(status == 200 and review.get("mode") == "subprocess" and review.get("sandbox"), f"安装前没有权限审阅：{body[:200]}")
+        status, body = check.request("POST", h.base + "/api/toolpacks/install", {"source": check.PROBE, "accept_permissions": []})
+        expect(status == 200, f"装探针失败：{status} {body[:200]}")
+        if case == "env":
+            os.environ["OPENAI_API_KEY"] = check.SECRET
+            os.environ["GITHUB_TOKEN"] = "ghp_should_not_reach_toolpack"
+            status, body = check.request("PUT", h.base + "/api/tools/sandbox_probe/config", {"values": {"api_key": "probe-config-" + marker}})
+            expect(status == 200, f"保存探针配置失败：{status}")
+        if case == "session_read":
+            h.app.sessions.add_content(session_id, f"本地正文 {marker}", "keep")
+            probe = dict(probe, target=os.path.join(h.directory, "sessions", session_id + ".json"))
+        if case == "manifest_changed":
+            with open(os.path.join(folder, "sandbox_probe", "tool.py"), "a", encoding="utf-8") as handle:
+                handle.write("\n# 装好以后被改过\n")
+        h.provider.mode = "probe"
+        h.provider.probe = probe
+        sent = len(h.provider.requests)
+        try:
+            events = check._speak(h.base, session_id, "调用探针工具", timeout=15)
+        except SystemExit as exc:
+            raise Failed(str(exc)) from None
+        finally:
+            h.provider.probe = None
+        expect(events and events[-1].get("type") == "message.completed", f"对话没有正常结束：{_status(events)}")
+        followup = [json.dumps(item.get("body"), ensure_ascii=False) for item in h.provider.requests[sent + 1:]]
+        expect(followup, "工具结果没有回到模型")
+        result_text = followup[0]
+        for item in followup:
+            expect(marker not in item and check.SECRET not in item, "本地正文或密钥进了模型请求")
+        if case == "env":
+            plain = result_text.replace('\\"', '"')
+            expect('"leaked": []' in plain, f"子进程拿到了带密钥的环境变量：{plain[-300:]}")
+            expect('"has_config_key": true' in plain, "工具配置没有显式注入子进程")
+            expect("probe-config-" + marker not in plain, "配置里的密钥回到了模型")
+            return {"leaked": 0}
+        expect("permission_denied" in result_text, f"越权没有被拒：{result_text[-300:]}")
+        if case == "manifest_changed":
+            expect("changed" in result_text, "拒绝原因不是授权作废")
+            return {"code": "permission_denied", "grant": "changed"}
+        if case == "write":
+            expect(not os.path.exists(os.path.join(h.directory, "escaped.txt")), "探针写出了文件")
+        items, body = _egress_read(h, None)
+        toolpack = [item for item in items if item.get("channel") == "toolpack"]
+        if case == "network":
+            expect(any(item["type"] == "egress.blocked" and item.get("tool") == "sandbox_probe"
+                       and item.get("reason_code") == "permission_denied" for item in toolpack),
+                   f"出站审计没有记下被拦的连接：{toolpack}")
+            expect(not any(item["type"] == "egress.sent" for item in toolpack), "没联网权限的包出现了放行记录")
+        _egress_clean(h, body, [marker, check.SECRET])
+        return {"code": "permission_denied", "toolpack_egress": len(toolpack)}
+    finally:
+        h.provider.mode = "ok"
+        check.request("POST", h.base + "/api/toolpacks/sandbox_probe/uninstall")
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -801,6 +879,7 @@ RUNNERS = {
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,
+    "sandbox": run_sandbox,
 }
 
 
