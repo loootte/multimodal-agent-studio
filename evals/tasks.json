@@ -109,6 +109,22 @@
       "fake_only": true
     },
     {
+      "id": "security.egress_audit_normal",
+      "category": "security",
+      "kind": "egress_audit",
+      "fake_only": true,
+      "case": "normal",
+      "marker": "LOCAL-EGRESS-9c2d"
+    },
+    {
+      "id": "security.egress_audit_blocked",
+      "category": "security",
+      "kind": "egress_audit",
+      "fake_only": true,
+      "case": "blocked",
+      "marker": "LOCAL-EGRESS-4e7a"
+    },
+    {
       "id": "multi_agent.delegate_plan",
       "category": "multi_agent",
       "kind": "multi_agent_web",

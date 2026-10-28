@@ -488,6 +488,89 @@ def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     return {"refused": ["accept_local_content", "generate_image"]}
 
 
+def _egress_read(h: Harness, session_id: str | None) -> tuple[list[dict], str]:
+    query = f"?session_id={session_id}" if session_id else ""
+    status, body = check.request("GET", h.base + "/api/egress" + query)
+    expect(status == 200, f"读出站审计失败：{status}")
+    return json.loads(body)["events"], body
+
+
+def _egress_clean(h: Harness, body: str, markers: list[str]) -> None:
+    """审计接口和审计文件里都不能有本地正文、密钥。"""
+    from packages.contracts.events import EGRESS_FIELDS
+
+    with open(os.path.join(h.directory, "egress.jsonl"), encoding="utf-8") as handle:
+        raw = handle.read()
+    for blob, where in ((body, "审计接口"), (raw, "审计文件")):
+        for marker in markers:
+            expect(marker not in blob, f"{where}里出现了 {marker[:12]}…")
+    for line in raw.splitlines():
+        extra = set(json.loads(line)) - set(EGRESS_FIELDS)
+        expect(not extra, f"审计记录多了字段：{extra}")
+
+
+def run_egress_audit(h: Harness, task: dict, live: bool) -> dict:
+    """出站审计（#57）。normal：一轮带本地内容的出图，留下对话模型和 ComfyUI 的出站记录；
+    blocked：本地正文混进请求时在发出前拦下并记 egress.blocked；两种都不能在记录里出现正文或密钥。"""
+    from services import telemetry
+    from services.gateway import egress, openai_chat
+
+    marker = task.get("marker") or "LOCAL-EGRESS-9c2d"
+    markers = [marker, check.SECRET]
+    if task.get("case") == "normal":
+        h.provider.mode = "image"
+        h.box.set_mode("ok")
+        session_id = check._fresh_session(h.base)
+        try:
+            events = check._speak(h.base, session_id, "画一只茶壶", timeout=12, content=f"一只蓝色茶壶 {marker}")
+        except SystemExit as exc:
+            raise Failed(str(exc)) from None
+        expect(_status(events) == "completed", f"状态是 {_status(events)}")
+        items, body = _egress_read(h, session_id)
+        sent = {item["channel"] for item in items if item["type"] == "egress.sent"}
+        expect({"chat_completion", "comfyui_local"} <= sent, f"出站记录不全：{sent}")
+        expect(not any(item["type"] == "egress.blocked" for item in items), "正常回合出现了拦截记录")
+        comfy = [item for item in items if item["channel"] == "comfyui_local" and item["type"] == "egress.sent"]
+        expect(all(item.get("contains_local_derived") and item.get("handle_id_prefix") for item in comfy),
+               "本地提示词出图没有标本地派生和句柄前缀")
+        pushed = [event for event in events if str(event.get("type", "")).startswith("egress.")]
+        expect(len(pushed) == len(items), f"事件流推了 {len(pushed)} 条，审计里有 {len(items)} 条")
+        _egress_clean(h, body, markers)
+        return {"records": len(items), "channels": sorted(sent)}
+    # blocked：模拟宿主出错把本地正文拼进了请求，网关出口要拦下、不发出，只记元数据。
+    h.provider.mode = "ok"
+    session_id = check._fresh_session(h.base)
+    bodies = [f"私人笔记 {marker}", marker]
+    trace = "t_" + os.urandom(16).hex()
+    sent = len(h.provider.requests)
+    egress.attach(trace, session_id=session_id)
+    telemetry.bind(trace)
+    try:
+        gen = openai_chat.stream_chat(
+            base_url=h.upstream, api_key=check.SECRET, model=FAKE_MODEL,
+            messages=[{"role": "user", "content": f"顺便看看 {marker}"}],
+            timeout_sec=2, cancel=check.threading.Event(), local_bodies=bodies,
+        )
+        try:
+            next(gen)
+            raise Failed("混进本地正文的请求被发出去了")
+        except openai_chat.GatewayError as exc:
+            expect(exc.code == "local_content", f"错误码是 {exc.code}")
+        finally:
+            gen.close()
+    finally:
+        telemetry.bind(None)
+        egress.detach(trace)
+    expect(len(h.provider.requests) == sent, "拦下后仍然打开了连接")
+    items, body = _egress_read(h, session_id)
+    expect([item["type"] for item in items] == ["egress.blocked"], f"拦截记录不对：{[i['type'] for i in items]}")
+    item = items[0]
+    expect(item.get("reason_code") == "local_content" and item.get("contains_local_derived"), "拦截原因或本地派生标记不对")
+    expect(item.get("trace_id") == trace and item.get("byte_count"), "拦截记录缺运行标识或大小")
+    _egress_clean(h, body, markers)
+    return {"records": len(items), "reason": item["reason_code"]}
+
+
 def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
@@ -506,6 +589,7 @@ RUNNERS = {
     "skill_mining": run_skill_mining,
     "image_skill": run_image_skill,
     "character": run_character,
+    "egress_audit": run_egress_audit,
 }
 
 
