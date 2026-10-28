@@ -72,6 +72,9 @@ def generate(prompt: str, aspect: str, config: dict | None = None) -> dict:
     outgoing = {"model": model, "prompt": prompt, "n": 1, "size": f"{width}x{height}"}
     body = json.dumps(outgoing).encode("utf-8")
     ticket = egress.guard("remote_image", base, outgoing, body=body, exempt=())
+    if ticket.hit:  # 出站策略拦下（#59）：字段不在策略里或一次要多张图，不打开连接
+        return _error(ticket.reason_code or "egress_policy_denied", "出站策略拦下了这次第三方出图请求，没有发出。",
+                      "一次 generate_image 只出一张图；字段要先登记到 EGRESS_POLICIES。")
     request = urllib.request.Request(
         base + "/images/generations", data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},

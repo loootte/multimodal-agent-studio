@@ -1118,8 +1118,11 @@ def _gateway_request(provider: dict, messages: list[dict]) -> dict:
     }
 
 
+_EGRESS_BLOCK_CODES = ("local_content", "local_content_encoded", "egress_policy_denied")  # 12.C #59
+
+
 def _blocks(exc: GatewayError, run: Run) -> bool:
-    return exc.code == "local_content" or exc.code == "cancelled" or run.cancel.is_set()
+    return exc.code in _EGRESS_BLOCK_CODES or exc.code == "cancelled" or run.cancel.is_set()
 
 
 def _fail_status(app, session_id, message_id, run, exc: GatewayError) -> str:

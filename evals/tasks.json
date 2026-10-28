@@ -149,6 +149,30 @@
       "marker": "LOCAL-HANDLE-2d9a"
     },
     {
+      "id": "security.egress_encoded_variants",
+      "category": "security",
+      "kind": "egress_hardening",
+      "fake_only": true,
+      "case": "encoded",
+      "marker": "LOCAL-HARDEN-8e4b"
+    },
+    {
+      "id": "security.egress_short_body",
+      "category": "security",
+      "kind": "egress_hardening",
+      "fake_only": true,
+      "case": "short",
+      "short": "蓝色茶壶"
+    },
+    {
+      "id": "security.egress_policy_denied",
+      "category": "security",
+      "kind": "egress_hardening",
+      "fake_only": true,
+      "case": "policy",
+      "marker": "LOCAL-HARDEN-3a71"
+    },
+    {
       "id": "multi_agent.delegate_plan",
       "category": "multi_agent",
       "kind": "multi_agent_web",

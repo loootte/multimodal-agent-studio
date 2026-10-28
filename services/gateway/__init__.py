@@ -1,4 +1,9 @@
-"""供应商适配器。按模型标识选择。统一请求走 stream。"""
+"""供应商适配器。按模型标识选择。统一请求走 stream。
+
+12.C（#59）统一出口中间件：stream 在交给任何适配器之前，先对统一请求跑一遍本地正文检查（规范化、分片、短正文指纹、
+编码窗），命中就记 egress.blocked 并抛错，适配器根本拿不到这次请求；真联网的适配器（audits_egress）还要在产出第一条事件前
+通过 egress.guard 开过 ticket，否则按 egress_policy_denied 拦下。不联网的测试替身声明 offline。
+"""
 
 import time
 
@@ -12,7 +17,9 @@ from services.gateway.openai_chat import (
     reject_unsupported,
     stream_chat,
 )
+from packages.contracts.events import HUMAN
 from services import telemetry
+from services.gateway import egress
 from services.gateway.registry import Registry
 
 registry = Registry()
@@ -59,7 +66,16 @@ def stream(
     outcome = {"ok": False, "error_code": "aborted"}
     tool = None
     chars = 0
+    audited = getattr(adapter, "offline", False) is not True
+    upstream = base_url or getattr(adapter, "destination", None) or DEFAULT_BASE_URL
     try:
+        reason = egress.inspect(req, local_bodies or [], exempt=("tools",)) if local_bodies else None
+        if reason:
+            egress.blocked("chat_completion", upstream, reason, local_derived=True)
+            egress.security_event(reason, "chat_completion")
+            raise GatewayError(reason, HUMAN[reason])
+        tickets = egress.ticket_count()
+        checked = False
         for event in adapter.stream(
             req,
             api_key=api_key,
@@ -71,6 +87,12 @@ def stream(
         ):
             if event.get("type") == EVENT_RUN_STARTED:
                 continue
+            if audited and not checked:
+                checked = True
+                if egress.ticket_count() == tickets:  # 适配器没走出口中间件：不把它的输出交出去
+                    egress.blocked("chat_completion", upstream, "egress_policy_denied")
+                    egress.security_event("egress_policy_denied", "chat_completion")
+                    raise GatewayError("egress_policy_denied", HUMAN["egress_policy_denied"])
             if event.get("type") == EVENT_MESSAGE_COMPLETED:
                 completed = True
             if event.get("type") == "message.delta":

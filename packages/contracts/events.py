@@ -14,6 +14,9 @@ egress.* 是出站审计事件（ADR 0009，路线图 12.A #57）：每次要离
 同一次请求的几条记录共用 egress_id。字段只有 EGRESS_FIELDS 里这些：只记主机名（不记路径、端口以外的地址部分和密钥）、
 渠道、模态、字数字节数、消息条数、工具契约字节数、是否含本地派生内容、sha256 指纹前缀、运行标识和拦截原因码。
 绝不记正文、提示词、密钥和本地路径。
+出站策略（路线图 12.C #59）：每个渠道在 EGRESS_POLICIES 里声明允许的顶层字段；没登记的渠道（other）默认拒绝。
+网关先做策略检查，再对规范化后的载荷（NFKC、大小写、去空白和零宽字符、跨片段拼接、常见 base64 / 百分号编码窗）查本地正文。
+拦截原因码：local_content（明文或规范化后命中）、local_content_encoded（解码后命中）、egress_policy_denied（字段或渠道不在策略里）。
 """
 
 EVENT_RUN_STARTED = "run.started"
@@ -36,7 +39,8 @@ EVENT_EGRESS_FAILED = "egress.failed"
 EGRESS_EVENTS = (EVENT_EGRESS_PLANNED, EVENT_EGRESS_BLOCKED, EVENT_EGRESS_SENT, EVENT_EGRESS_FAILED)
 EGRESS_SCHEMA = "mas.egress/1"
 # 出站渠道：对话模型、第三方出图、ComfyUI 提交（通常在本机）。
-EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local")
+# other 是给未登记出口留的渠道名：策略为空，一律 egress_policy_denied（12.C #59）。
+EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local", "other")
 # 目的地范围：本机回环、局域网（私有地址）、第三方。
 EGRESS_SCOPES = ("local", "lan", "third_party")
 # 审计记录允许出现的全部字段。新增字段先在这里登记，并确认它不是正文、提示词、密钥或路径。
@@ -45,6 +49,36 @@ EGRESS_FIELDS = (
     "modality", "char_count", "byte_count", "message_count", "tool_contract_bytes",
     "contains_local_derived", "content_fingerprint", "handle_id_prefix", "model",
     "session_id", "trace_id", "run_id", "agent_run_id", "reason_code", "http_status",
+    "policy", "exempt_bytes",
+)
+
+# 出站策略（12.C #59）。fields：允许出现的顶层字段；exempt：豁免本地正文检查的字段（工具契约），字节数记进 exempt_bytes；
+# message_fields：对话消息允许的字段；max_images：一次请求最多几张图（一次 generate_image 只出一张）；
+# raw_upload：允许只有字节、没有 JSON 载荷的请求（ComfyUI 上传参考图）。策略为 None 的渠道一律拒绝。
+EGRESS_POLICY_SCHEMA = "mas.egress.policy/1"
+EGRESS_POLICIES = {
+    "chat_completion": {
+        "fields": ("model", "stream", "messages", "tools", "tool_choice", "temperature", "max_tokens", "stop"),
+        "exempt": ("tools",),
+        "message_fields": ("role", "content", "tool_calls", "tool_call_id", "name"),
+        "local_refs": "handle_only",
+    },
+    "remote_image": {
+        "fields": ("model", "prompt", "n", "size", "response_format"),
+        "exempt": (),
+        "max_images": 1,
+    },
+    "comfyui_local": {
+        "fields": ("prompt", "client_id"),
+        "exempt": (),
+        "raw_upload": True,
+    },
+    "other": None,
+}
+# 这些键的值是结构标记（角色、类型、模型名、编号），不当作正文参与短正文全文匹配。
+EGRESS_STRUCTURAL_KEYS = (
+    "role", "type", "model", "id", "tool_call_id", "name", "detail", "size", "stream", "tool_choice",
+    "client_id", "class_type", "response_format", "media_type",
 )
 # 拦截或失败原因的白话说明（界面只显示这个，不回显正文）。
 EGRESS_REASONS = {
@@ -59,6 +93,8 @@ EGRESS_REASONS = {
     "handle_not_found": "句柄不存在或不属于本会话，已拦下；没有读取任何本地内容。",
     "handle_expired": "本地内容句柄已过期或已撤销，已拦下；本地内容没有离开本机。",
     "handle_forbidden": "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
+    "local_content_encoded": "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
+    "egress_policy_denied": "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
 }
 
 # 句柄（ADR 0009，路线图 12.B #58）：本地内容句柄是短时能力令牌，绑定会话、用途（purpose）、可选运行和过期时间。
@@ -85,6 +121,8 @@ ERROR_CODES = (
     "handle_not_found",
     "handle_expired",
     "handle_forbidden",
+    "local_content_encoded",
+    "egress_policy_denied",
 )
 
 HUMAN = {
@@ -101,6 +139,8 @@ HUMAN = {
     "handle_not_found": "这个内容句柄不属于本会话。",
     "handle_expired": "这个本地内容句柄已过期或已撤销，不能再用。",
     "handle_forbidden": "这个本地内容句柄的用途不允许这样用。",
+    "local_content_encoded": "请求里有编码过的本地内容，留在本机，没有发给模型。",
+    "egress_policy_denied": "这次请求不在出站策略允许的范围里，没有发出。",
 }
 
 RETRYABLE = {
@@ -117,4 +157,6 @@ RETRYABLE = {
     "handle_not_found": False,
     "handle_expired": False,
     "handle_forbidden": False,
+    "local_content_encoded": False,
+    "egress_policy_denied": False,
 }

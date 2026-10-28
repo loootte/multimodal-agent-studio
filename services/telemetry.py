@@ -28,6 +28,8 @@ FAILURE_CLASSES = {
     "payload_too_large": "validation",
     "provider_error": "provider",
     "rate_limited": "provider",
+    "local_content_encoded": "policy",
+    "egress_policy_denied": "policy",
 }
 
 

@@ -484,6 +484,7 @@ const EGRESS_CHANNELS = {
   chat_completion: "对话模型",
   remote_image: "第三方出图",
   comfyui_local: "ComfyUI",
+  other: "其他出口",
 };
 const EGRESS_SCOPES = { local: "本机", lan: "局域网", third_party: "第三方" };
 const EGRESS_REASONS = {
@@ -498,6 +499,8 @@ const EGRESS_REASONS = {
   handle_not_found: "句柄不存在或不属于本会话，已拦下；没有读取任何本地内容。",
   handle_expired: "本地内容句柄已过期或已撤销，已拦下；本地内容没有离开本机。",
   handle_forbidden: "本地内容句柄的用途或作用域不允许这次调用，已拦下。",
+  local_content_encoded: "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
+  egress_policy_denied: "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
 };
 
 function rememberEgress(assistant, event) {
