@@ -54,7 +54,11 @@ DATA_DIR: str | None = None
 
 def data_dirs() -> list[str]:
     found = []
-    for path in (DATA_DIR, os.environ.get("MAS_DATA_DIR"), os.path.join(ROOT, "data")):
+    # 12.F（#62）：放主密钥的目录也禁读（和 packages/artifacts/crypto.key_dirs 同一套规则）。
+    key_file = os.environ.get("MAS_MASTER_KEY_FILE")
+    key_dirs = [os.path.dirname(os.path.abspath(os.path.expanduser(key_file)))] if key_file else []
+    key_dirs.append(os.path.join(os.path.expanduser("~"), ".mas"))
+    for path in (DATA_DIR, os.environ.get("MAS_DATA_DIR"), os.path.join(ROOT, "data"), *key_dirs):
         if path:
             full = os.path.realpath(os.path.abspath(path))
             if full not in found:

@@ -31,6 +31,7 @@ import resources
 import store
 import tool_config
 from packages.artifacts import ArtifactStore
+from packages.artifacts import crypto as storage_crypto
 from services import telemetry
 from services.gateway import egress
 
@@ -58,7 +59,7 @@ _MAX_ATTACHMENT_BODY = 12_000_000
 
 
 class App:
-    def __init__(self, data_dir: str, timeout_sec: float = 120.0):
+    def __init__(self, data_dir: str, timeout_sec: float = 120.0, storage=None):
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
         telemetry.configure(os.path.join(data_dir, "telemetry.jsonl"))
@@ -69,7 +70,12 @@ class App:
         tool_config.install(self.tools)
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
         self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
-        self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts)
+        # 12.F（#62）：本地存储加密。打不开（缺密钥、密钥不对、要先迁移）就抛 StorageError，不悄悄退回明文。
+        self.storage = storage if storage is not None else storage_crypto.open_storage(data_dir)
+        if self.storage.created_key:
+            telemetry.record("security.storage_key_created", trace_id="sto_" + uuid.uuid4().hex,
+                             key_id=self.storage.key_id, key_source=self.storage.key_source)
+        self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts, storage=self.storage)
         self.runs = chat_run.RunHub()
 
 
@@ -104,7 +110,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args(argv)
-    app = App(args.data_dir, timeout_sec=args.timeout)
+    try:
+        app = App(args.data_dir, timeout_sec=args.timeout)
+    except storage_crypto.StorageError as exc:
+        raise SystemExit(f"本地存储打不开（{exc.code}）：{exc.message}\n见 docs/storage-encryption.md。")
+    if app.storage.created_key:
+        print("已生成本地存储主密钥：" + storage_crypto.default_key_path()
+              + "\n请马上备份（python apps/web/storage_tool.py export-key），丢了密钥数据无法恢复。", flush=True)
+    elif app.storage.mode == "memory":
+        print("仅内存会话：会话和文件不落盘，停止服务就没了。", flush=True)
     httpd = make_httpd(app, "127.0.0.1", args.port)
     print(f"聊天页面 http://127.0.0.1:{args.port}", flush=True)
     try:
@@ -155,7 +169,7 @@ def _trajectories(handler, app, query) -> None:
         limit = max(1, min(1000, int(one("limit") or 100)))
     except ValueError:
         limit = 100
-    exporter = Exporter(app.data_dir)
+    exporter = Exporter(app.data_dir, sessions=app.sessions)
     stats = exporter.export()
     items = exporter.query(tool=one("tool"), agent=one("agent"), skill=one("skill"), outcome=one("outcome"),
                            mode=one("mode"), session=one("session"), since=one("since"), until=one("until"),
@@ -173,6 +187,21 @@ def _audit_policy_change(tool: str, change: dict) -> None:
         )
     except Exception as exc:  # 审计失败不回滚配置，但要看得见
         print(f"警告：配置变更审计写入失败 {type(exc).__name__}", file=sys.stderr)
+
+
+def _storage_route(handler, app) -> None:
+    """本地存储状态（12.F #62）：模式、算法、key_id、密钥来源、是否还有明文残留。
+    不给密钥、不给完整路径；只给本机。导入 / 导出密钥只走命令行，不走 HTTP。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in resources.LOOPBACK:
+        _send_json(handler, 403, {"code": "forbidden", "message": "存储状态只给本机看。"})
+        return
+    body = app.storage.public()
+    body["plaintext_left"] = (storage_crypto.plaintext_items(app.data_dir)
+                              if app.storage.mode == "encrypted" else None)
+    body["decrypt_failures"] = app.sessions.decrypt_failures
+    body["crypto_available"] = storage_crypto.crypto_available()
+    _send_json(handler, 200, body)
 
 
 def _dataflow_route(handler, app, query) -> None:
@@ -317,7 +346,7 @@ def _meta_mine(handler, app, query) -> None:
         _send_json(handler, 400, {"code": "invalid_query", "message": "min_count / min_sessions 应为整数。"})
         return
     use_model = one("model") in ("1", "true", "yes")
-    miner = Miner(app.data_dir)
+    miner = Miner(app.data_dir, sessions=app.sessions)
     result = miner.mine(min_count=min_count, min_sessions=min_sessions, use_model=use_model)
     result.pop("model_prompts", None)
     store = miner.load_store()
@@ -330,7 +359,7 @@ def _meta_candidates(handler, app, query, candidate_id: str | None = None) -> No
         return
     from services.meta.mine import Miner
 
-    miner = Miner(app.data_dir)
+    miner = Miner(app.data_dir, sessions=app.sessions)
     if candidate_id:
         if not re.fullmatch(r"sc_[0-9a-f]{8,64}", candidate_id):
             _send_json(handler, 400, {"code": "invalid_id", "message": "候选 id 不合法。"})
@@ -384,6 +413,9 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             return
         if method == "GET" and path in ("/api/egress", "/api/egress/export"):
             _egress_route(handler, path, urllib.parse.parse_qs(parsed.query))
+            return
+        if method == "GET" and path == "/api/storage":
+            _storage_route(handler, app)
             return
         if method == "GET" and path == "/api/dataflow":
             _dataflow_route(handler, app, urllib.parse.parse_qs(parsed.query))

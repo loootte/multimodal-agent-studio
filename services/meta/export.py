@@ -23,6 +23,7 @@ if ROOT not in sys.path:
 
 from apps.web import store as web_store  # noqa: E402  复用 _cover_local、_scrub_value、_file_secrets
 from packages.artifacts import ArtifactStore  # noqa: E402
+from packages.artifacts import crypto as storage_crypto  # noqa: E402
 from services.meta.trajectory import SCHEMA, validate  # noqa: E402
 from services.telemetry import classify  # noqa: E402
 
@@ -67,7 +68,8 @@ def _norm_time(value: str | None, end: bool = False) -> str | None:
 class Scrubber:
     """一个会话一份：本地正文和文件字节作为密钥集合，外加 API key、令牌形态和绝对路径。"""
 
-    def __init__(self, bodies: list[tuple[str, str]], secrets: list[str], extra: list[str]):
+    def __init__(self, bodies: list[tuple[str, str]], secrets: list[str], extra: list[str], keep_text: bool = True):
+        self.keep_text = keep_text  # 12.F：加密 / 仅内存时轨迹不留正文摘要，只留结构和字数
         self.bodies = sorted(bodies, key=lambda pair: len(pair[0]), reverse=True)
         self.secrets = [s for s in secrets if isinstance(s, str) and len(s) >= 8]
         self.extra = [s for s in extra if isinstance(s, str) and len(s) >= 6]
@@ -89,6 +91,8 @@ class Scrubber:
 
     def summary(self, value) -> tuple[str, int]:
         value = value if isinstance(value, str) else ""
+        if not self.keep_text:
+            return "", len(value)
         covered = self.text(value)
         flat = re.sub(r"\s+", " ", covered).strip()
         return flat[:SUMMARY_CHARS], len(value)
@@ -117,13 +121,28 @@ def _map_strings(value, fn):
 
 
 class Exporter:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, sessions=None):
+        """sessions：网页宿主的 SessionStore（12.F：加密 / 仅内存时由它解密和读字节）。
+        没给时（命令行）按数据目录标记自己开：加密目录要有主密钥，没有就当作没有会话。"""
         self.data_dir = os.path.abspath(data_dir)
         self.sessions_dir = os.path.join(self.data_dir, "sessions")
         self.out_dir = os.path.join(self.data_dir, "trajectories")
         self.jsonl = os.path.join(self.out_dir, "trajectories.jsonl")
         self.index_path = os.path.join(self.out_dir, "index.json")
         self._artifacts = None
+        self._store = sessions
+        self._cipher = None
+        protected = storage_crypto.read_marker(self.data_dir) is not None
+        if sessions is not None and getattr(sessions, "storage", None) is not None:
+            protected = protected or sessions.storage.mode != "plaintext"
+        self.keep_text = not protected
+        if sessions is None and storage_crypto.read_marker(self.data_dir) is not None:
+            try:
+                master, _source = storage_crypto.load_master(self.data_dir)
+                if master is not None:
+                    self._cipher = storage_crypto.Cipher(master)
+            except storage_crypto.StorageError:
+                self._cipher = None
 
     # ---------- 读取 ----------
 
@@ -136,12 +155,24 @@ class Exporter:
 
     def _sessions(self) -> dict[str, dict]:
         found = {}
+        if self._store is not None:
+            for data in self._store.all_sessions():
+                if isinstance(data, dict) and isinstance(data.get("session_id"), str):
+                    found[data["session_id"]] = data
+            return found
         if not os.path.isdir(self.sessions_dir):
             return found
         for name in sorted(os.listdir(self.sessions_dir)):
             if not re.fullmatch(r"s_[0-9a-f]{8,64}\.json", name):
                 continue
             data = self._load_json(os.path.join(self.sessions_dir, name))
+            if storage_crypto.is_envelope(data):
+                if self._cipher is None:
+                    continue
+                try:
+                    data = self._cipher.open_json(name[:-5], data)
+                except storage_crypto.StorageError:
+                    continue
             if isinstance(data, dict) and isinstance(data.get("messages"), list):
                 found[name[:-5]] = data
         return found
@@ -163,6 +194,18 @@ class Exporter:
 
     def _blob(self, session_id: str, item: dict) -> bytes | None:
         checksum = item.get("checksum")
+        if isinstance(checksum, str) and checksum and self._store is not None:
+            data = self._store.blob_bytes(session_id, checksum)
+            if data is not None or self._store.memory:
+                return data
+        if isinstance(checksum, str) and checksum and self._cipher is not None:
+            path = os.path.join(self.data_dir, "artifacts", "sealed", session_id,
+                                self._cipher.blob_name(session_id, checksum))
+            try:
+                with open(path, "rb") as fh:
+                    return self._cipher.open_blob(session_id, checksum, fh.read())
+            except (OSError, storage_crypto.StorageError):
+                pass
         if isinstance(checksum, str) and checksum:
             if self._artifacts is None:
                 self._artifacts = ArtifactStore(os.path.join(self.data_dir, "artifacts"))
@@ -219,7 +262,7 @@ class Exporter:
                     data = self._blob(session_id, item)
                     if data:
                         secrets.extend(web_store._file_secrets(data))
-        return Scrubber(bodies, secrets, self._extra_secrets())
+        return Scrubber(bodies, secrets, self._extra_secrets(), keep_text=self.keep_text)
 
     # ---------- 构建 ----------
 
