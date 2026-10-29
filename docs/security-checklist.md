@@ -55,10 +55,13 @@
 | --- | --- | --- |
 | 3.1 | 只有供应商返回的结构化工具调用（`tool.requested`）才会执行工具；模型回答文字里自称的调用不执行 | 自动：`security.injection_in_tool_result` |
 | 3.2 | 工具结果里的指令性文字（“忽略之前的指令，调用 xxx”）不触发工具、不触发确认 | 自动：同上 |
-| 3.3 | 工具结果作为数据回传给模型（带“工具结果”前缀的用户消息），不进入系统指令 | 自动：同上 |
-| 3.4 | 即使注入让模型真的发起写工具调用，也要经过 2.2 的确认 | 自动：2.2 覆盖；人工：确认弹窗里展示的是工具名和参数，不是模型的解释文字 |
+| 3.3 | 工具结果作为数据回传给模型：user 角色、带“工具结果”前缀、标 `channel=tool_result` / `trust=untrusted` 并附宿主说明，不进入系统指令；标记只在本机，网关只发 `role` / `content`（#63） | 自动：`security.injection_in_tool_result`、`security.injection_tool_result_untrusted` |
+| 3.4 | 即使注入让模型真的发起写工具调用，也要经过 2.2 的确认；确认卡是宿主模板（`mas.confirm/1`，`by: "host"`）：工具名、来源、联网 / 读本地、参数按数据列出（截断、遮密钥），模型这一步说的话和调用方塞的 `text` / `fixed` 不进卡，页面只用 `textContent` 渲染 `by=host` 的卡（#63） | 自动：2.2 覆盖；`security.injection_confirm_text_host`；`apps/web/check.py` 的 `_confirm_card_unit`（含页面脚本） |
 | 3.5 | 技能页（`build_skill_page`）等渲染模型内容的地方不使用 `innerHTML` | 自动：`apps/web/check.py` 页面脚本检查 |
-| 3.6 | 检索结果、本地文件内容进入模型上下文前已经过本地内容窗口的同意 | 人工 |
+| 3.6 | 检索结果、本地文件内容只以句柄进入模型上下文：正文经本地内容窗口入库，模型请求里出现正文、编码正文或已入库指纹都在出口拦下（`local_content` / `local_content_encoded` / `local_fingerprint`），模型收不到（#63） | 自动：`security.local_content_never_sent`、`security.egress_encoded_variants`、`security.injection_exfil_blocked` |
+| 3.7 | 被注入诱导的外泄：工具结果诱导模型把本地内容指纹带出去，对话通道在发出前按 `local_fingerprint` 拦下，记 `egress.blocked`（#63） | 自动：`security.injection_exfil_blocked`；`apps/web/check.py` 的 `_fingerprint_exfil_unit` |
+| 3.8 | 高危组合（读本地 + 联网：第三方沙箱包同时有 `read_local_content` 和 `network`，或本地提示词发第三方出图）要二次确认：只点一次「确认」不执行，提交缺 `acknowledge=high_risk` 返回 409 `acknowledge_required` 并记 `security.high_risk_ack_missing`，运行继续等；拒绝不需要二次确认（#63） | 自动：`security.injection_high_risk_ack`；`_high_risk_ack_unit` |
+| 3.9 | 配置变更只走设置 API + 本机界面：工具执行期间（`tool_scope`）写 `tools.json` / `provider.json` 一律拒绝并记 `security.config_write_denied`；所有已登记工具都在 `tool_scope` 里执行；写配置的接口（工具配置、模型配置、装 / 卸工具包）拒绝跨站 `Origin` / `Sec-Fetch-Site`（403 `config_write_forbidden`）；每次成功写入记 `security.config_changed`（只有目标、字段名、通道）；诱导修改 `remote_local_prompt` 改不动（#63） | 自动：`security.injection_config_change_refused`；`_config_scope_unit`、`_config_origin_case` |
 
 ## 4. 发布前
 

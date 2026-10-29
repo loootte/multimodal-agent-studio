@@ -20,6 +20,10 @@ WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(WEB_DIR, "..", ".."))
 POC = os.path.join(ROOT, "poc", "comfyui")
 WORKFLOW_DIR = os.path.join(POC, "workflows")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from services.runtime import injection  # noqa: E402  12.G：工具执行期间不许写配置
 
 TYPES = ("string", "int", "enum", "path", "secret")
 _KINDS = ("image", "image_i2i", "video", "video_i2v")
@@ -294,7 +298,10 @@ class ToolConfigStore:
     # ---- 写入 ----
     def update(self, name: str, values: dict, reset: bool = False, clear: list | None = None,
                acknowledge: list | None = None) -> dict:
-        """保存配置。返回公开视图；视图里的 changed_guarded 列出这次被改动的受保护字段（给调用方记审计）。"""
+        """保存配置。返回公开视图；视图里的 changed_guarded 列出这次被改动的受保护字段（给调用方记审计）。
+
+        12.G：工具执行期间调用一律拒绝（injection.refuse_config_write），配置只走设置 API。"""
+        injection.refuse_config_write("tool_config:" + str(name))
         if name not in declarations():
             raise KeyError(name)
         if not isinstance(values, dict):

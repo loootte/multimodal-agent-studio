@@ -25,6 +25,7 @@
 3. **编码窗口**：找出长度 ≥ 12 的 base64（标准和 URL 安全）和百分号编码片段，解码后再规范化比对，最多解两层。`data:` URL 不解码（图片走句柄和 ComfyUI 上传）；超过 256 KB 的叶子只做明文检查。
 4. **短正文**：规范化后不足 8 个字符的已登记正文，只在某个文本叶子**整段**等于它时命中，不做子串匹配，以免误伤。登记侧只存 `sha256(规范化正文)` 的前 32 位（`short_fingerprint`），审计与日志都不写正文。规范化后不足 4 个字符的不参与（如「好的」）。
 5. **结构字段**：`role`、`model`、`type` 等结构键的值不参与比对。
+6. **已入库指纹**（12.G，[#63](https://github.com/loootte/multimodal-agent-studio/issues/63)）：本会话本地内容入库时记下的 sha256（文件字节 `checksum`、文本正文 sha256、短正文规范化指纹）随 `local_bodies`（`LocalBodies.fingerprints`）带到出口。载荷里任何连续 ≥ 16 位的十六进制串只要和其中某个指纹有 16 位重合就拦下（大小写不敏感）；宿主放进请求的制品引用 `artifact_id` 和 `data:` 媒体载荷不参与。见 [injection-guard.md](injection-guard.md)。
 
 ## 错误码
 
@@ -33,8 +34,9 @@
 | `local_content` | 明文或规范化后命中本地正文（含分片、工具参数） | 请求里混进了本地内容，已在本机拦下 |
 | `local_content_encoded` | 解码 base64 / 百分号编码后命中 | 请求里有编码过的本地内容，已在本机拦下 |
 | `egress_policy_denied` | 字段不在白名单、一次多张、未登记渠道、适配器没走出口中间件 | 这次出站不符合出站策略，没有发出 |
+| `local_fingerprint` | 载荷里出现本会话已入库内容的指纹（12.G） | 请求里有本地内容的指纹，留在本机，没有发给模型 |
 
-三者都不可重试，遥测失败分类为 `policy`，并记安全事件 `security.egress_denied`（只有渠道和原因码）。
+四者都不可重试，遥测失败分类为 `policy`，并记安全事件 `security.egress_denied`（只有渠道和原因码）。
 
 ## 统一出口中间件
 

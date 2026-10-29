@@ -38,7 +38,12 @@
         "security.storage_encrypted_at_rest": true,
         "security.storage_session_isolation": true,
         "security.storage_key_required": true,
-        "security.storage_memory_only": true
+        "security.storage_memory_only": true,
+        "security.injection_exfil_blocked": true,
+        "security.injection_config_change_refused": true,
+        "security.injection_confirm_text_host": true,
+        "security.injection_high_risk_ack": true,
+        "security.injection_tool_result_untrusted": true
       }
     }
   }

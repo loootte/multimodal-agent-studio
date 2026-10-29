@@ -46,6 +46,7 @@ from services.runtime.budget import Budget
 from services.runtime.loop import run as runtime_run
 from services.runtime.skills import catalog_suffix
 from services.runtime import agents
+from services.runtime import injection
 from store import StoreError, new_id
 
 SYSTEM = (
@@ -184,7 +185,8 @@ class Run:
         self.waiting_content = False
         self._confirm_ready = threading.Event()
         self._confirm_lock = threading.Lock()
-        self._confirm_value: bool | None = None
+        self._confirm_value: bool | str | None = None
+        self._confirm_requires: str | None = None
         self.waiting_confirm = False
 
     def begin_content_wait(self, kind: str = "text") -> None:
@@ -221,13 +223,24 @@ class Run:
         self._confirm_ready.clear()
         with self._confirm_lock:
             self._confirm_value = None
+            self._confirm_requires = None
             self.waiting_confirm = True
 
-    def offer_confirm(self, allowed: bool) -> str:
+    def require_ack(self, value: str | None) -> None:
+        """12.G：当前这张确认卡是高危组合，「确认」要带 acknowledge 才收（卡片推给界面之前设置）。"""
+        with self._confirm_lock:
+            self._confirm_requires = value or None
+
+    def offer_confirm(self, allowed: bool, acknowledge=None) -> str:
         with self._confirm_lock:
             if not self.waiting_confirm or self.cancel.is_set() or self._confirm_value is not None:
                 return "not_waiting"
-            self._confirm_value = bool(allowed)
+            if allowed and self._confirm_requires:
+                if acknowledge != self._confirm_requires:
+                    return "ack_required"  # 运行继续等；界面再确认一次后重新提交
+                self._confirm_value = self._confirm_requires
+            else:
+                self._confirm_value = bool(allowed)
         self._confirm_ready.set()
         return "ok"
 
@@ -241,7 +254,8 @@ class Run:
             self.waiting_confirm = False
             if self.cancel.is_set() or not signaled:
                 return False
-            return bool(self._confirm_value)
+            # 高危卡被二次确认时返回 high_risk（运行时据此放行）；其余是布尔值。
+            return self._confirm_value if isinstance(self._confirm_value, str) else bool(self._confirm_value)
 
     def note_comfy(self, prompt_id: str, base: str) -> None:
         with self._state_lock:
@@ -406,11 +420,16 @@ def submit_file(app, run_id: str, encoded, media_type) -> dict:
     return _offer(app, run_id, "file", payload)
 
 
-def submit_confirm(app, run_id: str, allowed) -> dict:
+def submit_confirm(app, run_id: str, allowed, acknowledge=None) -> dict:
     run = app.runs.get(run_id)
     if run is None:
         raise RequestError(409, "not_waiting", "现在没有在等待确认。")
-    if run.offer_confirm(bool(allowed)) != "ok":
+    outcome = run.offer_confirm(bool(allowed), acknowledge if isinstance(acknowledge, str) else None)
+    if outcome == "ack_required":
+        # 12.G：高危组合（读本地 + 联网）只点一次「确认」不算，界面要再确认一次后果。
+        telemetry.record("security.high_risk_ack_missing", trace_id=run.run_id, run_id=run.run_id)
+        raise RequestError(409, "acknowledge_required", "这是读本地内容又联网的高危操作，需要再确认一次（acknowledge=high_risk）。")
+    if outcome != "ok":
         raise RequestError(409, "not_waiting", "现在没有在等待确认。")
     return {"ok": True}
 
@@ -800,12 +819,14 @@ def _generate_text_turn(
                 name = event.get("name") or ""
                 args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
                 summary = _confirm_egress(app, session_id, run, name, args, event.get("egress"))
+                card = _confirm_card(run, name, args, summary)
                 _push_saved(app, session_id, message_id, run, {
                     "type": EVENT_TOOL_CONFIRM,
                     "name": name,
                     "tool": name,
                     "arguments": _public_args(args),
                     "egress": summary,
+                    "card": card,
                     "message_id": message_id,
                     "run_id": run.run_id,
                 })
@@ -815,6 +836,7 @@ def _generate_text_turn(
                     "arguments": _public_args(args),
                     "status": "waiting_confirm",
                     "egress": summary,
+                    "card": card,
                     "message_id": message_id,
                     "run_id": run.run_id,
                 })
@@ -973,7 +995,9 @@ def _follow_local_tool(app, session_id, message_id, run, provider, user_text, to
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
     session = app.sessions.get(session_id)
     messages = _turn_messages(
-        app, session_id, session, extra=[{"role": "user", "content": line}],
+        # 12.G：本地工具结果同样标 untrusted，只当数据。
+        app, session_id, session, extra=[{"role": "user", "content": line + "\n" + injection.TOOL_RESULT_NOTE,
+                                          "channel": injection.TOOL_RESULT_CHANNEL, "trust": injection.UNTRUSTED}],
     )
     try:
         follow, reply = _ask(app, session_id, message_id, run, provider, messages, False)
@@ -1124,7 +1148,7 @@ def _gateway_request(provider: dict, messages: list[dict]) -> dict:
     }
 
 
-_EGRESS_BLOCK_CODES = ("local_content", "local_content_encoded", "egress_policy_denied")  # 12.C #59
+_EGRESS_BLOCK_CODES = ("local_content", "local_content_encoded", "egress_policy_denied", "local_fingerprint")  # 12.C #59 / 12.G #63
 
 
 def _blocks(exc: GatewayError, run: Run) -> bool:
@@ -1228,6 +1252,11 @@ def _execute_web_tool(app, session_id, message_id, run, name, arguments) -> dict
     denied = authorize_tool(name)  # 12.D：宿主执行器按清单降权，越权返回 permission_denied，不执行
     if denied:
         return denied
+    with injection.tool_scope(name):  # 12.G：宿主工具执行期间不许写配置
+        return _execute_web_tool_scoped(app, session_id, message_id, run, name, arguments)
+
+
+def _execute_web_tool_scoped(app, session_id, message_id, run, name, arguments) -> dict:
     if name == "stage_prompt":
         return _execute_stage_prompt(app, session_id, run, arguments)
     if name == "plan_images":
@@ -1498,13 +1527,14 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
         )
         args = {"content_handle": handle, "backend": "remote"}
         summary = _confirm_egress(app, session_id, run, "generate_image", args, None)
+        card = _confirm_card(run, "generate_image", args, summary)
         _push_saved(app, session_id, message_id, run, {
             "type": EVENT_TOOL_CONFIRM, "name": "generate_image", "tool": "generate_image", "arguments": args,
-            "notice": notice, "egress": summary, "message_id": message_id, "run_id": run.run_id,
+            "notice": notice, "egress": summary, "card": card, "message_id": message_id, "run_id": run.run_id,
         })
         _push_saved(app, session_id, message_id, run, {
             "type": EVENT_TOOL_CALL, "tool": "generate_image", "arguments": args, "status": "waiting_confirm",
-            "notice": notice, "egress": summary, "message_id": message_id, "run_id": run.run_id,
+            "notice": notice, "egress": summary, "card": card, "message_id": message_id, "run_id": run.run_id,
         })
         ok = run.wait_confirm()
     finally:
@@ -1853,9 +1883,20 @@ _SOURCE_LABELS = {
 }
 
 
+def _confirm_card(run: Run, name: str, args: dict, summary: dict, agent: str | None = None) -> dict:
+    """12.G：宿主模板确认卡；高危组合要求二次确认（卡片推出去之前就登记到 Run 上）。"""
+    card = injection.confirm_card(name, args, summary, agent=agent)
+    setter = getattr(run, "require_ack", None)
+    if callable(setter):
+        setter(card.get("requires_ack"))
+    return card
+
+
 def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base: dict | None) -> dict:
-    """确认卡上的出站摘要：宿主按工具清单、当前配置和句柄记录生成，不取模型的解释文字。"""
-    summary = dict(base) if isinstance(base, dict) else {}
+    """确认卡上的出站摘要：宿主按工具清单、当前配置和句柄记录生成，不取模型的解释文字。
+
+    12.G：调用方带来的摘要只留白名单布尔标志（injection.SUMMARY_FLAGS），text / fixed / notice 等文字一律由这里重新生成。"""
+    summary = injection.clean_summary(base)
     if not summary:
         try:
             summary = egress_preview(name, args)
@@ -1908,6 +1949,7 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
     )
     summary["fixed"] = _egress_fixed(summary)
     summary["text"] = _egress_text(summary)
+    summary["risk"] = "high" if injection.high_risk(summary) else "normal"
     return summary
 
 
@@ -2534,11 +2576,13 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
     produced: list[str] = []
     tag = {"agent": agent.name, "agent_run_id": run_id, "parent_run_id": parent_run_id}
 
-    def tool_event(name, arguments, status, result=None, egress_summary=None):
+    def tool_event(name, arguments, status, result=None, egress_summary=None, card=None):
         event = {"type": EVENT_TOOL_CALL, "tool": name, "arguments": _public_args(arguments or {}),
                  "status": status, "message_id": message_id, "run_id": run.run_id}
         if egress_summary:
             event["egress"] = egress_summary
+        if card:
+            event["card"] = card
         event.update(tag)
         if result is not None and name != "generate_image":
             event["result"] = result
@@ -2568,12 +2612,13 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
             run.begin_confirm_wait()
             name = event.get("name") or ""
             args = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+            summary = _confirm_egress(app, session_id, run, name, args, event.get("egress"))
+            card = _confirm_card(run, name, args, summary, agent=agent.name)
             confirm_event = {"type": EVENT_TOOL_CONFIRM, "name": name, "tool": name, "arguments": _public_args(args),
-                             "egress": _confirm_egress(app, session_id, run, name, args, event.get("egress")),
-                             "message_id": message_id, "run_id": run.run_id}
+                             "egress": summary, "card": card, "message_id": message_id, "run_id": run.run_id}
             confirm_event.update(tag)
             _push_saved(app, session_id, message_id, run, confirm_event)
-            tool_event(name, args, "waiting_confirm", egress_summary=confirm_event["egress"])
+            tool_event(name, args, "waiting_confirm", egress_summary=summary, card=card)
 
     def confirm(name, arguments):
         try:

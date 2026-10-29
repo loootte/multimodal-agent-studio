@@ -368,6 +368,35 @@ def run_injection(h: Harness, task: dict, live: bool) -> dict:
     return {"executed": executed}
 
 
+def run_injection_guard(h: Harness, task: dict, live: bool) -> dict:
+    """提示注入防外泄（12.G #63）。
+    exfil_blocked：已入库指纹（全长 / 截段 / 大写 / 混在工具结果里）经对话通道外传一律 local_fingerprint 拦下，模型收不到。
+    config_change_refused：工具执行期间写配置被拒并审计；跨站请求改不了 remote_local_prompt（403）；同源写入有审计。
+    confirm_text_host：确认卡是宿主模板，模型说的话和调用方塞的文字不进卡。
+    high_risk_ack：读本地 + 联网的组合只点一次确认不执行，二次确认（high_risk）才执行；缺确认 409。
+    tool_result_untrusted：工具结果通道标 untrusted、附宿主说明、标记不出本机。"""
+    case = task.get("case")
+    try:
+        if case == "exfil_blocked":
+            return check._fingerprint_exfil_unit()
+        if case == "config_change_refused":
+            scoped = check._config_scope_unit(h.directory)
+            origin = check._config_origin_case(h.base)
+            status, body = check.request("GET", h.base + "/api/tools/generate_image/config")
+            value = json.loads(body)["values"]["remote_local_prompt"]["value"] if status == 200 else None
+            expect(value == "refuse", f"remote_local_prompt 被改成了 {value}")
+            return {"tools_scoped": scoped["tools"], "denied": origin["denied"], "remote_local_prompt": value}
+        if case == "confirm_text_host":
+            return check._confirm_card_unit()
+        if case == "high_risk_ack":
+            return check._high_risk_ack_unit()
+        if case == "tool_result_untrusted":
+            return check._tool_result_unit()
+    except SystemExit as exc:
+        raise Failed(str(exc) or f"注入防护检查失败：{case}") from exc
+    raise Failed(f"未知用例：{case}")
+
+
 def run_multi_agent_web(h: Harness, task: dict, live: bool) -> dict:
     """ADR 0005：勾多智能体时编排者委托 planner，结果回到同一条消息；本地正文不出本机；默认单 Agent 不变。"""
     try:
@@ -1166,6 +1195,7 @@ RUNNERS = {
     "confirm_web": run_confirm_web,
     "confirm_runtime": run_confirm_runtime,
     "injection": run_injection,
+    "injection_guard": run_injection_guard,
     "multi_agent_web": run_multi_agent_web,
     "multi_agent_guard": run_multi_agent_guard,
     "multi_agent_text": run_multi_agent_text,

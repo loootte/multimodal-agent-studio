@@ -189,6 +189,42 @@ def _audit_policy_change(tool: str, change: dict) -> None:
         print(f"警告：配置变更审计写入失败 {type(exc).__name__}", file=sys.stderr)
 
 
+def _config_write_allowed(handler, target: str) -> bool:
+    """12.G：配置只走设置 API + 本机界面。写配置的请求要来自本机，且不是别的网页跨站发来的
+    （有 Origin 就必须和 Host 同源；有 Sec-Fetch-Site 就必须是 same-origin / none）。被拒记 security.config_write_denied。"""
+    host = (handler.client_address or ("",))[0]
+    reason = None
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        reason = "not_loopback"
+    origin = handler.headers.get("Origin")
+    if reason is None and origin is not None:
+        parsed = urllib.parse.urlparse(origin)
+        if parsed.scheme not in ("http", "https") or parsed.netloc != (handler.headers.get("Host") or ""):
+            reason = "cross_origin"
+    fetch_site = handler.headers.get("Sec-Fetch-Site")
+    if reason is None and fetch_site is not None and fetch_site not in ("same-origin", "none"):
+        reason = "cross_site"
+    if reason is None:
+        return True
+    try:
+        telemetry.record("security.config_write_denied", trace_id="sec_" + uuid.uuid4().hex,
+                         target=target[:48], via=reason)
+    except Exception:
+        pass
+    _send_json(handler, 403, {"code": "config_write_forbidden", "message": "配置只能在本机设置页里修改。"})
+    return False
+
+
+def _audit_config_write(target: str, fields) -> None:
+    """12.G：设置 API 的每次配置写入记一条 security.config_changed（只有目标和字段名，不记取值和密钥）。"""
+    try:
+        names = sorted(str(item)[:48] for item in (fields or []))[:40]
+        telemetry.record("security.config_changed", trace_id="cfg_" + uuid.uuid4().hex,
+                         target=str(target)[:48], fields=names, via="settings_api")
+    except Exception as exc:
+        print(f"警告：配置写入审计失败 {type(exc).__name__}", file=sys.stderr)
+
+
 def _storage_route(handler, app) -> None:
     """本地存储状态（12.F #62）：模式、算法、key_id、密钥来源、是否还有明文残留。
     不给密钥、不给完整路径；只给本机。导入 / 导出密钥只走命令行，不走 HTTP。"""
@@ -440,6 +476,8 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             _send_json(handler, 200, app.provider.public())
             return
         if path == "/api/provider" and method == "PUT":
+            if not _config_write_allowed(handler, "provider"):
+                return
             body = _read_json(handler)
             try:
                 view = app.provider.update(
@@ -450,6 +488,8 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 )
             except ValueError as exc:
                 raise chat_run.RequestError(400, "invalid_provider", str(exc)) from exc
+            _audit_config_write("provider", [key for key in ("base_url", "model", "api_key", "clear_key")
+                                             if body.get(key) not in (None, "", False)])
             _send_json(handler, 200, view)
             return
         if path == "/api/tools" and method == "GET":
@@ -471,6 +511,8 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                 _send_json(handler, 200, app.tools.public(name))
                 return
             if parts[1:] == ["config"] and method == "PUT":
+                if not _config_write_allowed(handler, "tool_config:" + name):
+                    return
                 body = _read_json(handler)
                 try:
                     view = app.tools.update(
@@ -490,6 +532,8 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
                     return
                 for change in view.get("changed_guarded") or []:
                     _audit_policy_change(name, change)
+                values = body.get("values") if isinstance(body.get("values"), dict) else {}
+                _audit_config_write("tool_config:" + name, list(values) + (["reset"] if body.get("reset") else []))
                 _send_json(handler, 200, view)
                 return
             if parts[1:] == ["test"] and method == "POST":
@@ -591,7 +635,8 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
         matched = _RUN_CONFIRM.fullmatch(path)
         if matched and method == "POST":
             body = _read_json(handler)
-            _send_json(handler, 200, chat_run.submit_confirm(app, matched.group(1), body.get("allowed")))
+            _send_json(handler, 200, chat_run.submit_confirm(app, matched.group(1), body.get("allowed"),
+                                                              body.get("acknowledge")))
             return
         matched = _RUN_EVENTS.fullmatch(path)
         if matched and method == "GET":
@@ -648,14 +693,20 @@ def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str
             _send_json(handler, 200, packs.inspect(str(body.get("source") or "")))
             return
         if path == "/api/toolpacks/install" and method == "POST":
+            if not _config_write_allowed(handler, "toolpack_install"):
+                return
             body = _read_json(handler)
             summary = packs.install(str(body.get("source") or ""), body.get("accept_permissions"))
+            _audit_config_write("toolpack_install", ["permissions"])
             _send_json(handler, 200, {"ok": True, "installed": summary})
             return
         parts = path[len("/api/toolpacks/"):].split("/")
         name = urllib.parse.unquote(parts[0]) if parts and parts[0] else ""
         if name and parts[1:] == ["uninstall"] and method == "POST":
+            if not _config_write_allowed(handler, "toolpack_uninstall"):
+                return
             packs.uninstall(name)
+            _audit_config_write("toolpack_uninstall", ["pack"])
             _send_json(handler, 200, {"ok": True, "removed": name})
             return
         if name and parts[1:] == ["export"] and method == "GET":
