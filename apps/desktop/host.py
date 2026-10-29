@@ -215,7 +215,13 @@ class Sidecar:
         env = os.environ.copy()
         env["MAS_DESKTOP_TOKEN"] = self.token
         # Windows：用 CREATE_NEW_PROCESS_GROUP 方便后来发 CTRL_BREAK；Unix 默认进程组即可。
-        kwargs: dict = {"cwd": str(ROOT), "env": env}
+        kwargs: dict = {
+            "cwd": str(ROOT),
+            "env": env,
+            # 避免 server 的 MAS_READY 混进宿主 stdout（Tauri/启动器只认宿主这一行）
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         self.proc = subprocess.Popen(cmd, **kwargs)

@@ -95,8 +95,10 @@ fn spawn_host(root: &Path) -> Result<(Child, ReadyInfo, String), String> {
     for line in reader.lines() {
         let line = line.map_err(|e| format!("读 sidecar 输出失败：{e}"))?;
         if let Some(rest) = line.strip_prefix("MAS_READY ") {
-            let info: ReadyInfo = serde_json::from_str(rest)
-                .map_err(|e| format!("解析 MAS_READY 失败：{e}; {rest}"))?;
+            // server.py 也会打一行不完整的 MAS_READY；缺 base 就跳过
+            let Ok(info) = serde_json::from_str::<ReadyInfo>(rest) else {
+                continue;
+            };
             let token = info
                 .url
                 .split("desktop_token=")
@@ -106,9 +108,8 @@ fn spawn_host(root: &Path) -> Result<(Child, ReadyInfo, String), String> {
                 .next()
                 .unwrap_or("")
                 .to_string();
-            if token.is_empty() {
-                let _ = child.kill();
-                return Err("MAS_READY 里没有 desktop_token".into());
+            if token.is_empty() || info.base.is_empty() {
+                continue;
             }
             return Ok((child, info, token));
         }

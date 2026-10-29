@@ -72,10 +72,15 @@ def _spawn_host(root: Path, python: str):
             import json
 
             info = json.loads(line[len("MAS_READY ") :])
+            # server.py 也会打 MAS_READY，但没有 base/server_pid；只认宿主完整行
+            if not info.get("base") or not info.get("url"):
+                continue
             url = info["url"]
             base = info["base"]
             token = url.split("desktop_token=", 1)[-1].split("&", 1)[0]
             server_pid = int(info.get("server_pid") or 0)
+            if not token:
+                continue
             break
     if not url or not token:
         proc.kill()
