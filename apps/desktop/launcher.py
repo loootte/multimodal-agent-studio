@@ -1,5 +1,6 @@
 """Windows 可双击启动器（13.A 补充）：拉起 host.py sidecar，用 WebView2 开窗口。
 
+用本机 Python 运行（快捷方式 / start-mas.cmd / build-launcher.ps1），不要 PyInstaller onefile 内嵌 python312.dll。
 不依赖 Rust/MSVC。完整 Tauri 壳仍见 npm run build。
 需要：本机 Python 3、仓库布局、可选 pywebview（有则内嵌窗口，无则系统浏览器）。
 """

@@ -70,16 +70,24 @@ python apps/web/server.py --port 0 --desktop-token <secret> --ready-file ready.j
 - `security.desktop_token_required`：无令牌访问本地资源 / 设置类接口被拒。
 - 现有 `apps/web/check.py`、`poc/tools/check.py`、`evals/run.py`、`evals/gate.py` 在 Web 模式（无令牌）下行为不变。
 
-## Windows 启动器 exe（无 Rust / 无 MSVC）
+## Windows 双击入口（本机 Python，无内嵌 DLL）
 
-若本机缺少 Visual C++ Build Tools，可用 PyInstaller 打出 **pywebview 启动器**（不是 Tauri 壳，但同样拉起 `host.py`、随机端口、启动令牌）：
+**不要**再用 PyInstaller `--onefile` 打 `MultimodalAgentStudio.exe`：会把 `python312.dll` 解到 `%TEMP%\_MEI*`，本机上已出现 `LoadLibrary: 内存资源不足` 一类失败。
+
+推荐做法：快捷方式 / `.cmd` 直接调用本机 `pythonw` 跑 `apps/desktop/launcher.py`（同样拉起 `host.py`、随机端口、启动令牌；有 `pywebview` 则 WebView2 窗口，否则系统浏览器）：
 
 ```
 cd apps/desktop
 powershell -ExecutionPolicy Bypass -File .\build-launcher.ps1
 ```
 
-产物：`apps/desktop/dist/MultimodalAgentStudio.exe`。双击即可；需本机 Python 3 与完整仓库源码（exe 会向上找 `apps/desktop/host.py`）。有 `pywebview` 时用 WebView2 窗口，否则回退系统浏览器。
+产物：
+
+- 桌面快捷方式「Multimodal Agent Studio」→ `pythonw.exe` + `apps\desktop\launcher.py`（工作目录为仓库根）
+- `apps/desktop/dist/start-mas.cmd` 与 `apps/desktop/dist/启动 Multimodal Agent Studio.cmd`（兜底）
+- 仓库内也可双击 / 运行 `apps/desktop/start-mas.cmd`
+
+仍需本机 Python 3 与完整仓库源码。旧的 onefile exe 会被脚本改名为 `MultimodalAgentStudio.exe.BROKEN-onefile.bak`。
 
 ## Windows 打 exe（完整 Tauri 壳）
 
