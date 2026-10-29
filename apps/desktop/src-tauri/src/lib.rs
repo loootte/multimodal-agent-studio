@@ -23,11 +23,44 @@ struct ReadyInfo {
     server_pid: u32,
 }
 
+fn looks_like_repo(root: &Path) -> bool {
+    root.join("apps/desktop/host.py").is_file() && root.join("apps/web/server.py").is_file()
+}
+
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+    if let Ok(v) = std::env::var("MAS_REPO_ROOT") {
+        let p = PathBuf::from(v);
+        if looks_like_repo(&p) {
+            return p;
+        }
+    }
+    // 从 exe / cwd 向上找仓库根（dist、target/release 下双击也能用）
+    let mut seeds: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            seeds.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        seeds.push(cwd);
+    }
+    seeds.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+    );
+    for seed in seeds {
+        let mut cur = Some(seed);
+        for _ in 0..10 {
+            let Some(dir) = cur else { break };
+            if looks_like_repo(&dir) {
+                return dir;
+            }
+            cur = dir.parent().map(|p| p.to_path_buf());
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn python_bin() -> String {

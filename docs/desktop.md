@@ -70,6 +70,43 @@ python apps/web/server.py --port 0 --desktop-token <secret> --ready-file ready.j
 - `security.desktop_token_required`：无令牌访问本地资源 / 设置类接口被拒。
 - 现有 `apps/web/check.py`、`poc/tools/check.py`、`evals/run.py`、`evals/gate.py` 在 Web 模式（无令牌）下行为不变。
 
+## Windows 启动器 exe（无 Rust / 无 MSVC）
+
+若本机缺少 Visual C++ Build Tools，可用 PyInstaller 打出 **pywebview 启动器**（不是 Tauri 壳，但同样拉起 `host.py`、随机端口、启动令牌）：
+
+```
+cd apps/desktop
+powershell -ExecutionPolicy Bypass -File .\build-launcher.ps1
+```
+
+产物：`apps/desktop/dist/MultimodalAgentStudio.exe`。双击即可；需本机 Python 3 与完整仓库源码（exe 会向上找 `apps/desktop/host.py`）。有 `pywebview` 时用 WebView2 窗口，否则回退系统浏览器。
+
+## Windows 打 exe（完整 Tauri 壳）
+
+在仓库根、分支含本桌面壳的前提下，于 **Windows**（需 Rust MSVC、Node、WebView2、本机 Python）：
+
+```
+cd apps/desktop
+npm install
+npm run build
+```
+
+产物：
+
+- 免安装可执行文件：`apps/desktop/src-tauri/target/release/mas-desktop.exe`
+- 可选 NSIS 安装包：`apps/desktop/src-tauri/target/release/bundle/nsis/*.exe`
+- 便捷副本：构建脚本会复制到 `apps/desktop/dist/MultimodalAgentStudio.exe`
+
+双击 `mas-desktop.exe` / `dist` 下副本即可；exe 会向上查找含 `apps/desktop/host.py` 的仓库根并拉起本机 Python sidecar（随机端口，不抢 8766）。仍需要：
+
+- 本机已装 Python 3，且能在仓库根运行 `python apps/web/server.py`
+- 出图需本机 ComfyUI（默认 `http://127.0.0.1:8188`）
+- WebView2 Runtime（Win10/11 通常自带）
+
+也可用环境变量 `MAS_REPO_ROOT` 显式指定仓库根；`MAS_PYTHON` 指定解释器。
+
+打包安装、代码签名、自动更新仍属 13.C；本说明只覆盖「能双击的壳 exe」。
+
 ## 不做（本阶段）
 
-打包安装、代码签名、自动更新、钥匙串、托盘、移动端。
+正式安装包分发流程、代码签名、自动更新、钥匙串、托盘、移动端。Windows 下可先用上面的 release exe / NSIS 包本地双击。
