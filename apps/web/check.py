@@ -5600,7 +5600,9 @@ def _config_origin_case(base: str) -> dict:
     changed = _config_audit_since(base, mark, "security.config_changed")
     last = changed[-1] if changed else {}
     if last.get("target") != "tool_config:generate_image" or last.get("fields") != ["remote_timeout_sec"] or \
-            last.get("via") != "settings_api" or "61" in json.dumps(last):
+            last.get("via") != "settings_api" or \
+            set(last) - {"ts", "trace_id", "kind", "target", "fields", "via"} or \
+            61 in [value for value in last.values() if not isinstance(value, bool)]:
         fail(f"配置写入没有审计或审计里有取值：{last}")
     request("PUT", url, {"reset": True})
     return {"denied": len(denied)}
