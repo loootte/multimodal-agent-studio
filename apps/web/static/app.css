@@ -586,6 +586,14 @@ dialog select { font: inherit; padding: 0.35rem; }
 .confirm-fixed dt { color: var(--muted); }
 .confirm-fixed dd { margin: 0; }
 .confirm-warn { margin: 0.3rem 0 0; color: #8f2f18; font-weight: 600; }
+/* 12.G 宿主模板确认卡 */
+.confirm-card { flex-basis: 100%; margin: 0.2rem 0; }
+.confirm-card p { margin: 0.15rem 0; }
+.confirm-high { border-left: 3px solid #8f2f18; padding-left: 0.5rem; }
+.confirm-args-label { color: var(--muted); margin-top: 0.3rem; }
+.confirm-args { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.6rem; margin: 0.2rem 0 0; }
+.confirm-args dt { color: var(--muted); }
+.confirm-args dd { margin: 0; word-break: break-all; }
 .dataflow { max-height: 35%; }
 #dataflow-status { margin: 0; }
 #dataflow-graph { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; font-size: 0.85rem; }

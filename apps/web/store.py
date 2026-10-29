@@ -20,6 +20,8 @@ import uuid
 from packages.artifacts import ArtifactError, ArtifactStore
 from packages.artifacts import crypto as storage_crypto
 from packages.contracts.events import HANDLE_ERRORS, HANDLE_PURPOSE_TOOLS, HANDLE_SCHEMA
+from services.gateway.egress import LocalBodies
+from services.runtime import injection
 from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 
 _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
@@ -277,6 +279,7 @@ class ProviderStore:
         }
 
     def update(self, *, base_url: str, model: str, api_key: str | None, clear_key: bool) -> dict:
+        injection.refuse_config_write("provider")  # 12.G：配置只走设置 API，工具执行期间不能改
         if clear_key and api_key:
             raise ValueError("不能同时填写和清除 API key。")
         cleaned_base = clean_base_url(base_url)
@@ -1472,7 +1475,27 @@ class SessionStore:
         return pairs
 
     def local_bodies(self, session_id: str) -> list[str]:
-        return [text for text, _handle in self.secret_pairs(session_id)]
+        """本会话已登记的本地正文；附带「已入库指纹」（12.G #63），出口中间件据此禁止指纹外传。"""
+        bodies = [text for text, _handle in self.secret_pairs(session_id)]
+        return LocalBodies(bodies, self.stored_fingerprints(session_id))
+
+    def stored_fingerprints(self, session_id: str) -> list[str]:
+        """入库时记下的 sha256（文件字节 checksum、文本正文 sha256）。只给出口检查用，不进任何对外视图。"""
+        try:
+            session = self.get(session_id)
+        except StoreError:
+            return []
+        found = []
+        for item in session.get("contents") or []:
+            if not isinstance(item, dict):
+                continue
+            checksum = item.get("checksum")
+            if isinstance(checksum, str) and checksum:
+                found.append(checksum)
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                found.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+        return found
 
     def _find_content(self, session_id: str, handle: str) -> dict | None:
         if not isinstance(handle, str) or not _ID.fullmatch(handle):

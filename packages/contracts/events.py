@@ -105,6 +105,7 @@ EGRESS_REASONS = {
     "local_content_encoded": "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
     "egress_policy_denied": "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
     "permission_denied": "这个工具包没有联网权限（或试图连本机地址），已在沙箱里拦下，没有打开连接。",
+    "local_fingerprint": "请求里有本地内容的入库指纹，已在发出前拦下；本地内容和它的指纹都没有离开本机。",
 }
 
 # 句柄（ADR 0009，路线图 12.B #58）：本地内容句柄是短时能力令牌，绑定会话、用途（purpose）、可选运行和过期时间。
@@ -133,6 +134,7 @@ ERROR_CODES = (
     "handle_forbidden",
     "local_content_encoded",
     "egress_policy_denied",
+    "local_fingerprint",
 )
 
 HUMAN = {
@@ -151,6 +153,7 @@ HUMAN = {
     "handle_forbidden": "这个本地内容句柄的用途不允许这样用。",
     "local_content_encoded": "请求里有编码过的本地内容，留在本机，没有发给模型。",
     "egress_policy_denied": "这次请求不在出站策略允许的范围里，没有发出。",
+    "local_fingerprint": "请求里有本地内容的指纹，留在本机，没有发给模型。",
 }
 
 RETRYABLE = {
@@ -169,4 +172,5 @@ RETRYABLE = {
     "handle_forbidden": False,
     "local_content_encoded": False,
     "egress_policy_denied": False,
+    "local_fingerprint": False,
 }

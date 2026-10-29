@@ -45,7 +45,10 @@ def execute_tool(name: str, arguments: dict) -> dict:
             return problem
         from services.gateway import egress
 
-        with egress.note(tool=name):  # 12.E：出站记录带上工具名，数据流图按它连边
+        from services.runtime import injection
+
+        # 12.E：出站记录带上工具名，数据流图按它连边；12.G：工具执行期间不许写配置。
+        with egress.note(tool=name), injection.tool_scope(name):
             return call_tool(name, arguments)
     checked = validate_external(name, arguments)
     if not checked.get("ok"):

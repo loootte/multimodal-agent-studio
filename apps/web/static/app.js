@@ -506,6 +506,7 @@ const EGRESS_REASONS = {
   local_content_encoded: "请求里有经过编码（如 base64）的本地内容，已在发出前拦下；本地内容没有离开本机。",
   egress_policy_denied: "这次请求的字段或出口不在出站策略里，已拦下，没有打开连接。",
   permission_denied: "这个工具包没有联网权限（或试图连本机地址），已在沙箱里拦下，没有打开连接。",
+  local_fingerprint: "请求里有本地内容的入库指纹，已在发出前拦下；本地内容和它的指纹都没有离开本机。",
 };
 
 function rememberEgress(assistant, event) {
@@ -1151,13 +1152,61 @@ function retrieveView(result) {
   return list;
 }
 
+// 12.G 宿主模板确认卡（mas.confirm/1）：标题、宿主说明、参数表都来自宿主，只用 textContent 显示；
+// 不显示模型这一步说的话，也不显示工具结果里的文字。参数是模型给的数据，标明「仅供核对」。
+function confirmCardNode(card) {
+  if (!card || typeof card !== "object" || card.by !== "host") return null;
+  const box = document.createElement("div");
+  box.className = "confirm-card" + (card.risk === "high" ? " confirm-high" : "");
+  const title = document.createElement("strong");
+  title.textContent = String(card.title || "");
+  box.append(title);
+  for (const line of Array.isArray(card.lines) ? card.lines : []) {
+    const item = document.createElement("p");
+    item.textContent = String(line);
+    box.append(item);
+  }
+  const rows = Array.isArray(card.args) ? card.args : [];
+  if (rows.length) {
+    const label = document.createElement("div");
+    label.className = "confirm-args-label";
+    label.textContent = String(card.args_label || "参数");
+    const list = document.createElement("dl");
+    list.className = "confirm-args";
+    for (const row of rows) {
+      const term = document.createElement("dt");
+      term.textContent = String(row.key || "");
+      const value = document.createElement("dd");
+      value.textContent = String(row.value ?? "");
+      list.append(term, value);
+    }
+    box.append(label, list);
+  }
+  if (card.risk === "high") {
+    const warn = document.createElement("p");
+    warn.className = "confirm-warn";
+    warn.textContent = String(card.ack_text || "高危组合：读本地内容又联网，确认后还要再确认一次。");
+    box.append(warn);
+  }
+  return box;
+}
+
 function confirmRow(message, call) {
   const row = document.createElement("div");
   row.className = "confirm-row";
+  const card = call && call.card;
   const yes = document.createElement("button");
   yes.type = "button";
-  yes.textContent = "确认";
-  yes.addEventListener("click", () => submitConfirm(message, true, yes));
+  yes.textContent = card && card.risk === "high" ? "确认（还要再确认一次）" : "确认";
+  yes.addEventListener("click", () => {
+    // 12.G 高危组合：第二次确认的文字也来自宿主卡片；取消就不提交。
+    if (card && card.requires_ack) {
+      if (!window.confirm(String(card.ack_text || "高危组合：读本地内容又联网。确定继续吗？"))) return;
+      submitConfirm(message, true, yes, card.requires_ack);
+      return;
+    }
+    submitConfirm(message, true, yes);
+  });
   const no = document.createElement("button");
   no.type = "button";
   no.textContent = "拒绝";
@@ -1168,6 +1217,8 @@ function confirmRow(message, call) {
     notice.textContent = call.notice;
     row.append(notice);
   }
+  const cardNode = confirmCardNode(card);
+  if (cardNode) row.append(cardNode);
   const summary = egressSummaryNode(call && call.egress);
   if (summary) row.append(summary);
   row.append(yes, no);
@@ -1181,7 +1232,7 @@ function waitingConfirm() {
   return found ? assistant : null;
 }
 
-async function submitConfirm(message, allowed, button) {
+async function submitConfirm(message, allowed, button, acknowledge) {
   const runId = message.run_id || (waitingConfirm() && waitingConfirm().run_id);
   if (!runId) {
     showNote("现在没有在等待确认。");
@@ -1189,7 +1240,9 @@ async function submitConfirm(message, allowed, button) {
   }
   if (button) button.disabled = true;
   try {
-    await api("POST", `/api/runs/${encodeURIComponent(runId)}/confirm`, { allowed: Boolean(allowed) });
+    const body = { allowed: Boolean(allowed) };
+    if (allowed && acknowledge) body.acknowledge = acknowledge;
+    await api("POST", `/api/runs/${encodeURIComponent(runId)}/confirm`, body);
   } catch (error) {
     if (button) button.disabled = false;
     showNote(error.message || "没能提交确认。");

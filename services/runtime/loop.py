@@ -23,7 +23,7 @@ from services.gateway import GatewayError, describe, stream as gateway_stream
 from services.gateway.openai_chat import reject_unsupported
 from services.runtime.budget import Budget, Clock
 from services import telemetry
-from services.runtime import trace
+from services.runtime import injection, trace
 from services.runtime.tools import egress_preview, execute_tool, openai_tools, tool_mutates, validate_arguments
 
 
@@ -225,16 +225,21 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
             summary = egress_preview(name, arguments)
         except Exception:  # 摘要拿不到时照样要确认，只是卡上少一块
             summary = None
+        # 12.G：确认卡由宿主模板生成（工具名、参数、出站摘要），不带模型这一步说的话。
+        card = injection.confirm_card(name, arguments, summary)
         yield {
             "type": EVENT_TOOL_CONFIRM,
             "run_id": run_id,
             "name": name,
             "arguments": arguments,
             "egress": summary,
+            "card": card,
         }
         allowed = False
         if callable(confirm):
-            allowed = bool(confirm(name, arguments))
+            answer = confirm(name, arguments)
+            # 高危组合（读本地 + 联网）要二次确认：回调必须明确回 high_risk，只回 True 不算数。
+            allowed = answer == injection.HIGH_RISK_ACK if card.get("requires_ack") else bool(answer)
         if cancel is not None and cancel.is_set():
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
             return True
@@ -247,10 +252,7 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
                 "error": {"code": "rejected", "message": "这个工具需要确认后才能执行。"},
             }
             messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
-            messages.append({
-                "role": "user",
-                "parts": [{"type": "text", "text": "工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)}],
-            })
+            messages.append(injection.tool_result_message(name, result))
             return False
     if callable(take) and take(name, arguments):
         return True
@@ -281,10 +283,8 @@ def _use_tool(run_id, messages, tool_call, spoken, cancel, confirm, execute, mut
             args=arg_digest(arguments),
         )
     messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
-    messages.append({
-        "role": "user",
-        "parts": [{"type": "text", "text": "工具结果 " + name + " " + json.dumps(result, ensure_ascii=False)}],
-    })
+    # 12.G：工具结果通道标 untrusted，只当数据回传（user 角色，不进系统指令）。
+    messages.append(injection.tool_result_message(name, result))
     return False
 
 

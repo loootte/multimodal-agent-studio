@@ -30,6 +30,7 @@ FAILURE_CLASSES = {
     "rate_limited": "provider",
     "local_content_encoded": "policy",
     "egress_policy_denied": "policy",
+    "local_fingerprint": "policy",
     "permission_denied": "policy",
 }
 

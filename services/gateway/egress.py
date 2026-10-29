@@ -22,6 +22,10 @@
    以上命中记 local_content。再把载荷里的 base64 / 百分号编码窗解码（最多两层）重查，命中记 local_content_encoded。
    工具契约（策略里的 exempt）仍豁免，但字节数记进审计 exempt_bytes。
 短正文只以指纹参与比对，正文本身不进任何记录或日志。
+
+12.G（#63）提示注入防外泄：对话通道等出口还禁止出现「已入库指纹」——本会话本地内容入库时记下的 sha256
+（文件字节的 checksum、文本正文的 sha256、短正文规范化指纹）。载荷里任何连续 16 位以上的十六进制串只要和其中
+某个指纹有 16 位重合就按 local_fingerprint 拦下：被注入的模型即使拿到或猜出指纹，也不能用它向外确认本地内容。
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ from packages.contracts.events import (
 from services import telemetry
 
 FINGERPRINT_CHARS = 16
+STORED_FINGERPRINT_WINDOW = 16  # 12.G：已入库指纹按 16 位十六进制窗比对
+_HEX_RUN = re.compile(r"[0-9a-fA-F]{16,}")
 HANDLE_PREFIX_CHARS = 6
 MIN_LOCAL_BODY = 8
 MIN_SHORT_BODY = 4          # 规范化后至少 4 个字母数字才做短正文全文匹配，避免「好的」「是」这类常用词误伤
@@ -195,6 +201,31 @@ def short_fingerprint(text: str) -> str:
     return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()[:32]
 
 
+class LocalBodies(list):
+    """本会话已登记的本地正文（list），另带「已入库指纹」（12.G #63）：入库时记下的 sha256 十六进制串。
+
+    沿原来传 local_bodies 的路径一路带到出口中间件；没有正文只有指纹（例如只登记了二进制文件）时也为真。"""
+
+    def __init__(self, bodies=(), fingerprints=()):
+        super().__init__(bodies or ())
+        self.fingerprints = tuple(
+            item.lower() for item in (fingerprints or ())
+            if isinstance(item, str) and len(item) >= STORED_FINGERPRINT_WINDOW and _HEX_RUN.fullmatch(item)
+        )
+
+    def __bool__(self) -> bool:
+        return bool(len(self) or self.fingerprints)
+
+
+def stored_fingerprints(bodies) -> tuple[str, ...]:
+    """正文本身的 sha256（全长）与调用方另给的已入库指纹。"""
+    found = list(getattr(bodies, "fingerprints", ()) or ())
+    for body in bodies or ():
+        if isinstance(body, str) and body:
+            found.append(hashlib.sha256(body.encode("utf-8")).hexdigest())
+    return tuple(found)
+
+
 class LocalIndex:
     """一次检查用的本地正文索引。长正文留明文和规范化形；短正文只留指纹。"""
 
@@ -202,6 +233,10 @@ class LocalIndex:
         self.raw: list[str] = []
         self.folded: list[str] = []
         self.short: set[str] = set(f for f in (fingerprints or []) if isinstance(f, str))
+        # 12.G：已入库指纹的 16 位窗口。载荷里的十六进制串和任一窗口重合就是在外传指纹。
+        self.windows: set[str] = set()
+        for digest in stored_fingerprints(bodies) + tuple(self.short):
+            self._add_windows(digest)
         for body in bodies or []:
             if not isinstance(body, str) or not body:
                 continue
@@ -213,10 +248,28 @@ class LocalIndex:
             if len(folded) >= MIN_LOCAL_BODY:
                 self.folded.append(folded)
             elif len(folded) >= MIN_SHORT_BODY:
-                self.short.add(hashlib.sha256(folded.encode("utf-8")).hexdigest()[:32])
+                short = hashlib.sha256(folded.encode("utf-8")).hexdigest()[:32]
+                self.short.add(short)
+                self._add_windows(short)
+
+    def _add_windows(self, digest: str) -> None:
+        digest = str(digest).lower()
+        size = STORED_FINGERPRINT_WINDOW
+        for start in range(0, len(digest) - size + 1):
+            self.windows.add(digest[start:start + size])
+
+    def fingerprint_hit(self, text: str) -> bool:
+        if not self.windows or not isinstance(text, str):
+            return False
+        size = STORED_FINGERPRINT_WINDOW
+        for match in _HEX_RUN.finditer(text):
+            run = match.group(0).lower()
+            if any(run[i:i + size] in self.windows for i in range(0, len(run) - size + 1)):
+                return True
+        return False
 
     def __bool__(self) -> bool:
-        return bool(self.raw or self.folded or self.short)
+        return bool(self.raw or self.folded or self.short or self.windows)
 
 
 def _leaves(value, *, key=None, depth=0):
@@ -289,7 +342,8 @@ def _encoded_hit(text: str, index: LocalIndex, depth: int = 1) -> bool:
 
 
 def inspect(payload, bodies=None, *, exempt=("tools",), fingerprints=None) -> str | None:
-    """查载荷里有没有本地正文。返回原因码 local_content / local_content_encoded，没有返回 None。不记录、不抛错。"""
+    """查载荷里有没有本地正文。返回原因码 local_content / local_content_encoded / local_fingerprint（12.G），
+    没有返回 None。不记录、不抛错。"""
     index = bodies if isinstance(bodies, LocalIndex) else LocalIndex(bodies, fingerprints)
     if not index or payload is None:
         return None
@@ -305,7 +359,28 @@ def inspect(payload, bodies=None, *, exempt=("tools",), fingerprints=None) -> st
             return "local_content"
     if any(_encoded_hit(leaf, index) for leaf in leaves):
         return "local_content_encoded"
+    if index.windows and any(index.fingerprint_hit(leaf) for leaf in _fingerprint_leaves(scanned)):
+        return "local_fingerprint"
     return None
+
+
+_HOST_REF_KEYS = ("artifact_id",)  # 宿主自己放进请求的制品引用（按字节 sha256 命名），不是模型写的文字
+
+
+def _fingerprint_leaves(value, key=None):
+    """查已入库指纹用的片段：跳过宿主制品引用和 data: 媒体载荷，其余同 _leaves。"""
+    if isinstance(value, dict):
+        for item_key, item in value.items():
+            if item_key in _HOST_REF_KEYS:
+                continue
+            yield from _fingerprint_leaves(item, item_key)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _fingerprint_leaves(item, key)
+    else:
+        for leaf in _leaves(value, key=key):
+            if not leaf.startswith("data:"):
+                yield leaf
 
 
 def policy_of(channel: str):
@@ -444,7 +519,7 @@ def guard(channel: str, url, payload, *, local_bodies=None, body: bytes | None =
     """网关唯一出口（中间件）：策略、度量、查本地正文。
 
     被拦时记 blocked、ticket.hit 置位、ticket.reason_code 给出原因码（egress_policy_denied / local_content /
-    local_content_encoded），调用方据此抛错、不打开连接；通过则记 planned。
+    local_content_encoded / local_fingerprint），调用方据此抛错、不打开连接；通过则记 planned。
     exempt 不传时用渠道策略里的豁免字段。
     """
     known = channel in EGRESS_CHANNELS
@@ -457,7 +532,7 @@ def guard(channel: str, url, payload, *, local_bodies=None, body: bytes | None =
     reason = check_policy(channel if known else "other", payload, raw_upload=raw_upload)
     if reason is None and (local_bodies or local_fingerprints):
         reason = inspect(payload, local_bodies, exempt=exempt, fingerprints=local_fingerprints)
-    hit_local = reason in ("local_content", "local_content_encoded")
+    hit_local = reason in ("local_content", "local_content_encoded", "local_fingerprint")
     ticket = Ticket(channel if known else "other", url, stats=stats,
                     local_derived=True if hit_local else local_derived, handle=handle)
     ticket.reason_code = reason
