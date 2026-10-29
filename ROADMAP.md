@@ -165,8 +165,8 @@
 按顺序：
 
 0. （前置，已完成）[#38](https://github.com/loootte/multimodal-agent-studio/issues/38) 多智能体：研究类和长文字任务必须走委托，为挖掘提供真实的多 Agent 轨迹。
-1. （已完成）[#39](https://github.com/loootte/multimodal-agent-studio/issues/39) 轨迹导出与索引：规范化的 `mas.trajectory/1`，来源为会话事件和 `telemetry.jsonl`，本地内容、密钥和路径不进轨迹。ADR 0006、`services/meta/`、`GET /api/trajectories`，说明见 [docs/trajectory.md](docs/trajectory.md)。
-2. （进行中）[#40](https://github.com/loootte/multimodal-agent-studio/issues/40) 技能挖掘：统计重复子流程，生成带证据（run_id、次数、成功率）的技能候选，不写 `skills/`。已实现于 `issue-40` 分支：ADR 0007、`services/meta/mine.py`、`POST /api/meta/mine`，说明见 [docs/mining.md](docs/mining.md)。
+1. （已完成）[#39](https://github.com/loootte/multimodal-agent-studio/issues/39) 轨迹导出与索引（PR #47）：规范化的 `mas.trajectory/1`，来源为会话事件和 `telemetry.jsonl`，本地内容、密钥和路径不进轨迹。ADR 0006、`services/meta/`、`GET /api/trajectories`，说明见 [docs/trajectory.md](docs/trajectory.md)。
+2. （已完成）[#40](https://github.com/loootte/multimodal-agent-studio/issues/40) 技能挖掘：统计重复子流程，生成带证据（run_id、次数、成功率）的技能候选，不写 `skills/`。已合并（PR #48）：ADR 0007、`services/meta/mine.py`、`POST /api/meta/mine`，说明见 [docs/mining.md](docs/mining.md)。
 3. [#41](https://github.com/loootte/multimodal-agent-studio/issues/41) 记忆巩固：合并、重写、淘汰技能的提议，附 diff 和证据；用户批准才写入，可回滚。
 4. [#42](https://github.com/loootte/multimodal-agent-studio/issues/42) 工具化评估：起草 `mas.tool/1` 清单、桩代码和测试；用户批准后才走工具包安装。
 5. [#43](https://github.com/loootte/multimodal-agent-studio/issues/43) Meta-Agent 定义、手动和定时入口、报告界面（#36 的六段输出格式）。
@@ -179,15 +179,15 @@
 - 未经用户批准，`skills/`、已安装工具和 Agent 清单不变；批准的改动可以回滚。
 - 现有检查和评测全部通过。
 
-状态：未开始。
+状态：进行中。9.1（#39，PR #47）和 9.2（#40，PR #48）已完成并合并；9.3–9.6（#41–#44）未开始，沿用原 issue。第 14 阶段的调度器（14.E，#82）建好后，#43 的定时入口复用它。
 
 ## 10. 可配置出图技能
 
-[#49](https://github.com/loootte/multimodal-agent-studio/issues/49)（进行中，`issue-49` 分支）：提示词来源（聊天原文 / 模型撰写 / 本地）× 后端（本机 ComfyUI / 第三方 OpenAI 兼容 API）× 张数（默认 1）。新增 `stage_prompt` 工具、`generate_image` 的 `backend` 参数和第三方配置、`skills/image-gen/SKILL.md`、[ADR 0008](docs/adr/0008-image-skill.md)、[docs/image-skill.md](docs/image-skill.md)。本地提示词始终不进对话模型；发第三方默认拒绝，可改为逐轮确认。
+[#49](https://github.com/loootte/multimodal-agent-studio/issues/49)（已完成，PR #50）：提示词来源（聊天原文 / 模型撰写 / 本地）× 后端（本机 ComfyUI / 第三方 OpenAI 兼容 API）× 张数（默认 1）。新增 `stage_prompt` 工具、`generate_image` 的 `backend` 参数和第三方配置、`skills/image-gen/SKILL.md`、[ADR 0008](docs/adr/0008-image-skill.md)、[docs/image-skill.md](docs/image-skill.md)。本地提示词始终不进对话模型；发第三方默认拒绝，可改为逐轮确认。
 
 ## 11. 本地资源管理
 
-[#51](https://github.com/loootte/multimodal-agent-studio/issues/51)（进行中，`issue-51` 分支）：侧边栏「本地资源」面板，统一查看本地提示词/文字、本地文件、附件和生成文件：类型、时间、大小、引用会话、本机预览、总占用；筛选搜索、改标签、下载、删除/批量删除（引用提示、共享字节、运行中拒删、轨迹重建）、复用到当前对话（只给句柄）。接口只给本机，数据不进模型。见 [docs/local-resources.md](docs/local-resources.md)。
+[#51](https://github.com/loootte/multimodal-agent-studio/issues/51)（已完成，PR #52）：侧边栏「本地资源」面板，统一查看本地提示词/文字、本地文件、附件和生成文件：类型、时间、大小、引用会话、本机预览、总占用；筛选搜索、改标签、下载、删除/批量删除（引用提示、共享字节、运行中拒删、轨迹重建）、复用到当前对话（只给句柄）。接口只给本机，数据不进模型。见 [docs/local-resources.md](docs/local-resources.md)。
 
 ## 12. 隐私隔离强化
 
@@ -212,18 +212,97 @@
 
 本阶段明确不做：多租户 IAM、远程授权、插件市场签名、把 ComfyUI 塞进通用容器沙箱、云端密钥托管。
 
-状态：已完成（12.G 分支实现、待验收）。12.A（#57）已合并：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)。12.B（#58）已合并：句柄绑定会话 / 用途 / 可选运行 / 过期（默认 4 小时）、撤销与一次性、旧句柄读时升级；过期、越权 purpose、跨会话、伪造的句柄不能出图，固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，被拒记 `egress.blocked` 与 `security.handle_denied`；资源面板显示句柄状态并可撤销；`security.handle_*` 评测进门禁，说明见 [docs/handle-scope.md](docs/handle-scope.md)。12.C（#59）已合并：每个渠道一张字段白名单（`EGRESS_POLICIES`，`other` 默认拒绝、第三方出图一次一张），出站前做 NFKC 规范化、分片拼接、base64 / 百分号解码比对，短于 8 字的已登记正文按指纹整段匹配，错误码拆为 `local_content` / `local_content_encoded` / `egress_policy_denied`；适配器不挂统一出口中间件就不能注册、运行时没开 ticket 会被拦；`security.egress_encoded_variants` / `egress_short_body` / `egress_policy_denied` 进门禁，说明见 [docs/egress-policy.md](docs/egress-policy.md)。12.D（#60）已合并：第三方工具包在子进程沙箱里跑（环境变量白名单、配置显式注入；没 `network` 联网即拦、有也不能连本机；只能写临时目录和自己的数据目录；数据目录禁读，本地内容只经句柄；起进程、ctypes 拒绝；超时停止），越权返回 `permission_denied`（带 `violations`）并记 `toolpack` 渠道出站审计；授权记录绑定包内容摘要，装后改包要重装；内置工具收紧为名单 `HOST_TOOLS` / `BUILTIN_PYTHON`；安装时网页逐项权限审阅；本机 ComfyUI 仍由内置工具访问，是白名单例外；`security.sandbox_*` / `permission_manifest_changed` 进门禁，说明见 [docs/tool-sandbox.md](docs/tool-sandbox.md)。12.E（#61）在 `issue-61` 分支实现：`network` / 读本地的包只能 `confirm=always`（检查、安装、发现时拒绝 `never` / `by_args`，内置只读句柄工具例外）；敏感第三方包每次调用都确认，本地提示词发第三方的同意绑定（轮, 句柄, 主机）；确认卡固定区块（出站主机、含本地派生、句柄用途）；`remote_local_prompt=confirm` 要显式确认（409 `acknowledge_required`）并记 `security.policy_changed`；会话级数据流图 `/api/dataflow` 与侧栏面板；`security.confirm_never_network_rejected` / `sensitive_tool_confirm_every_call` / `remote_local_prompt_ack_required` / `dataflow_no_body` 进门禁，说明和三分钟演示见 [docs/sensitive-confirm.md](docs/sensitive-confirm.md)，已合并。12.F（#62）在 `issue-62` 分支实现：`MAS_STORAGE_ENCRYPTION=on` 时会话文件和本地内容 / 附件字节按会话加密落盘（AES-256-GCM，HKDF 会话密钥，AAD 绑会话，字节按会话存、文件名不暴露哈希），拷走 `data/` 没有主密钥读不出正文；主密钥在数据目录和仓库之外（`~/.mas/master.key` 或 `MAS_MASTER_KEY`），首次启动生成，沙箱禁读；口令备份 / 恢复 / 明文迁移 / verify 走 `apps/web/storage_tool.py`；`memory` 为仅内存会话演示模式；默认仍明文；`security.storage_*` 进门禁，备份与恢复手册见 [docs/storage-encryption.md](docs/storage-encryption.md)，已合并。12.G（#63）分支实现、待验收（`issue-63` 分支）：确认卡由宿主模板生成（`mas.confirm/1`，`by: "host"`，模型说的话和工具结果文字不进卡）；工具结果通道标 `untrusted`；对话通道禁止已入库指纹外传（`local_fingerprint`）；读本地 + 联网的高危组合要二次确认（缺 `acknowledge=high_risk` 返回 409）；配置变更只走设置 API + 本机界面（工具执行期间写配置被拒，跨站写配置 403，写入记 `security.config_changed`）；`security.injection_*` 评测进门禁，安全清单第 3 节全部自动，说明见 [docs/injection-guard.md](docs/injection-guard.md)。12.G 验收合并后第 12 阶段完成。
+状态：已完成。12.A（#57）已合并：出站审计事件 `egress.planned/blocked/sent/failed`（无正文）、`<data_dir>/egress.jsonl` 与本机 `/api/egress`、确认卡出站摘要、「数据出站」时间线和导出、`security.egress_audit_*` 评测进门禁，说明见 [docs/egress-audit.md](docs/egress-audit.md)。12.B（#58）已合并：句柄绑定会话 / 用途 / 可选运行 / 过期（默认 4 小时）、撤销与一次性、旧句柄读时升级；过期、越权 purpose、跨会话、伪造的句柄不能出图，固定错误码 `handle_expired` / `handle_forbidden` / `handle_not_found`，被拒记 `egress.blocked` 与 `security.handle_denied`；资源面板显示句柄状态并可撤销；`security.handle_*` 评测进门禁，说明见 [docs/handle-scope.md](docs/handle-scope.md)。12.C（#59）已合并：每个渠道一张字段白名单（`EGRESS_POLICIES`，`other` 默认拒绝、第三方出图一次一张），出站前做 NFKC 规范化、分片拼接、base64 / 百分号解码比对，短于 8 字的已登记正文按指纹整段匹配，错误码拆为 `local_content` / `local_content_encoded` / `egress_policy_denied`；适配器不挂统一出口中间件就不能注册、运行时没开 ticket 会被拦；`security.egress_encoded_variants` / `egress_short_body` / `egress_policy_denied` 进门禁，说明见 [docs/egress-policy.md](docs/egress-policy.md)。12.D（#60）已合并：第三方工具包在子进程沙箱里跑（环境变量白名单、配置显式注入；没 `network` 联网即拦、有也不能连本机；只能写临时目录和自己的数据目录；数据目录禁读，本地内容只经句柄；起进程、ctypes 拒绝；超时停止），越权返回 `permission_denied`（带 `violations`）并记 `toolpack` 渠道出站审计；授权记录绑定包内容摘要，装后改包要重装；内置工具收紧为名单 `HOST_TOOLS` / `BUILTIN_PYTHON`；安装时网页逐项权限审阅；本机 ComfyUI 仍由内置工具访问，是白名单例外；`security.sandbox_*` / `permission_manifest_changed` 进门禁，说明见 [docs/tool-sandbox.md](docs/tool-sandbox.md)。12.E（#61）在 `issue-61` 分支实现：`network` / 读本地的包只能 `confirm=always`（检查、安装、发现时拒绝 `never` / `by_args`，内置只读句柄工具例外）；敏感第三方包每次调用都确认，本地提示词发第三方的同意绑定（轮, 句柄, 主机）；确认卡固定区块（出站主机、含本地派生、句柄用途）；`remote_local_prompt=confirm` 要显式确认（409 `acknowledge_required`）并记 `security.policy_changed`；会话级数据流图 `/api/dataflow` 与侧栏面板；`security.confirm_never_network_rejected` / `sensitive_tool_confirm_every_call` / `remote_local_prompt_ack_required` / `dataflow_no_body` 进门禁，说明和三分钟演示见 [docs/sensitive-confirm.md](docs/sensitive-confirm.md)，已合并。12.F（#62）在 `issue-62` 分支实现：`MAS_STORAGE_ENCRYPTION=on` 时会话文件和本地内容 / 附件字节按会话加密落盘（AES-256-GCM，HKDF 会话密钥，AAD 绑会话，字节按会话存、文件名不暴露哈希），拷走 `data/` 没有主密钥读不出正文；主密钥在数据目录和仓库之外（`~/.mas/master.key` 或 `MAS_MASTER_KEY`），首次启动生成，沙箱禁读；口令备份 / 恢复 / 明文迁移 / verify 走 `apps/web/storage_tool.py`；`memory` 为仅内存会话演示模式；默认仍明文；`security.storage_*` 进门禁，备份与恢复手册见 [docs/storage-encryption.md](docs/storage-encryption.md)，已合并。12.G（#63）已合并（PR #71）：确认卡由宿主模板生成（`mas.confirm/1`，`by: "host"`，模型说的话和工具结果文字不进卡）；工具结果通道标 `untrusted`；对话通道禁止已入库指纹外传（`local_fingerprint`）；读本地 + 联网的高危组合要二次确认（缺 `acknowledge=high_risk` 返回 409）；配置变更只走设置 API + 本机界面（工具执行期间写配置被拒，跨站写配置 403，写入记 `security.config_changed`）；`security.injection_*` 评测进门禁，安全清单第 3 节全部自动，说明见 [docs/injection-guard.md](docs/injection-guard.md)。第 12 阶段完成。
 
-## 13. 角色图片定制工具
+## 13. 桌面应用
 
-[#53](https://github.com/loootte/multimodal-agent-studio/issues/53)（进行中，`issue-53` 分支）：内置工具包 `character_image`，九个字段（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）都有预设也能自填，默认是年轻女性角色；拼成英文提示词后走现有出图流程（`generate_image` 一次一张、`plan_images` 张数、本机/第三方按 #49）。网页「定制角色」对话框和对话调用两条路；本地提示词模式按 ADR 0008；未成年与暴露内容的安全规则。见 [docs/character-image.md](docs/character-image.md)。
+[#72](https://github.com/loootte/multimodal-agent-studio/issues/72)。从「明确延后」里的「桌面或移动客户端」提前桌面客户端，紧接第 12 阶段。**开工前先写 ADR 0010**，草稿见 [docs/adr/0010-desktop-client.md](docs/adr/0010-desktop-client.md)：第 3 阶段「首版是 Web」已经兑现，本阶段不替换它，只推迟移动端。现有本机 Web 界面装进桌面壳，壳托管本机 Python 服务；直接跑 Web 服务的行为不变。
+
+按顺序（上一子阶段完成标准未达不开始下一阶段功能；13.D 可与 13.B / 13.C 并行）：
+
+1. [#74](https://github.com/loootte/multimodal-agent-studio/issues/74) **13.A** 桌面壳与本机服务托管（P0）
+   - 层：新 `apps/desktop/`（草案倾向 Tauri 2 + Python sidecar，选型由 ADR 0010 定）；`apps/web` 加启动令牌。
+   - 句柄隔离：无变化。新增的一层是只绑 `127.0.0.1` 的随机端口加一次性令牌，防止同机其他进程或网页借本机接口读本地资源。
+   - 验收：Windows 上从壳启动，完成一次本机出图；端口冲突自动换端口；无令牌请求 401；关窗后没有残留进程；Web 模式不变。
+2. [#75](https://github.com/loootte/multimodal-agent-studio/issues/75) **13.B** 系统集成：钥匙串、默认加密、原生文件、通知（P1）
+   - 层：密钥（系统钥匙串保存 API key 和 12.F 主密钥）、存储（桌面版默认 `MAS_STORAGE_ENCRYPTION=on`）、原生选文件和拖放、托盘与通知。
+   - 句柄隔离：收紧。原生文件只产生句柄；通知由宿主模板生成，不含提示词、正文和文件名；WebView 拿不到密钥。
+   - 验收：删掉钥匙串里的 key 后返回 `remote_missing_key`；新数据目录默认是密文；通知文本检查不到本地正文指纹。
+3. [#76](https://github.com/loootte/multimodal-agent-studio/issues/76) **13.C** 打包、首次运行向导与更新（P1）
+   - 层：Windows 安装包（内嵌 Python）、首次运行向导（只探测用户填写的或本机默认的 ComfyUI 地址）、自动更新（默认关闭、校验签名）。
+   - 句柄隔离：不破坏。更新检查是新出站渠道 `update`，按 12.C 加字段白名单，只有版本号和平台。
+   - 验收：干净机器上装完能出图；不开更新时没有任何更新出站；卸载默认保留数据。
+4. [#77](https://github.com/loootte/multimodal-agent-studio/issues/77) **13.D** 桌面壳安全加固与发布门禁（P1）
+   - 层：WebView（严格 CSP、禁止外部导航、release 关 devtools）、IPC 白名单、外链经宿主确认后用系统浏览器打开。
+   - 句柄隔离：不破坏，防止注入内容让 WebView 带着本地内容导航出去。
+   - 验收：`security.desktop_*` 进 `evals/gate.py`；注入跳转不生效；非白名单 IPC 全部被拒并有记录。
+
+完成标准：
+
+- 干净的 Windows 机器上安装、启动，完成一次本机出图对话。
+- 桌面版隐私默认比 Web 更严：启动令牌、钥匙串、默认加密、通知无正文、禁止外部导航。
+- `security.desktop_*` 进门禁；Web 模式行为不变，现有检查和评测全部通过。
+- 不变量不变：一次 `generate_image` 出一张，张数由 `plan_images` 决定，本地内容不进 LLM，单 Agent 模式不变，`remote_local_prompt` 默认 `refuse`。
+
+本阶段明确不做：移动端、应用商店上架、代码签名证书采购、云同步、多用户。
+
+状态：未开始。
+
+## 14. 对标 DeepSeek Harness 的能力补齐
+
+[#73](https://github.com/loootte/multimodal-agent-studio/issues/73)。对照 DeepSeek Harness（DSH）补齐 MAS 落后的通用 agent 能力，前提是第 12 阶段的隔离一条都不放松。**开工前先写 ADR 0011**，草稿见 [docs/adr/0011-external-capabilities-isolation.md](docs/adr/0011-external-capabilities-isolation.md)。第 9 阶段剩下的 #41–#44 沿用原 issue，不在这里重复；14.E 建好后，#43 的定时入口复用它。
+
+按顺序（上一子阶段完成标准未达不开始下一阶段功能；14.G 可提前做回归底座）：
+
+1. [#78](https://github.com/loootte/multimodal-agent-studio/issues/78) **14.A** 受控接入外部 MCP server（P0）
+   - 层：工具平面（`poc/tools/mcp.py` 扩成客户端，MCP server 作为 `kind: mcp` 的工具包，stdio 跑在 12.D 沙箱）和网关出站（`toolpack` 渠道）。
+   - 句柄隔离：有风险，可控。参数只给句柄和模型可见文字，出站前过字段白名单、编码检测和 `local_fingerprint`；默认 `confirm: always`；确认卡用宿主模板；结果标 `untrusted`；远端工具默认不启用，描述或 schema 变了要重新授权。
+   - 验收：接通一个 stdio server 和一个 HTTP server，每次调用都有确认和审计；本地正文及其编码变体被拦；schema 变化后要重新授权；`security.mcp_*` 进门禁。
+2. [#79](https://github.com/loootte/multimodal-agent-studio/issues/79) **14.B** 上下文压缩与工具结果裁剪（P0）
+   - 层：运行时（`loop.py` 按上下文上限设阈值压缩，大工具结果只保留结构字段）。
+   - 句柄隔离：不破坏。摘要发出前过 `local_fingerprint`；句柄不展开；`plan_images` 计划、未完成确认和句柄清单固定保留；原始会话留在本机。
+   - 验收：超过阈值的长对话能继续，token 下降；压缩前后出图张数不变；阈值以下请求逐字节不变。
+3. [#80](https://github.com/loootte/multimodal-agent-studio/issues/80) **14.C** 通用规划工具：todo / plan 模式 / goal（P1）
+   - 层：运行时宿主工具和网页 todo 面板；编排者用 todo 拆分文字和研究任务。
+   - 句柄隔离：不破坏。todo 和 goal 文字过指纹；todo 里的数量不算张数，张数仍只由 `plan_images` 决定；不做 Code 模式。
+   - 验收：plan 模式下改状态的工具被拒；goal 碰到预算就停并写明原因；真实模型下长文字任务先拆分再委托（#38 遗留关闭）。
+4. [#81](https://github.com/loootte/multimodal-agent-studio/issues/81) **14.D** 只存本机的长期记忆（P1）
+   - 层：存储（`mas.memory/1`，分 preference 和 content）、运行时（`remember` / `recall` / `forget`）、网页记忆面板（默认关闭，每条写入要确认）。
+   - 句柄隔离：容易破坏，约束最严。只有 preference 的文字能进上下文并要过指纹；content 类只存句柄形态（purpose `memory`）并加密，跨会话由宿主重新签发句柄，12.B 的跨会话不可消费规则不变。
+   - 验收：B 会话只看到 A 会话的偏好文字和新签发的句柄，看不到正文；伪装成 preference 的正文被拦；关闭时没有记忆进上下文。
+5. [#82](https://github.com/loootte/multimodal-agent-studio/issues/82) **14.E** 调度与后台任务（P1）
+   - 层：新 `services/scheduler/`（once / every / daily / weekly / cron，后台 jobs）、运行时、网页任务列表和待确认队列。
+   - 句柄隔离：需要设计。任务引用本地内容时用绑定任务 id 的 `scheduled` 句柄，有 TTL，可撤销，到期或任务修改后要重新授权；无人值守**不自动确认**，`confirm: always` 和 `high_risk` 的调用永远不能预授权，遇到就挂起为待确认。
+   - 验收：定时出图按时运行并留审计；需要确认的调用挂起而不是执行；句柄过期后任务停止，重新授权后能继续；有预算上限。
+6. [#83](https://github.com/loootte/multimodal-agent-studio/issues/83) **14.F** 实验性浏览器 / computer use 工具包（P2，依赖 14.A）
+   - 层：通过 MCP 接入的沙箱工具包，声明 `network`，`confirm: always`，域名白名单默认为空，默认关闭。
+   - 句柄隔离：风险高。网页内容全部标 `untrusted`，不进确认卡；往网页输入前过 `local_fingerprint`；禁止访问 `file://`、本机和局域网地址。
+   - 验收：白名单域名上读一次页面，有确认和审计；往表单填本地正文、导航到 `127.0.0.1` 都被拦；网页注入不能触发配置写入。
+7. [#84](https://github.com/loootte/multimodal-agent-studio/issues/84) **14.G** 评测录制回放（P2）
+   - 层：网关（录制和回放 cassette）、`evals/run.py --record` / `--replay`、`gate.py`。
+   - 句柄隔离：不破坏。录的是本来就发往供应商的载荷；入库前扫描密钥、本地正文指纹和绝对路径。
+   - 验收：真实模型录一次多 Agent 出图任务，离线回放稳定且张数一致；提示词或 schema 改动后回放失败并给出差异。
+
+完成标准：
+
+- 七个子阶段各自验收通过，新增的 `security.*` 用例进门禁。
+- 不变量不变：一次 `generate_image` 出一张，张数由 `plan_images` 决定，本地内容不进 LLM，单 Agent 模式不变，`remote_local_prompt` 默认 `refuse`，隐私默认最严。
+- 现有检查和评测全部通过。
+
+本阶段明确不做：插件市场、社区插件与官方同权、Code 模式批量调用、Agent Teams 式自由消息协作、通用编码能力（bash / LSP / worktree）进核心、整机桌面控制、云端常驻执行。
+
+状态：未开始。
+
+## 支线：角色图片定制工具（原第 13 阶段）
+
+[#53](https://github.com/loootte/multimodal-agent-studio/issues/53)（已完成，PR #54；原编号第 13 阶段，因桌面应用提前改为支线）：内置工具包 `character_image`，九个字段（性别、年龄、体型、发型、发色、瞳色、服装、姿势、背景）都有预设也能自填，默认是年轻女性角色；拼成英文提示词后走现有出图流程（`generate_image` 一次一张、`plan_images` 张数、本机/第三方按 #49）。网页「定制角色」对话框和对话调用两条路；本地提示词模式按 ADR 0008；未成年与暴露内容的安全规则。见 [docs/character-image.md](docs/character-image.md)。
 
 ## 明确延后
 
 这些不进前六个阶段：
 
 - 多 Agent 互相委托（已由第 8 阶段 / issue #34 提前，需 ADR 0005）
-- 桌面或移动客户端
+- 移动客户端（桌面客户端已由第 13 阶段 / [#72](https://github.com/loootte/multimodal-agent-studio/issues/72) 提前，见 ADR 0010）
 - 自训练模型
 - 插件市场
 - 语音实时通话

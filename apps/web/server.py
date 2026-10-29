@@ -59,9 +59,11 @@ _MAX_ATTACHMENT_BODY = 12_000_000
 
 
 class App:
-    def __init__(self, data_dir: str, timeout_sec: float = 120.0, storage=None):
+    def __init__(self, data_dir: str, timeout_sec: float = 120.0, storage=None, desktop_token: str | None = None):
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
+        # 13.A（#74）：桌面壳启动令牌。None / 空 = Web 模式，不校验；非空则无令牌请求 401。
+        self.desktop_token = (desktop_token or "").strip() or None
         telemetry.configure(os.path.join(data_dir, "telemetry.jsonl"))
         egress.configure(os.path.join(data_dir, "egress.jsonl"))
         self.timeout_sec = timeout_sec
@@ -101,17 +103,34 @@ def make_httpd(app: App, host: str = "127.0.0.1", port: int = 8766) -> Threading
     return httpd
 
 
+def _resolve_desktop_token(cli_value: str | None) -> str | None:
+    """桌面令牌：命令行 --desktop-token 优先，否则环境变量 MAS_DESKTOP_TOKEN。空 = 不启用。"""
+    raw = (cli_value if cli_value is not None else os.environ.get("MAS_DESKTOP_TOKEN") or "").strip()
+    return raw or None
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="本机文字聊天")
-    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--port", type=int, default=8766, help="监听端口；0 表示让系统挑空闲端口")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("CHAT_DATA_DIR") or os.path.join(WEB_DIR, "data"),
     )
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--desktop-token",
+        default=None,
+        help="桌面壳启动令牌；设置后无令牌请求返回 401。也可用环境变量 MAS_DESKTOP_TOKEN",
+    )
+    parser.add_argument(
+        "--ready-file",
+        default=None,
+        help="服务就绪后写入 JSON（port/token/url），供桌面壳读取；不指定则只打印到 stdout",
+    )
     args = parser.parse_args(argv)
+    token = _resolve_desktop_token(args.desktop_token)
     try:
-        app = App(args.data_dir, timeout_sec=args.timeout)
+        app = App(args.data_dir, timeout_sec=args.timeout, desktop_token=token)
     except storage_crypto.StorageError as exc:
         raise SystemExit(f"本地存储打不开（{exc.code}）：{exc.message}\n见 docs/storage-encryption.md。")
     if app.storage.created_key:
@@ -120,12 +139,29 @@ def main(argv: list[str] | None = None) -> None:
     elif app.storage.mode == "memory":
         print("仅内存会话：会话和文件不落盘，停止服务就没了。", flush=True)
     httpd = make_httpd(app, "127.0.0.1", args.port)
-    print(f"聊天页面 http://127.0.0.1:{args.port}", flush=True)
+    port = httpd.server_address[1]
+    url = f"http://127.0.0.1:{port}/"
+    if token:
+        url = f"{url}?desktop_token={token}"
+    ready = {"schema": "mas.desktop.ready/1", "host": "127.0.0.1", "port": port, "url": url,
+             "token_required": bool(token)}
+    if args.ready_file:
+        raw = json.dumps(ready, ensure_ascii=False)
+        with open(args.ready_file, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+    print(f"聊天页面 {url.split('?', 1)[0]}", flush=True)
+    if token:
+        print("desktop_token_required=1", flush=True)
+    print(f"MAS_READY {json.dumps(ready, ensure_ascii=False)}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("已停止。", flush=True)
     finally:
+        try:
+            chat_run.stop_all(app)
+        except Exception as exc:
+            print(f"chat stop_all {type(exc).__name__}", file=sys.stderr)
         httpd.server_close()
 
 
@@ -418,10 +454,58 @@ def _meta_candidates(handler, app, query, candidate_id: str | None = None) -> No
 
 
 
+def _desktop_token_ok(handler: BaseHTTPRequestHandler, app: App, query: dict) -> bool:
+    """桌面令牌校验。Web 模式（无令牌）直接通过。"""
+    expected = app.desktop_token
+    if not expected:
+        return True
+    header = (handler.headers.get("X-MAS-Desktop-Token") or "").strip()
+    if header and header == expected:
+        return True
+    cookie_header = handler.headers.get("Cookie") or ""
+    for part in cookie_header.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == "mas_desktop_token" and value == expected:
+            return True
+    supplied = ((query.get("desktop_token") or [""])[0] or "").strip()
+    if supplied and supplied == expected:
+        return True
+    return False
+
+
+def _reject_desktop_token(handler: BaseHTTPRequestHandler) -> None:
+    _send_json(handler, 401, {"code": "desktop_token_required", "message": "需要桌面壳启动令牌。"})
+
+
+def _set_desktop_cookie(handler: BaseHTTPRequestHandler, token: str) -> None:
+    handler.send_header(
+        "Set-Cookie",
+        f"mas_desktop_token={token}; Path=/; HttpOnly; SameSite=Strict",
+    )
+
+
 def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
     try:
         parsed = urllib.parse.urlparse(handler.path)
         path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        # 13.A：桌面壳模式先过令牌。GET /?desktop_token=… 通过后写 Cookie 并重定向到 /。
+        if app.desktop_token:
+            if method == "GET" and path == "/" and _desktop_token_ok(handler, app, query) \
+                    and ((query.get("desktop_token") or [""])[0] or "").strip() == app.desktop_token:
+                handler.send_response(302)
+                _set_desktop_cookie(handler, app.desktop_token)
+                handler.send_header("Location", "/")
+                handler.send_header("Cache-Control", "no-store")
+                handler.end_headers()
+                return
+            if not _desktop_token_ok(handler, app, query):
+                _reject_desktop_token(handler)
+                return
+            if method == "POST" and path == "/api/desktop/stop":
+                stopped = chat_run.stop_all(app)
+                _send_json(handler, 200, {"ok": True, "stopped": stopped})
+                return
         if method == "GET" and path == "/":
             _send_file(handler, os.path.join(WEB_DIR, "static", "index.html"), "text/html; charset=utf-8")
             return

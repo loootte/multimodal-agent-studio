@@ -1,0 +1,15 @@
+{
+  "name": "mas-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multimodal Agent Studio desktop shell (Tauri 2 + Python sidecar)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:dist": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

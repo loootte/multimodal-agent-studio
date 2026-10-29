@@ -19,3 +19,10 @@ master.key
 *.keybackup
 *.keybackup.json
 .mas/
+
+# desktop (Tauri / npm)
+apps/desktop/node_modules/
+apps/desktop/src-tauri/target/
+apps/desktop/dist/
+apps/desktop/build/
+apps/desktop/**/*.spec

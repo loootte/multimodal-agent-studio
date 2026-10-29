@@ -330,6 +330,11 @@ class RunHub:
         with self._lock:
             return self._runs.get(run_id)
 
+    def active(self) -> list[Run]:
+        """还没结束的运行（用于桌面壳关窗前停止传播）。"""
+        with self._lock:
+            return [run for run in self._runs.values() if not run.done.is_set()]
+
 
 def start(app, session_id: str, text, attachments, mode=None) -> Run:
     if not isinstance(text, str):
@@ -530,6 +535,17 @@ def stop(app, session_id: str) -> dict:
     if run is not None:
         run.stop()
     return {"ok": True, "running": True}
+
+
+def stop_all(app) -> int:
+    """停止所有还在跑的运行。桌面壳关窗或服务退出时调用。返回停下的数量。"""
+    runs = app.runs.active() if hasattr(app.runs, "active") else []
+    for run in runs:
+        try:
+            run.stop()
+        except Exception as exc:
+            print(f"chat stop_all {type(exc).__name__}", file=sys.stderr)
+    return len(runs)
 
 
 def delete_session(app, session_id: str) -> dict:

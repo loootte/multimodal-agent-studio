@@ -63,6 +63,14 @@
 | 3.8 | 高危组合（读本地 + 联网：第三方沙箱包同时有 `read_local_content` 和 `network`，或本地提示词发第三方出图）要二次确认：只点一次「确认」不执行，提交缺 `acknowledge=high_risk` 返回 409 `acknowledge_required` 并记 `security.high_risk_ack_missing`，运行继续等；拒绝不需要二次确认（#63） | 自动：`security.injection_high_risk_ack`；`_high_risk_ack_unit` |
 | 3.9 | 配置变更只走设置 API + 本机界面：工具执行期间（`tool_scope`）写 `tools.json` / `provider.json` 一律拒绝并记 `security.config_write_denied`；所有已登记工具都在 `tool_scope` 里执行；写配置的接口（工具配置、模型配置、装 / 卸工具包）拒绝跨站 `Origin` / `Sec-Fetch-Site`（403 `config_write_forbidden`）；每次成功写入记 `security.config_changed`（只有目标、字段名、通道）；诱导修改 `remote_local_prompt` 改不动（#63） | 自动：`security.injection_config_change_refused`；`_config_scope_unit`、`_config_origin_case` |
 
+## 5. 桌面壳
+
+| 编号 | 要求 | 验证 |
+| --- | --- | --- |
+| 5.1 | 桌面壳模式（`--desktop-token` / `MAS_DESKTOP_TOKEN`）下，无令牌访问页面、本地资源、设置、出站审计等接口返回 `401 desktop_token_required`；有令牌（头 / Cookie / 首次查询引导）可访问（#74） | 自动：`security.desktop_token_required`；`apps/desktop/check.py`；`apps/web/check.py` 的 `_desktop_token_unit` |
+| 5.2 | 直接跑 Web 服务不启用令牌，行为与第 3–12 阶段一致（#74） | 自动：现有 `apps/web/check.py` / `evals/gate.py`；`apps/desktop/check.py` 的 Web 模式用例 |
+| 5.3 | 壳只绑 `127.0.0.1`、关窗停止运行中的任务并不留残留 Python 进程（#74） | 自动：`apps/desktop/check.py` 生命周期；手工：Windows 关窗后任务管理器无残留 |
+
 ## 4. 发布前
 
 1. `python apps/web/check.py` 输出 `check ok`。

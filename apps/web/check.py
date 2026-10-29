@@ -641,6 +641,7 @@ def self_check() -> None:
         _sandbox_cases()
         _agent_cases()
         _tool_pack_guide_cases()
+        _desktop_token_unit()
         _live()
     finally:
         for name, value in saved.items():
@@ -6706,6 +6707,63 @@ def request_bytes(method: str, url: str, timeout: float = 5):
 
 def site_port(base: str) -> int:
     return int(base.rsplit(":", 1)[1])
+
+
+
+def _desktop_token_unit() -> dict:
+    """13.A / #74：桌面启动令牌。无令牌访问本地资源与设置接口 401；带头令牌可访问；Web 模式不启用。"""
+    import urllib.error
+    import urllib.request as urlrequest
+
+    directory = tempfile.mkdtemp(prefix="chat-desktop-token-")
+    token = "c" * 64
+    if server.App(directory, timeout_sec=5, desktop_token=None).desktop_token is not None:
+        fail("Web 模式不该启用桌面令牌")
+    app = server.App(directory, timeout_sec=5, desktop_token=token)
+    site = server.make_httpd(app, "127.0.0.1", 0)
+    serve(site)
+    base = f"http://127.0.0.1:{site.server_address[1]}"
+    denied = []
+
+    def fetch(path: str, headers: dict | None = None) -> tuple[int, str]:
+        req = urlrequest.Request(base + path, headers=headers or {})
+        try:
+            with urlrequest.urlopen(req, timeout=3) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", errors="replace")
+
+    try:
+        for path in (
+            "/",
+            "/api/identity",
+            "/api/storage",
+            "/api/provider",
+            "/api/resources",
+            "/api/egress",
+        ):
+            status, body = fetch(path)
+            if status != 401 or "desktop_token_required" not in body:
+                fail(f"无令牌访问 {path} 应 401：{status} {body[:120]}")
+            denied.append(path)
+        status, body = fetch("/api/identity", {"X-MAS-Desktop-Token": token})
+        if status != 200 or "本机用户" not in body:
+            fail(f"有令牌访问 /api/identity 应 200：{status} {body[:120]}")
+        status, body = fetch("/api/storage", {"X-MAS-Desktop-Token": token})
+        if status != 200:
+            fail(f"有令牌访问 /api/storage 应 200：{status}")
+        status, body = fetch("/api/provider", {"X-MAS-Desktop-Token": "nope"})
+        if status != 401:
+            fail(f"错误令牌应 401：{status}")
+        # Cookie 通道
+        status, body = fetch("/api/identity", {"Cookie": f"mas_desktop_token={token}"})
+        if status != 200:
+            fail(f"Cookie 令牌应 200：{status}")
+    finally:
+        site.shutdown()
+        site.server_close()
+        shutil.rmtree(directory, ignore_errors=True)
+    return {"denied": denied, "allowed": ["/api/identity", "/api/storage"]}
 
 
 def main() -> None:

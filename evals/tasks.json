@@ -355,6 +355,12 @@
       "kind": "injection_guard",
       "fake_only": true,
       "case": "tool_result_untrusted"
+    },
+    {
+      "id": "security.desktop_token_required",
+      "category": "security",
+      "kind": "desktop_token",
+      "fake_only": true
     }
   ]
 }
