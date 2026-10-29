@@ -43,7 +43,8 @@
         "security.injection_config_change_refused": true,
         "security.injection_confirm_text_host": true,
         "security.injection_high_risk_ack": true,
-        "security.injection_tool_result_untrusted": true
+        "security.injection_tool_result_untrusted": true,
+        "security.desktop_token_required": true
       }
     }
   }

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "default",
+  "description": "主窗口：只开本机 sidecar 页面，无额外 IPC 权限（13.D 再收紧）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

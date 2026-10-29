@@ -8,6 +8,8 @@
 
 ## 启动
 
+本机 Web（开发默认）。桌面壳见 [docs/desktop.md](../../docs/desktop.md)（`python apps/desktop/host.py` 或 Tauri `npm run dev`）。
+
 在仓库根目录：
 
 ```

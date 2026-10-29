@@ -4,6 +4,7 @@
 
 ```
 apps/web/                 Web 界面
+apps/desktop/             桌面壳（Tauri 2 + Python sidecar，ADR 0010）
 services/gateway/         模型网关和供应商适配器
 services/runtime/         Agent 循环、预算、确认
 services/tools/           工具实现

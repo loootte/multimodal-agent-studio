@@ -1189,6 +1189,15 @@ def run_storage_encryption(h: Harness, task: dict, live: bool) -> dict:
     raise Failed(f"不认识的 case：{case}")
 
 
+
+def run_desktop_token(h: Harness, task: dict, live: bool) -> dict:
+    """桌面启动令牌（13.A #74）：无令牌访问本地资源/设置被拒，有令牌可访问；Web 模式不启用。"""
+    try:
+        return check._desktop_token_unit()
+    except SystemExit as exc:
+        raise Failed(str(exc) or "desktop_token 检查失败") from exc
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -1210,6 +1219,7 @@ RUNNERS = {
     "sandbox": run_sandbox,
     "confirm_policy": run_confirm_policy,
     "storage_encryption": run_storage_encryption,
+    "desktop_token": run_desktop_token,
 }
 
 
