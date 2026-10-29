@@ -309,7 +309,7 @@ def delete(app, ids: list, confirm: bool = False) -> dict:
     trajectories = {}
     if touched:
         from services.meta.export import Exporter
-        exporter = Exporter(app.data_dir)
+        exporter = Exporter(app.data_dir, sessions=app.sessions)
         for sid in sorted(touched):
             trajectories = exporter.forget_session(sid)
     return {"deleted": deleted, "refused": refused, "missing": missing, "trajectories": trajectories}

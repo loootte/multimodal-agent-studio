@@ -1368,7 +1368,35 @@ function openSettings() {
   form.elements.api_key.value = "";
   document.querySelector("#key-hint").textContent = keyHint(provider);
   showSettingsError("");
+  refreshStorage();
   settings.showModal();
+}
+
+// 12.F（#62）：本地存储状态。只显示模式、算法、key_id，不显示密钥和路径。
+async function refreshStorage() {
+  const node = document.querySelector("#storage-status");
+  if (!node) return;
+  try {
+    const response = await fetch("/api/storage");
+    const body = await response.json();
+    node.textContent = storageText(body);
+  } catch (error) {
+    node.textContent = "读不到存储状态。";
+  }
+}
+
+function storageText(body) {
+  if (!body || !body.mode) return "读不到存储状态。";
+  if (body.mode === "memory") return "仅内存会话：会话和文件不落盘，停止服务就没了。";
+  if (body.mode === "plaintext") {
+    return "未加密：会话正文和文件字节以明文存在数据目录里，拷走 data/ 就能读。要加密请停服务后运行 storage_tool.py encrypt。";
+  }
+  const left = body.plaintext_left || {};
+  const rest = (left.sessions || 0) + (left.blobs || 0) + (left.legacy_files || 0);
+  return `已加密（${body.alg}，每个会话单独派生密钥，key_id ${body.key_id}）。`
+    + (rest ? ` 还有 ${rest} 项明文残留，请运行 storage_tool.py encrypt。` : "")
+    + (body.decrypt_failures ? ` 有 ${body.decrypt_failures} 次解密失败（密钥不对或文件被改）。` : "")
+    + " 丢了主密钥和备份就无法恢复。";
 }
 
 async function saveSettings(event) {

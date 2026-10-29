@@ -231,11 +231,11 @@ def _prefer_longer(buckets: dict[str, dict], min_count: int, min_sessions: int) 
     return dropped
 
 class Miner:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, sessions=None):
         self.data_dir = data_dir
         self.meta_dir = os.path.join(data_dir, "meta")
         self.store_path = os.path.join(self.meta_dir, "skill-candidates.json")
-        self.exporter = Exporter(data_dir)
+        self.exporter = Exporter(data_dir, sessions=sessions)
 
     def load_store(self) -> dict:
         if not os.path.isfile(self.store_path):

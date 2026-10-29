@@ -18,6 +18,7 @@ import urllib.parse
 import uuid
 
 from packages.artifacts import ArtifactError, ArtifactStore
+from packages.artifacts import crypto as storage_crypto
 from packages.contracts.events import HANDLE_ERRORS, HANDLE_PURPOSE_TOOLS, HANDLE_SCHEMA
 from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 
@@ -548,13 +549,97 @@ class SessionRunning(StoreError):
 
 
 class SessionStore:
-    def __init__(self, root: str, artifacts: ArtifactStore | None = None):
+    """会话记录。12.F（#62）：storage 决定落盘方式。
+
+    - plaintext：和以前一样，`sessions/<id>.json` + 全局按 sha256 去重的 `artifacts/blobs/`。
+    - encrypted：会话文件是 `mas.enc/1` 信封（AES-256-GCM，会话派生密钥，AAD 绑会话 id）；
+      内容 / 附件字节进 `artifacts/sealed/<会话>/<HMAC 名>`，按会话加密，不跨会话去重。
+    - memory：「仅内存会话」，不写 `sessions/` 和 `artifacts/`，重启即没。
+    """
+
+    def __init__(self, root: str, artifacts: ArtifactStore | None = None,
+                 storage: "storage_crypto.Storage | None" = None):
         self.root = root
         parent = os.path.dirname(os.path.abspath(root))
         self.artifacts = artifacts if artifacts is not None else ArtifactStore(os.path.join(parent, "artifacts"))
+        self.storage = storage if storage is not None else storage_crypto.Storage("plaintext")
+        self.cipher = self.storage.cipher if self.storage.mode == "encrypted" else None
+        self.memory = self.storage.mode == "memory"
+        self._mem: dict[str, str] = {}
+        self._mem_blobs: dict[tuple[str, str], bytes] = {}
+        self.decrypt_failures = 0
         self._lock = threading.RLock()
-        os.makedirs(root, exist_ok=True)
+        if not self.memory:
+            os.makedirs(root, exist_ok=True)
         self._recover()
+
+    # ---------- 12.F 落盘（#62） ----------
+
+    def _names(self) -> list[str]:
+        if self.memory:
+            return [sid + ".json" for sid in self._mem]
+        try:
+            return os.listdir(self.root)
+        except OSError:
+            return []
+
+    def _sealed_dir(self, session_id: str) -> str:
+        return os.path.join(self.artifacts.root, "sealed", session_id)
+
+    def _put_blob(self, session_id: str, checksum: str, data: bytes) -> None:
+        if self.memory:
+            self._mem_blobs[(session_id, checksum)] = bytes(data)
+            return
+        if self.cipher is None:
+            self.artifacts.put(data)
+            return
+        target = os.path.join(self._sealed_dir(session_id), self.cipher.blob_name(session_id, checksum))
+        if os.path.isfile(target):
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        temporary = target + ".part"
+        try:
+            with open(temporary, "wb") as handle:
+                handle.write(self.cipher.seal_blob(session_id, checksum, data))
+            os.replace(temporary, target)
+        except OSError as exc:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise ArtifactError("没能留下这个文件。") from exc
+
+    def _get_blob(self, session_id: str, checksum: str) -> bytes | None:
+        if self.memory:
+            return self._mem_blobs.get((session_id, checksum))
+        if self.cipher is not None:
+            target = os.path.join(self._sealed_dir(session_id), self.cipher.blob_name(session_id, checksum))
+            if os.path.isfile(target):
+                try:
+                    with open(target, "rb") as handle:
+                        raw = handle.read()
+                    return self.cipher.open_blob(session_id, checksum, raw)
+                except (OSError, storage_crypto.StorageError) as exc:
+                    self._decrypt_failed(session_id, getattr(exc, "detail", "") or "io")
+                    return None
+        # 明文（或迁移前留下的）全局字节
+        return self.artifacts.get(checksum)
+
+    def _decrypt_failed(self, session_id: str, reason: str) -> None:
+        self.decrypt_failures += 1
+        try:
+            from services import telemetry
+
+            telemetry.record("security.storage_decrypt_failed", trace_id="sto_" + uuid.uuid4().hex,
+                             session_id=session_id, reason_code=str(reason or "tampered")[:32])
+        except Exception:
+            pass
+
+    def blob_bytes(self, session_id: str, checksum: str) -> bytes | None:
+        """按会话读字节（导出轨迹用）。加密时用会话密钥解。"""
+        if not isinstance(checksum, str) or not checksum:
+            return None
+        return self._get_blob(session_id, checksum)
 
     def create(self, user_id: str) -> dict:
         check_id(user_id, "用户")
@@ -576,7 +661,7 @@ class SessionStore:
         check_id(user_id, "用户")
         with self._lock:
             found = []
-            for name in os.listdir(self.root):
+            for name in self._names():
                 if not name.endswith(".json"):
                     continue
                 session = self._load_path(os.path.join(self.root, name))
@@ -639,16 +724,52 @@ class SessionStore:
                 for item in session.get(key) or []:
                     if isinstance(item, dict) and isinstance(item.get("checksum"), str) and item["checksum"]:
                         checksums.add(item["checksum"])
+            if self.memory:
+                self._mem.pop(session_id, None)
+                removed = 0
+                for key in [k for k in self._mem_blobs if k[0] == session_id]:
+                    self._mem_blobs.pop(key, None)
+                    removed += 1
+                return {"ok": True, "session_id": session_id, "blobs_removed": removed}
             os.remove(self._path(session_id))
             shutil.rmtree(os.path.join(self.root, session_id), ignore_errors=True)
-            removed = self._gc_blobs(checksums)
+            sealed = 0
+            if self.cipher is not None:
+                folder = self._sealed_dir(session_id)
+                if os.path.isdir(folder):
+                    sealed = len([n for n in os.listdir(folder) if not n.endswith(".part")])
+                shutil.rmtree(folder, ignore_errors=True)
+            removed = self._gc_blobs(checksums) + sealed
         return {"ok": True, "session_id": session_id, "blobs_removed": removed}
 
-    def _gc_blobs(self, checksums: set) -> int:
-        """删掉没有任何会话再引用的字节。调用方持锁。"""
+    def _gc_blobs(self, checksums: set, session_id: str | None = None) -> int:
+        """删掉没有任何会话再引用的字节。调用方持锁。
+        加密 / 仅内存时字节按会话存：只看这个会话自己还引用不引用。"""
         checksums = {c for c in checksums if isinstance(c, str) and c}
         if not checksums:
             return 0
+        if session_id and (self.memory or self.cipher is not None):
+            current = self._load_path(self._path(session_id)) or {}
+            mine = set(checksums)
+            for key in ("attachments", "contents"):
+                for item in current.get(key) or []:
+                    if isinstance(item, dict):
+                        mine.discard(item.get("checksum"))
+            dropped = 0
+            for checksum in mine:
+                if self.memory:
+                    dropped += 1 if self._mem_blobs.pop((session_id, checksum), None) is not None else 0
+                    continue
+                target = os.path.join(self._sealed_dir(session_id), self.cipher.blob_name(session_id, checksum))
+                if os.path.exists(target):
+                    try:
+                        os.remove(target)
+                        dropped += 1
+                    except OSError:
+                        pass
+            if self.memory:
+                return dropped
+            return dropped + self._gc_blobs(mine)
         for other in self.all_sessions():
             for key in ("attachments", "contents"):
                 for item in other.get(key) or []:
@@ -672,7 +793,7 @@ class SessionStore:
         """本机所有会话的原始记录（含本地正文）。只给本机资源面板用，不进模型。"""
         found = []
         with self._lock:
-            for name in sorted(os.listdir(self.root)):
+            for name in sorted(self._names()):
                 if name.endswith(".json"):
                     session = self._load_path(os.path.join(self.root, name))
                     if session is not None:
@@ -718,7 +839,7 @@ class SessionStore:
                                               if not (isinstance(a, dict) and a.get("handle") == handle)]
             session["updated_at"] = _now()
             self._write(session)
-            self._gc_blobs({found[0].get("checksum")})
+            self._gc_blobs({found[0].get("checksum")}, session_id)
         return "forgotten"
 
     def drop_artifact_events(self, session_id: str, artifact_id: str) -> int:
@@ -917,8 +1038,8 @@ class SessionStore:
                         self._write(session)
                     return _public_content(item)
             try:
-                self.artifacts.put(data)
-            except ArtifactError as exc:
+                self._put_blob(session_id, digest, data)
+            except (ArtifactError, storage_crypto.StorageError) as exc:
                 raise StoreError("没能留下这个文件。") from exc
             record = {
                 "handle": new_id("c_"),
@@ -954,8 +1075,8 @@ class SessionStore:
                 if isinstance(item, dict) and item.get("checksum") == digest:
                     return _public_attachment(item)
             try:
-                self.artifacts.put(data)
-            except ArtifactError as exc:
+                self._put_blob(session_id, digest, data)
+            except (ArtifactError, storage_crypto.StorageError) as exc:
                 raise StoreError("没能留下这个文件。") from exc
             record = {
                 "handle": new_id("a_"),
@@ -1048,7 +1169,7 @@ class SessionStore:
             session["updated_at"] = _now()
             self._write(session)
             if kind == "file":
-                self._gc_blobs({found.get("checksum")})
+                self._gc_blobs({found.get("checksum")}, session_id)
         if kind == "file":
             try:
                 os.remove(self._file_path(session_id, handle))
@@ -1371,9 +1492,11 @@ class SessionStore:
     def _read_blob(self, item: dict, session_id: str, handle: str) -> bytes | None:
         checksum = item.get("checksum")
         if isinstance(checksum, str) and checksum:
-            data = self.artifacts.get(checksum)
+            data = self._get_blob(session_id, checksum)
             if data is not None:
                 return data
+        if self.memory:
+            return None
         return self._read_file(session_id, handle)
 
     def _read_file(self, session_id: str, handle: str) -> bytes | None:
@@ -1399,7 +1522,7 @@ class SessionStore:
 
     def _recover(self) -> None:
         with self._lock:
-            for name in os.listdir(self.root):
+            for name in self._names():
                 if not name.endswith(".json"):
                     continue
                 path = os.path.join(self.root, name)
@@ -1423,16 +1546,40 @@ class SessionStore:
         return os.path.join(self.root, session_id + ".json")
 
     def _load_path(self, path: str) -> dict | None:
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return None
+        session_id = os.path.basename(path)[:-5] if path.endswith(".json") else ""
+        if self.memory:
+            raw = self._mem.get(session_id)
+            data = json.loads(raw) if raw is not None else None
+        else:
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                return None
+            if storage_crypto.is_envelope(data):
+                if self.cipher is None:
+                    return None  # 明文模式读不了密文（不会悄悄解成明文）
+                try:
+                    data = self.cipher.open_json(session_id, data)
+                except storage_crypto.StorageError as exc:
+                    self._decrypt_failed(session_id, exc.detail)
+                    return None
+                if data.get("session_id") != session_id:
+                    self._decrypt_failed(session_id, "wrong_scope")
+                    return None
         if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
             return None
         return data
 
     def _write(self, session: dict) -> None:
-        _atomic_write(self._path(session["session_id"]), session)
+        session_id = session["session_id"]
+        if self.memory:
+            check_id(session_id, "会话")
+            self._mem[session_id] = json.dumps(session, ensure_ascii=False)
+            return
+        if self.cipher is not None:
+            _atomic_write(self._path(session_id), self.cipher.seal_json(session_id, session))
+            return
+        _atomic_write(self._path(session_id), session)

@@ -288,6 +288,38 @@
       "category": "image",
       "kind": "character",
       "fake_only": true
+    },
+    {
+      "id": "security.storage_encrypted_at_rest",
+      "category": "security",
+      "kind": "storage_encryption",
+      "fake_only": true,
+      "case": "at_rest",
+      "marker": "LOCAL-STORE-a91c"
+    },
+    {
+      "id": "security.storage_session_isolation",
+      "category": "security",
+      "kind": "storage_encryption",
+      "fake_only": true,
+      "case": "isolation",
+      "marker": "LOCAL-STORE-b27d"
+    },
+    {
+      "id": "security.storage_key_required",
+      "category": "security",
+      "kind": "storage_encryption",
+      "fake_only": true,
+      "case": "key_required",
+      "marker": "LOCAL-STORE-c38e"
+    },
+    {
+      "id": "security.storage_memory_only",
+      "category": "security",
+      "kind": "storage_encryption",
+      "fake_only": true,
+      "case": "memory_only",
+      "marker": "LOCAL-STORE-d49f"
     }
   ]
 }

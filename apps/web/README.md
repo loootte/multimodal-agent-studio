@@ -23,6 +23,10 @@ python apps/web/server.py
 | `LLM_API_KEY` | 任意基址都可用的密钥。页面里保存过的密钥优先 |
 | `XAI_API_KEY` | 只在基址主机是 `api.x.ai` 时使用 |
 | `CHAT_DATA_DIR` | 换数据目录 |
+| `MAS_STORAGE_ENCRYPTION` | 本地存储：`off`（默认明文）/ `on`（会话和本地内容按会话加密落盘）/ `memory`（仅内存会话，演示用，停服务即没） |
+| `MAS_MASTER_KEY` / `MAS_MASTER_KEY_FILE` | 主密钥（默认 `~/.mas/master.key`，不许放在数据目录或仓库） |
+
+开加密前先读 [docs/storage-encryption.md](../../docs/storage-encryption.md)：**丢了主密钥和备份，加密数据无法恢复**。已有明文数据先停服务跑 `python apps/web/storage_tool.py encrypt`，再马上 `export-key --out <离机位置>` 做口令备份；状态和恢复用 `status` / `verify` / `import-key`。设置页「本地存储」只显示模式和 key_id。
 
 ## 检查
 

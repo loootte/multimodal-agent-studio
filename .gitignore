@@ -13,3 +13,9 @@ poc/comfyui/artifacts/
 apps/web/data/
 skills/anatomy/examples/dial-indicator/*.html
 toolpacks/installed/
+# 12.F（#62）：本地存储主密钥和备份永远不进 Git
+*.key
+master.key
+*.keybackup
+*.keybackup.json
+.mas/

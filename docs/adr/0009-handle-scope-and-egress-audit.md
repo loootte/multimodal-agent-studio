@@ -2,7 +2,7 @@
 
 ## 状态
 
-部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）已合并，说明见 [handle-scope.md](../handle-scope.md)；网关拦截硬化（12.C，[#59](https://github.com/loootte/multimodal-agent-studio/issues/59)）在 `issue-59` 分支实现，说明见 [egress-policy.md](../egress-policy.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
+部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）已合并，说明见 [handle-scope.md](../handle-scope.md)；网关拦截硬化（12.C，[#59](https://github.com/loootte/multimodal-agent-studio/issues/59)）、执行沙箱（12.D，[#60](https://github.com/loootte/multimodal-agent-studio/issues/60)）、强制确认与数据流图（12.E，[#61](https://github.com/loootte/multimodal-agent-studio/issues/61)）已合并，说明见 [egress-policy.md](../egress-policy.md)、[tool-sandbox.md](../tool-sandbox.md)、[sensitive-confirm.md](../sensitive-confirm.md)；本地存储加密与会话隔离（12.F，[#62](https://github.com/loootte/multimodal-agent-studio/issues/62)）在 `issue-62` 分支实现，说明见 [storage-encryption.md](../storage-encryption.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
 
 本文件在接受前可随实现微调字段名；**不得**把本地正文、文件字节或密钥写入任何审计事件。
 
@@ -91,12 +91,23 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 会话级数据流图 `GET /api/dataflow`（只给本机，`mas.dataflow/1`）：本地内容 → 句柄（前 6 位）→ 工具 → 本机 ComfyUI / 局域网 / 第三方，边上记 sent / blocked / failed、本地派生次数和原因码；只来自审计记录和句柄公开字段，没有正文和完整句柄。
 - 不做：轨迹里的隐私边类型（#44 反向用例，issue 标为可选）。
 
+### 12.F 实现定稿的本地存储加密与会话隔离
+
+细节、备份与恢复手册见 [storage-encryption.md](../storage-encryption.md)。
+
+- 模式 `MAS_STORAGE_ENCRYPTION`：默认明文（兼容、且丢密钥即丢数据，要用户显式开）；`on` 加密；`memory` 仅内存会话。数据目录有 `storage.json`（`mas.storage/1`，记 `key_id`）后永远按加密打开，环境变量降级不了。
+- AES-256-GCM（可选依赖 `cryptography`，缺了报 `storage_crypto_unavailable`，不回落明文）。会话密钥 = HKDF-SHA256(主密钥, `mas/session/<id>`)；会话文件 `mas.enc/1` 信封，头部作 AAD 绑会话；字节按会话存 `artifacts/sealed/<会话>/<HMAC 名>`，AAD 绑 `key_id|会话|sha256`，加密时不跨会话去重、文件名不暴露明文哈希。
+- 主密钥：`MAS_MASTER_KEY` → `MAS_MASTER_KEY_FILE` → `~/.mas/master.key`（0600、不覆盖）；不许在数据目录或仓库（`storage_key_location`）；12.D 沙箱禁读密钥目录。口令备份 `mas.keybackup/1`（scrypt + AES-GCM）。导入导出只走命令行 `apps/web/storage_tool.py`，`GET /api/storage` 只读、只给本机、不带密钥和路径。
+- 有明文没迁移时开 `on` 报 `storage_migration_required`；迁移先写好密文和标记再删明文。
+- 网关 / 运行时不变，只见解密后的本机对象；遥测 `security.storage_key_created` / `storage_decrypt_failed` / `storage_migrated`，无密钥、正文、路径。
+- 不做：生成图与 ComfyUI 输出加密、OS 钥匙串 / DPAPI、安全擦除。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
 - 网关适配器必须挂同一出口钩子，否则评测失败。
 - 过严的指纹匹配可能误伤短句巧合——实现侧用「已入库指纹 + 长度阈值」，UI 只说明原因码、不回显正文。
-- 12.D 的子进程沙箱见上；操作系统级隔离和落盘加密不在本 ADR 范围，见后续与 12.F。
+- 12.D 的子进程沙箱见上；操作系统级隔离不在本 ADR 范围。落盘加密见 12.F：开启后丢主密钥和备份就无法恢复数据，生成图片仍是明文。
 - 12.E 让 `network` / 读本地的第三方包不能再 `confirm=never`：12.E 之前装好的这类包升级后要改清单重装。
 
 ## 未决（接受前拍板）
