@@ -24,5 +24,7 @@ $args = @(
 if (Test-Path $ico) { $args += @("--icon", $ico) }
 $args += (Join-Path $desktop "launcher.py")
 & $py @args
-Write-Host "exe: $(Join-Path $dist 'MultimodalAgentStudio.exe')"
-Write-Host "说明: 此为 pywebview 启动器（非 Tauri）。仍需本机 Python + 仓库源码。"
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
+$exe = Join-Path $dist "MultimodalAgentStudio.exe"
+Write-Host "exe: $exe"
+Write-Host "NOTE: pywebview launcher (not Tauri). Needs local Python + repo sources."
