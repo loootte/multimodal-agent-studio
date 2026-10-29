@@ -16,3 +16,7 @@ powershell -ExecutionPolicy Bypass -File apps\desktop\build-launcher.ps1
 ```
 
 会在桌面放「Multimodal Agent Studio」快捷方式，指向本机 `pythonw.exe` + `launcher.py`；`dist\` 下另有 `.cmd` 兜底。不要用旧的 PyInstaller onefile exe。
+
+解释器查找（`find-python.cmd`，所有入口共用，不依赖 PATH 里有 `python`）：
+`MAS_PYTHON` → 仓库 `.venv` / `venv` → `py -3` → `D:\ProgramData\miniconda3`、`%USERPROFILE%\miniconda3`、`%USERPROFILE%\anaconda3`、`C:\ProgramData\miniconda3` → PATH 上的 `python`。
+快捷方式写入解析出的 `pythonw.exe` 绝对路径；都找不到时请设置 `MAS_PYTHON` 指向 `python.exe`。

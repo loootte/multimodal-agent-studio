@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -39,11 +38,23 @@ def _repo_root() -> Path:
     )
 
 
+def _console_python(path: str) -> str:
+    """pythonw.exe -> 同目录 python.exe（sidecar 需要可用 stdout 管道）。"""
+    p = Path(path)
+    if p.name.lower() == "pythonw.exe":
+        sib = p.with_name("python.exe")
+        if sib.is_file():
+            return str(sib)
+    return str(p)
+
+
 def _python_bin(root: Path) -> str:
-    if os.environ.get("MAS_PYTHON"):
-        return os.environ["MAS_PYTHON"]
-    # Prefer the interpreter that can import the web stack; fall back to PATH.
-    return shutil.which("python") or shutil.which("python3") or sys.executable
+    # 与入口脚本一致：MAS_PYTHON 优先，否则用运行本启动器的同一解释器，
+    # 不再回落到 PATH 上的 python（用户 PATH 里可能没有，或是另一套环境）。
+    env = os.environ.get("MAS_PYTHON")
+    if env and Path(env).is_file():
+        return _console_python(env)
+    return _console_python(sys.executable)
 
 
 def _spawn_host(root: Path, python: str):

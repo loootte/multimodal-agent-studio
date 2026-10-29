@@ -6,20 +6,21 @@ $root = Resolve-Path (Join-Path $desktopDir "..\..")
 $launcher = Join-Path $desktopDir "launcher.py"
 if (-not (Test-Path $launcher)) { throw "Missing $launcher" }
 
+# Single source of truth for interpreter lookup: find-python.cmd
+# (MAS_PYTHON -> repo venv -> py -3 -> common conda dirs -> PATH python).
 function Find-PythonW {
-  if ($env:MAS_PYTHON) {
-    $p = $env:MAS_PYTHON
-    if ($p -match '(?i)python\.exe$') {
-      $pw = $p -replace '(?i)python\.exe$', 'pythonw.exe'
-      if (Test-Path $pw) { return (Resolve-Path $pw).Path }
-    }
-    if (Test-Path $p) { return (Resolve-Path $p).Path }
+  $finder = Join-Path $desktopDir "find-python.cmd"
+  if (-not (Test-Path $finder)) { throw "Missing $finder" }
+  $out = & cmd.exe /d /c "`"$finder`" --print"
+  if ($LASTEXITCODE -ne 0) {
+    throw "No Python 3 found (MAS_PYTHON / venv / py -3 / conda / PATH). Set MAS_PYTHON to your python.exe, e.g. D:\ProgramData\miniconda3\python.exe"
   }
-  foreach ($name in @("pythonw.exe", "python.exe")) {
-    $cmd = Get-Command $name -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source) { return $cmd.Source }
+  $pyw = $null
+  foreach ($line in $out) {
+    if ($line -like "MAS_PYW=*") { $pyw = $line.Substring(8).Trim() }
   }
-  throw "No pythonw/python on PATH. Install Python 3 or set MAS_PYTHON."
+  if (-not $pyw -or -not (Test-Path $pyw)) { throw "find-python.cmd returned no usable pythonw: $out" }
+  return (Resolve-Path $pyw).Path
 }
 
 $pyw = Find-PythonW
@@ -46,28 +47,13 @@ Use the desktop shortcut or the .cmd in this folder (local Python only).
 Tauri release exe (when MSVC is available) may later replace the name MultimodalAgentStudio.exe via copy-dist.ps1.
 "@ | Set-Content -Path $badMark -Encoding UTF8
 
-# ASCII-named cmd (reliable) + Chinese-named copy for double-click UX.
-$cmdBody = @"
-@echo off
-setlocal
-cd /d "$root"
-set "MAS_REPO_ROOT=$root"
-if defined MAS_PYTHON (
-  set "PY=%MAS_PYTHON%"
-) else (
-  where pythonw >nul 2>&1 && set "PY=pythonw" || set "PY=python"
-)
-"%PY%" "$launcher"
-if errorlevel 1 (
-  echo.
-  echo Launch failed. Need local Python 3 and full repo checkout.
-  echo Interpreter: %PY%
-  pause
-)
-"@
+# dist\*.cmd just delegate to apps\desktop\start-mas.cmd (same interpreter lookup).
+$startCmd = Join-Path $desktopDir "start-mas.cmd"
+$cmdBody = "@echo off`r`ncall `"$startCmd`"`r`n"
 $cmdAscii = Join-Path $dist "start-mas.cmd"
 $cmdBody | Set-Content -Path $cmdAscii -Encoding ASCII
-$cmdZh = Join-Path $dist "启动 Multimodal Agent Studio.cmd"
+$zhName = ([string][char]0x542F) + ([string][char]0x52A8) + " Multimodal Agent Studio.cmd"
+$cmdZh = Join-Path $dist $zhName
 # Copy via .NET to keep Unicode filename on Windows PowerShell 5.1
 [System.IO.File]::WriteAllText($cmdZh, $cmdBody, [System.Text.Encoding]::ASCII)
 Write-Host "cmd: $cmdAscii"
