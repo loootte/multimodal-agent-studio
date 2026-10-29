@@ -320,6 +320,41 @@
       "fake_only": true,
       "case": "memory_only",
       "marker": "LOCAL-STORE-d49f"
+    },
+    {
+      "id": "security.injection_exfil_blocked",
+      "category": "security",
+      "kind": "injection_guard",
+      "fake_only": true,
+      "case": "exfil_blocked"
+    },
+    {
+      "id": "security.injection_config_change_refused",
+      "category": "security",
+      "kind": "injection_guard",
+      "fake_only": true,
+      "case": "config_change_refused"
+    },
+    {
+      "id": "security.injection_confirm_text_host",
+      "category": "security",
+      "kind": "injection_guard",
+      "fake_only": true,
+      "case": "confirm_text_host"
+    },
+    {
+      "id": "security.injection_high_risk_ack",
+      "category": "security",
+      "kind": "injection_guard",
+      "fake_only": true,
+      "case": "high_risk_ack"
+    },
+    {
+      "id": "security.injection_tool_result_untrusted",
+      "category": "security",
+      "kind": "injection_guard",
+      "fake_only": true,
+      "case": "tool_result_untrusted"
     }
   ]
 }
