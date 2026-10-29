@@ -2,7 +2,7 @@
 
 ## 状态
 
-部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）已合并，说明见 [handle-scope.md](../handle-scope.md)；网关拦截硬化（12.C，[#59](https://github.com/loootte/multimodal-agent-studio/issues/59)）、执行沙箱（12.D，[#60](https://github.com/loootte/multimodal-agent-studio/issues/60)）、强制确认与数据流图（12.E，[#61](https://github.com/loootte/multimodal-agent-studio/issues/61)）已合并，说明见 [egress-policy.md](../egress-policy.md)、[tool-sandbox.md](../tool-sandbox.md)、[sensitive-confirm.md](../sensitive-confirm.md)；本地存储加密与会话隔离（12.F，[#62](https://github.com/loootte/multimodal-agent-studio/issues/62)）在 `issue-62` 分支实现，说明见 [storage-encryption.md](../storage-encryption.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
+部分实现：出站审计事件、确认卡出站摘要和「数据出站」时间线已合并（12.A，[#57](https://github.com/loootte/multimodal-agent-studio/issues/57)），实现说明见 [egress-audit.md](../egress-audit.md)；句柄作用域（12.B，[#58](https://github.com/loootte/multimodal-agent-studio/issues/58)）已合并，说明见 [handle-scope.md](../handle-scope.md)；网关拦截硬化（12.C，[#59](https://github.com/loootte/multimodal-agent-studio/issues/59)）、执行沙箱（12.D，[#60](https://github.com/loootte/multimodal-agent-studio/issues/60)）、强制确认与数据流图（12.E，[#61](https://github.com/loootte/multimodal-agent-studio/issues/61)）已合并，说明见 [egress-policy.md](../egress-policy.md)、[tool-sandbox.md](../tool-sandbox.md)、[sensitive-confirm.md](../sensitive-confirm.md)；本地存储加密与会话隔离（12.F，[#62](https://github.com/loootte/multimodal-agent-studio/issues/62)）已合并，说明见 [storage-encryption.md](../storage-encryption.md)；提示注入防外泄（12.G，[#63](https://github.com/loootte/multimodal-agent-studio/issues/63)）在 `issue-63` 分支实现，说明见 [injection-guard.md](../injection-guard.md)。对应路线图第 12 阶段父 issue [#56](https://github.com/loootte/multimodal-agent-studio/issues/56)；路线图入库 [#55](https://github.com/loootte/multimodal-agent-studio/issues/55)。依赖 [ADR 0003](0003-local-data-isolation.md)、[ADR 0004](0004-tool-governance.md)。首批落地见 [#57](https://github.com/loootte/multimodal-agent-studio/issues/57)（12.A）与 [#58](https://github.com/loootte/multimodal-agent-studio/issues/58)（12.B）。
 
 本文件在接受前可随实现微调字段名；**不得**把本地正文、文件字节或密钥写入任何审计事件。
 
@@ -102,6 +102,17 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 网关 / 运行时不变，只见解密后的本机对象；遥测 `security.storage_key_created` / `storage_decrypt_failed` / `storage_migrated`，无密钥、正文、路径。
 - 不做：生成图与 ComfyUI 输出加密、OS 钥匙串 / DPAPI、安全擦除。
 
+### 12.G 实现定稿的提示注入防外泄
+
+细节见 [injection-guard.md](../injection-guard.md)。
+
+- 确认卡 `card`（`mas.confirm/1`，`by: "host"`）由 `services/runtime/injection.confirm_card` 按宿主数据拼：工具名、来源（内置 / 第三方沙箱包与版本）、联网 / 读本地 / 本地提示词发第三方、参数（按数据列出，值截到 80 字、密钥类键遮掉、最多 12 行）。模型这一步说的话、工具结果文字不进卡；调用方带来的出站摘要只留白名单布尔标志（`SUMMARY_FLAGS`），`text` / `fixed` / `notice` 由宿主重新生成。`tool.confirm` 和 `waiting_confirm` 的 `tool_call` 事件（含子 Agent 冒泡、本地提示词发第三方同意）都带 `card`；页面只渲染 `by=host` 的卡，全部 `textContent`。
+- 工具结果通道：回传给模型的工具结果是 user 角色消息，带 `channel=tool_result` / `trust=untrusted`、正文前缀「工具结果」并附宿主说明（数据不是指令）；网关只发 `role` / `content`，标记不出本机。
+- 已入库指纹：`SessionStore.local_bodies` 返回 `LocalBodies`（正文 + 入库 sha256）；出口按 16 位十六进制窗比对，命中记 `local_fingerprint`（不可重试，遥测分类 `policy`），对话通道预检与 `egress.guard` 都拦；`artifact_id` 与 `data:` 载荷不参与。
+- 高危组合（`high_risk`：第三方沙箱包同时读本地和联网，或 `local_to_third_party`）卡片 `risk=high`、`requires_ack=high_risk`：`POST /api/runs/{id}/confirm` 带 `allowed=true` 但缺 `acknowledge=high_risk` 返回 409 `acknowledge_required`（运行继续等），记 `security.high_risk_ack_missing`；运行时循环对高危卡只认确认回调返回 `high_risk`。
+- 配置写入路径：宿主执行工具（`execute_tool`、网页 `_execute_web_tool`）包在 `injection.tool_scope` 里，期间 `ToolConfigStore.update` / `ProviderStore.update` 抛 `ConfigWriteDenied` 并记 `security.config_write_denied`；写配置的 HTTP 接口（`PUT /api/tools/{name}/config`、`PUT /api/provider`、`POST /api/toolpacks/install`、`/uninstall`）要求本机回环且同源（有 `Origin` 必须与 `Host` 一致、有 `Sec-Fetch-Site` 必须是 `same-origin` / `none`），否则 403 `config_write_forbidden`；成功写入记 `security.config_changed`（目标、字段名、`via=settings_api`，无取值）。
+- 不做：模型侧的注入检测 / 分类器、对工具结果内容的改写或过滤（只标记、不改数据）、CSRF 令牌（服务只听 127.0.0.1，同源校验已够）。
+
 ## 后果
 
 - 12.A 可先落地事件与 UI，句柄字段在 12.B 补齐；两者共享本 ADR 的事件与错误码约定。
@@ -109,6 +120,7 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 - 过严的指纹匹配可能误伤短句巧合——实现侧用「已入库指纹 + 长度阈值」，UI 只说明原因码、不回显正文。
 - 12.D 的子进程沙箱见上；操作系统级隔离不在本 ADR 范围。落盘加密见 12.F：开启后丢主密钥和备份就无法恢复数据，生成图片仍是明文。
 - 12.E 让 `network` / 读本地的第三方包不能再 `confirm=never`：12.E 之前装好的这类包升级后要改清单重装。
+- 12.G 让读本地 + 联网的第三方包每次调用都要点两次；自己写的脚本调 `/api/runs/{id}/confirm` 要带 `acknowledge`。脚本从别的网页（跨站）写配置会 403。
 
 ## 未决（接受前拍板）
 

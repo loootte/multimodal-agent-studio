@@ -38,7 +38,7 @@
 | `contains_local_derived` | 含本地派生内容 | 是 / 否（本地句柄出图，或沙箱包同时读本地和联网） |
 | `handle_purpose` | 句柄用途 | 如 `出图提示词（image_prompt）`；没有句柄写「不用句柄」 |
 
-同时平铺 `destination_host`、`contains_local_derived`（bool）、`handle_purpose`、`local_to_third_party`。本地派生发第三方时，卡片再加一行红字「本地提示词将发往第三方出图服务（不会发给对话模型）」。页面用 `textContent` 渲染，不吃模型文字。
+同时平铺 `destination_host`、`contains_local_derived`（bool）、`handle_purpose`、`local_to_third_party`。本地派生发第三方时，卡片再加一行红字「本地提示词将发往第三方出图服务（不会发给对话模型）」。页面用 `textContent` 渲染，不吃模型文字。12.G 起确认事件另带宿主模板卡 `card`（`mas.confirm/1`），高危组合要二次确认，见 [injection-guard.md](injection-guard.md)。
 
 ## 3. 放宽隐私的设置要显式确认
 
@@ -47,7 +47,7 @@
 - `GET /api/tools/generate_image/config` 多一个 `warnings`：`{"remote_local_prompt": {"confirm": "本地提示词将发往第三方出图服务（正文不发给对话模型）。每一轮出图前仍会单独请你确认。"}}`。设置页选中该值时显示红框警示。
 - `PUT …/config` 把它从别的值改成 `confirm` 时，必须带 `"acknowledge": ["remote_local_prompt"]`；否则 **409** `{"code": "acknowledge_required", "warnings": {...}}`，配置不变。网页弹窗确认后带上 `acknowledge` 重发。改回 `refuse` 不需要确认。
 - 每次受保护项真的变了，记遥测安全事件 `security.policy_changed`（`trace_id` 为 `cfg_…`，字段只有 `tool` / `field` / `from_value` / `to_value` / `via`），在 `/api/telemetry` 可查。
-- 配置变更不走工具：模型没有改配置的工具，只能由人在设置页或直接调接口改。
+- 配置变更不走工具：模型没有改配置的工具，只能由人在设置页或直接调接口改。12.G 起工具执行期间写配置一律拒绝，跨站写配置 403，成功写入记 `security.config_changed`，见 [injection-guard.md](injection-guard.md)。
 
 ## 4. 会话级数据流图
 
