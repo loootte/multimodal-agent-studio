@@ -24,6 +24,9 @@
 | 1.15 | 所有网关适配器挂统一出口中间件：没声明 `audits_egress` / `offline` 的不能注册，声明了却没开 ticket 的被 `egress_policy_denied` 中断；第三方出图、ComfyUI 提交与上传命中时不发出（#59） | 自动：`security.egress_policy_denied`；`apps/web/check.py` 的 `_gateway_hardening`；人工：新增适配器时复查 |
 | 1.16 | 会话级数据流图 `/api/dataflow` 只给本机，只由出站审计和句柄公开字段拼成：句柄只有前 6 位，没有正文、提示词、密钥、完整句柄；本地 → 句柄 → 工具 → 目的地连通，计数和审计一致（#61） | 自动：`security.dataflow_no_body`；`apps/web/check.py` 的 `_dataflow_unit`、`_dataflow_session`、非本机 403 |
 | 1.17 | `remote_local_prompt` 默认 `refuse`；改成 `confirm` 要显式 `acknowledge`（否则 409 不改），设置页明示「本地提示词将发往第三方出图」；每次变更记 `security.policy_changed`；改后每一轮仍单独确认，同意只绑（这一轮, 句柄, 目的主机）（#61） | 自动：`security.remote_local_prompt_ack_required`；`apps/web/check.py` 的 `_image_skill_local_remote`、`_consent_unit` |
+| 1.18 | 开启 `MAS_STORAGE_ENCRYPTION=on` 后会话文件、本地内容、附件字节按会话加密落盘（AES-256-GCM，HKDF 会话密钥，AAD 绑会话）；拷走 `data/` 没有主密钥打不开，环境变量降级不了；挪文件 / 换密钥 / 篡改都解不开并记 `security.storage_decrypt_failed`（#62） | 自动：`security.storage_encrypted_at_rest`、`security.storage_session_isolation`、`security.storage_key_required`；`apps/web/check.py` 的 `_storage_crypto_cases` |
+| 1.19 | 主密钥不在数据目录和仓库（`storage_key_location`），`.gitignore` 挡住；沙箱禁读密钥目录；`/api/storage` 只给本机、不带密钥和路径；导入导出只走命令行 | 自动：`apps/web/check.py` 的 `_storage_crypto_cases`；人工：开启后马上 `export-key` 备份并 `verify` |
+| 1.20 | 仅内存会话（`MAS_STORAGE_ENCRYPTION=memory`）不写 `sessions/`、`artifacts/`，重启即没 | 自动：`security.storage_memory_only` |
 | 1.9 | 确认卡的出站摘要由宿主生成（`by: "host"`），不取模型或工具返回的文字；多 Agent 冒泡确认同样带摘要 | 自动：`apps/web/check.py` 的确认用例；人工：看确认卡写的目的地主机与配置一致 |
 
 ## 2. 工具权限
@@ -62,3 +65,4 @@
 1. `python apps/web/check.py` 输出 `check ok`。
 2. `python evals/gate.py` 通过（没有相对基线的回退）。
 3. 逐条过一遍上面标 `人工` 的项。
+4. 开了本地存储加密的机器：`python apps/web/storage_tool.py status` 无明文残留、`verify` 通过、主密钥已离机备份（见 [storage-encryption.md](storage-encryption.md)）。
