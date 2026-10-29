@@ -34,7 +34,11 @@
         "meta.trajectory_export": true,
         "meta.skill_mining": true,
         "image.skill_matrix": true,
-        "image.character": true
+        "image.character": true,
+        "security.storage_encrypted_at_rest": true,
+        "security.storage_session_isolation": true,
+        "security.storage_key_required": true,
+        "security.storage_memory_only": true
       }
     }
   }

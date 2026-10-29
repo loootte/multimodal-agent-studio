@@ -977,6 +977,189 @@ def _gateway_status(events: list[dict]) -> str:
     return "completed" if events and events[-1].get("type") == "message.completed" else _status(events)
 
 
+_STORAGE_ENV = ("MAS_STORAGE_ENCRYPTION", "MAS_MASTER_KEY", "MAS_MASTER_KEY_FILE")
+
+
+class _StorageSite:
+    """12.F：另起一个数据目录和站点（加密或仅内存），借用评测的假供应商。退出时把全局遥测 / 审计 / 工具配置指回主站点。"""
+
+    def __init__(self, h: Harness, mode: str, directory: str | None = None, key_file: str | None = None):
+        self.h, self.mode = h, mode
+        self.work = tempfile.mkdtemp(prefix="evals-storage-")
+        self.directory = directory or os.path.join(self.work, "data")
+        self.key_file = key_file or os.path.join(self.work, "keys", "master.key")
+        self.saved = {name: os.environ.pop(name, None) for name in _STORAGE_ENV}
+        self.site = None
+
+    def __enter__(self):
+        os.environ["MAS_STORAGE_ENCRYPTION"] = self.mode
+        os.environ["MAS_MASTER_KEY_FILE"] = self.key_file
+        self.app = server.App(self.directory, timeout_sec=8)
+        self.site = server.make_httpd(self.app, "127.0.0.1", 0)
+        check.serve(self.site)
+        self.base = f"http://127.0.0.1:{self.site.server_address[1]}"
+        status, _body = check.request("PUT", self.base + "/api/provider",
+                                      {"base_url": self.h.upstream, "model": FAKE_MODEL, "api_key": check.SECRET})
+        expect(status == 200, f"加密站点设置供应商失败：{status}")
+        return self
+
+    def __exit__(self, *_exc):
+        from services import telemetry
+        from services.gateway import egress
+        import tool_config
+
+        if self.site is not None:
+            self.site.shutdown()
+            self.site.server_close()
+        for name, value in self.saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        telemetry.configure(os.path.join(self.h.directory, "telemetry.jsonl"))
+        egress.configure(os.path.join(self.h.directory, "egress.jsonl"))
+        tool_config.install(self.h.app.tools)
+        shutil.rmtree(self.work, ignore_errors=True)
+        return False
+
+
+def _tree_bytes(directory: str) -> tuple[bytes, list[str]]:
+    blob, names = b"", []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            full = os.path.join(root, name)
+            names.append(os.path.relpath(full, directory).replace(os.sep, "/"))
+            with open(full, "rb") as handle:
+                blob += handle.read()
+    return blob, names
+
+
+def run_storage_encryption(h: Harness, task: dict, live: bool) -> dict:
+    """本地存储加密与会话隔离（12.F #62）。
+    at_rest：加密数据目录里跑一轮「记下本地内容」：供应商只见句柄；盘上（会话、字节、遥测、审计、轨迹）读不到正文；
+      拷走 data/ 到没有主密钥的地方打不开。
+    isolation：两个会话同一字节，密文文件名不同；把 A 的会话文件 / 字节挪到 B 名下解不开。
+    key_required：没有主密钥（任何 MAS_STORAGE_ENCRYPTION 都降级不了）、主密钥不对、有明文没迁移，都明确报错码。
+    memory_only：仅内存会话照常跑一轮，sessions/ 和 artifacts/ 一个文件都不写。"""
+    from packages.artifacts import crypto as C
+
+    case = task.get("case")
+    marker = task.get("marker") or "LOCAL-STORE-0000"
+    prompt_marker = "ASK-" + marker[::-1]
+
+    def one_turn(site) -> str:
+        h.provider.mode = "keep"
+        session_id = check._fresh_session(site.base)
+        sent = len(h.provider.requests)
+        try:
+            events = check._speak(site.base, session_id, f"帮我记下一段话 {prompt_marker}", timeout=12,
+                                  content=f"我的私人笔记 {marker}")
+        except SystemExit as exc:
+            raise Failed(str(exc)) from None
+        expect(any(e.get("type") == "content_request" for e in events), "没有走本地内容输入")
+        expect(_status(events) == "completed", f"状态是 {_status(events)}")
+        outgoing = json.dumps([item["body"] for item in h.provider.requests[sent:]], ensure_ascii=False)
+        expect(outgoing and marker not in outgoing, "本地内容进入了供应商请求（加密不该改变只传句柄）")
+        check.release(h.provider)
+        return session_id
+
+    if case == "at_rest":
+        with _StorageSite(h, "on") as site:
+            expect(site.app.storage.mode == "encrypted", f"没有进加密模式：{site.app.storage.public()}")
+            session_id = one_turn(site)
+            check.request("GET", site.base + "/api/trajectories")
+            raw, names = _tree_bytes(site.directory)
+            expect(marker.encode() not in raw and prompt_marker.encode() not in raw, "加密数据目录里读得到正文")
+            expect("我的私人笔记".encode() not in raw, "加密数据目录里读得到本地内容")
+            expect(not any(n.startswith("artifacts/blobs/") for n in names), "加密时字节进了全局明文库")
+            status, body = check.request("GET", site.base + f"/api/sessions/{session_id}")
+            expect(status == 200 and prompt_marker in body, "加密后本机读不回会话")
+            copied = os.path.join(site.work, "copied")
+            shutil.copytree(site.directory, copied)
+            os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(site.work, "nowhere", "master.key")
+            try:
+                server.App(copied, timeout_sec=5)
+            except C.StorageError as exc:
+                expect(exc.code == "storage_key_missing", f"错误码不对：{exc.code}")
+            else:
+                raise Failed("拷走的数据目录没有主密钥也打开了")
+            return {"files": len(names), "provider_saw_body": False, "copy_without_key": "storage_key_missing"}
+    if case == "isolation":
+        with _StorageSite(h, "on") as site:
+            sessions = site.app.sessions
+            user = "u_" + "9a" * 16
+            first, second = sessions.create(user)["session_id"], sessions.create(user)["session_id"]
+            a = sessions.add_content(first, f"本地正文 {marker}", "keep")
+            sessions.add_attachment(first, check._PNG, "image/png", "a.png")
+            b = sessions.add_attachment(second, check._PNG, "image/png", "b.png")
+            cipher = site.app.storage.cipher
+            import hashlib
+
+            digest = hashlib.sha256(check._PNG).hexdigest()
+            sealed = os.path.join(site.directory, "artifacts", "sealed")
+            name_a, name_b = cipher.blob_name(first, digest), cipher.blob_name(second, digest)
+            expect(name_a != name_b, "两个会话同一字节的密文文件名一样")
+            shutil.copy(os.path.join(sealed, first, name_a), os.path.join(sealed, second, name_b))
+            shutil.copy(os.path.join(site.directory, "sessions", first + ".json"),
+                        os.path.join(site.directory, "sessions", second + ".json"))
+            fresh = server.App(site.directory, timeout_sec=5)
+            expect(fresh.sessions.attachment_bytes(second, b["handle"]) is None, "A 的字节挪到 B 名下还能解开")
+            try:
+                fresh.sessions.get(second)
+            except Exception:
+                pass
+            else:
+                raise Failed("A 的会话文件挪到 B 名下还能打开")
+            expect(fresh.sessions.resolve_content(first, a["handle"], consume=False)[1] == "ok", "A 自己读不回来")
+            expect(fresh.sessions.decrypt_failures >= 1, "解密失败没计数")
+            return {"blob_names_differ": True, "moved_blob": "rejected", "moved_session": "rejected"}
+    if case == "key_required":
+        results = {}
+        with _StorageSite(h, "on") as site:
+            sessions = site.app.sessions
+            sessions.add_content(sessions.create("u_" + "8b" * 16)["session_id"], f"本地正文 {marker}", "keep")
+            os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(site.work, "nowhere", "master.key")
+            for mode in ("on", "off", ""):
+                os.environ["MAS_STORAGE_ENCRYPTION"] = mode
+                try:
+                    server.App(site.directory, timeout_sec=5)
+                except C.StorageError as exc:
+                    results[f"no_key[{mode or 'unset'}]"] = exc.code
+            os.environ["MAS_MASTER_KEY"] = base64.urlsafe_b64encode(C.new_master()).decode().rstrip("=")
+            try:
+                server.App(site.directory, timeout_sec=5)
+            except C.StorageError as exc:
+                results["wrong_key"] = exc.code
+            os.environ.pop("MAS_MASTER_KEY", None)
+            legacy = os.path.join(site.work, "legacy")
+            os.environ["MAS_STORAGE_ENCRYPTION"] = ""
+            plain = server.App(legacy, timeout_sec=5)
+            plain.sessions.add_content(plain.sessions.create("u_" + "8b" * 16)["session_id"], "旧明文", "keep")
+            os.environ["MAS_STORAGE_ENCRYPTION"] = "on"
+            try:
+                server.App(legacy, timeout_sec=5)
+            except C.StorageError as exc:
+                results["plaintext_left"] = exc.code
+        expect(results.get("no_key[on]") == results.get("no_key[off]") == results.get("no_key[unset]") == "storage_key_missing",
+               f"没有主密钥时没有一律拒绝：{results}")
+        expect(results.get("wrong_key") == "storage_key_mismatch", f"主密钥不对：{results}")
+        expect(results.get("plaintext_left") == "storage_migration_required", f"明文残留：{results}")
+        return results
+    if case == "memory_only":
+        with _StorageSite(h, "memory") as site:
+            expect(site.app.storage.public().get("persisted") is False, "仅内存会话没标 persisted=false")
+            session_id = one_turn(site)
+            status, body = check.request("GET", site.base + f"/api/sessions/{session_id}")
+            expect(status == 200 and prompt_marker in body, "仅内存会话本机读不回")
+            status, body = check.request("GET", site.base + "/api/storage")
+            expect(status == 200 and json.loads(body).get("mode") == "memory", f"/api/storage 不对：{body[:200]}")
+            raw, names = _tree_bytes(site.directory)
+            expect(not any(n.startswith(("sessions/", "artifacts/")) for n in names), f"仅内存会话落了盘：{names}")
+            expect(marker.encode() not in raw and prompt_marker.encode() not in raw, "仅内存会话把正文写到了盘上")
+            return {"files_written": sorted(n for n in names if not n.endswith(".jsonl"))}
+    raise Failed(f"不认识的 case：{case}")
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -996,6 +1179,7 @@ RUNNERS = {
     "egress_hardening": run_egress_hardening,
     "sandbox": run_sandbox,
     "confirm_policy": run_confirm_policy,
+    "storage_encryption": run_storage_encryption,
 }
 
 

@@ -631,6 +631,7 @@ def self_check() -> None:
         _provider_input_rules()
         _recovery()
         _artifact_cases()
+        _storage_crypto_cases()
         _redact_unit()
         _redact_history()
         _gateway_cases()
@@ -893,6 +894,336 @@ def _recovery() -> None:
             fail("重启后仍把未完成的运行当成还在请求模型")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+_STORAGE_ENV = ("MAS_STORAGE_ENCRYPTION", "MAS_MASTER_KEY", "MAS_MASTER_KEY_FILE", "MAS_BACKUP_PASSPHRASE")
+
+
+def _raw_tree(directory: str) -> tuple[bytes, list[str]]:
+    blob, names = b"", []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            full = os.path.join(root, name)
+            names.append(os.path.relpath(full, directory))
+            with open(full, "rb") as handle:
+                blob += handle.read()
+    return blob, names
+
+
+def _storage_crypto_cases() -> None:
+    """12.F #62：本地存储加密与会话隔离。拷走 data/ 没有主密钥读不出正文；会话之间密码学隔离；
+    密钥不进数据目录和仓库；备份 / 恢复 / 迁移 / 仅内存会话；性能可接受；沙箱禁读密钥目录。"""
+    from packages.artifacts import crypto as C
+    import storage_tool
+
+    saved = {name: os.environ.pop(name, None) for name in _STORAGE_ENV}
+    work = tempfile.mkdtemp(prefix="chat-storage-")
+    keys = os.path.join(work, "keys")
+    secret = "加密盘上不该出现的本机正文ZEBRA-7734"
+    asked = "用户问题里的机密词OKAPI-5521"
+    file_bytes = _PNG + b"FILE-SECRET-BYTES-QUAGGA" * 8
+    user = "u_" + "cd" * 16
+    try:
+        if C.requested_mode() is not None or not C.crypto_available():
+            fail("默认存储模式不是明文，或 cryptography 不可用")
+        # 1. 空数据目录 + on：首次启动生成主密钥（在数据目录外），写标记。
+        data = os.path.join(work, "data")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = "on"
+        os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(keys, "master.key")
+        app = server.App(data, timeout_sec=5)
+        if app.storage.mode != "encrypted" or not app.storage.created_key:
+            fail(f"首次启动没有生成主密钥：{app.storage.public()}")
+        if not os.path.isfile(os.path.join(keys, "master.key")) or C.read_marker(data) is None:
+            fail("主密钥或数据目录标记没写")
+        if any(name.endswith(".key") for _r, _d, files in os.walk(data) for name in files):
+            fail("主密钥落进了数据目录")
+        if os.name != "nt" and os.stat(os.path.join(keys, "master.key")).st_mode & 0o077:
+            fail("主密钥文件权限不是 0600")
+        master, _source = C.load_master(data)
+        sessions = app.sessions
+        sid = sessions.create(user)["session_id"]
+        kept = sessions.add_content(sid, secret, "keep")
+        sessions.add_file(sid, file_bytes, "image/png")
+        attached = sessions.add_attachment(sid, file_bytes, "image/png", "quagga.png")
+        sessions.append_turn(sid, asked, "r_" + "ef" * 16, attachments=[attached["handle"]])
+        raw, names = _raw_tree(data)
+        digest = hashlib.sha256(file_bytes).hexdigest()
+        for needle in (secret.encode("utf-8"), asked.encode("utf-8"), b"FILE-SECRET-BYTES", "quagga".encode()):
+            if needle in raw:
+                fail(f"加密后数据目录里还能读到明文：{needle[:12]!r}")
+        if digest.encode() in raw or any(digest in name for name in names):
+            fail("加密后数据目录里暴露了文件字节的 sha256")
+        if os.path.isdir(os.path.join(data, "artifacts", "blobs")):
+            fail("加密时字节仍进了全局明文工件库")
+        envelope = json.load(open(os.path.join(data, "sessions", sid + ".json"), encoding="utf-8"))
+        if not C.is_envelope(envelope) or envelope.get("alg") != "AES-256-GCM" or envelope.get("session_id") != sid:
+            fail(f"会话文件不是 mas.enc/1 信封：{sorted(envelope)}")
+        # 同一密钥重开：照常可读、句柄照常解析。
+        reopened = server.App(data, timeout_sec=5)
+        if reopened.storage.created_key or reopened.sessions.get(sid)["messages"][0]["text"] != asked:
+            fail("同一主密钥重开读不到会话")
+        item, status = reopened.sessions.resolve_content(sid, kept["handle"], consume=False)
+        if status != "ok" or item.get("text") != secret:
+            fail(f"加密后句柄解析不对：{status}")
+        if reopened.sessions.attachment_bytes(sid, attached["handle"]) != file_bytes:
+            fail("加密后附件字节读不回来")
+        # 存储状态接口：仅本机；没有密钥和路径。
+        site = server.make_httpd(reopened, "127.0.0.1", 0)
+        serve(site)
+        try:
+            code, body = request("GET", f"http://127.0.0.1:{site.server_address[1]}/api/storage")
+        finally:
+            site.shutdown()
+            site.server_close()
+        info = json.loads(body)
+        if code != 200 or info.get("mode") != "encrypted" or info.get("session_isolation") != "per_session_key":
+            fail(f"/api/storage 不对：{code} {body[:200]}")
+        key_text = base64.urlsafe_b64encode(master).decode().rstrip("=")
+        if key_text in body or keys in body or "master.key" in body or work in body:
+            fail("/api/storage 带出了密钥或路径")
+        # 2. 会话隔离：把 A 的密文挪到 B 名下解不开；字节同理；篡改一个字节也解不开。
+        other = reopened.sessions.create(user)["session_id"]
+        other_attached = reopened.sessions.add_attachment(other, file_bytes, "image/png", "copy.png")
+        if reopened.sessions.attachment_bytes(other, other_attached["handle"]) != file_bytes:
+            fail("同样字节在另一个会话里读不回来")
+        if os.path.join("sealed", sid) not in "\n".join(names) and not os.path.isdir(os.path.join(data, "artifacts", "sealed", sid)):
+            fail("加密字节没有按会话分开存")
+        cipher = reopened.storage.cipher
+        if cipher.blob_name(sid, digest) == cipher.blob_name(other, digest):
+            fail("两个会话同一字节的密文文件名一样（泄露跨会话相同）")
+        if cipher.seal_json(sid, {"a": 1})["ct"] == cipher.seal_json(sid, {"a": 1})["ct"]:
+            fail("同一明文两次加密结果一样（nonce 没换）")
+        moved = os.path.join(data, "artifacts", "sealed", other, cipher.blob_name(other, digest))
+        shutil.copy(os.path.join(data, "artifacts", "sealed", sid, cipher.blob_name(sid, digest)), moved)
+        probe = server.App(data, timeout_sec=5)
+        if probe.sessions.attachment_bytes(other, other_attached["handle"]) is not None:
+            fail("别的会话的密文字节挪过来还能解开")
+        session_copy = os.path.join(data, "sessions", other + ".json")
+        shutil.copy(os.path.join(data, "sessions", sid + ".json"), session_copy)
+        probe = server.App(data, timeout_sec=5)
+        try:
+            probe.sessions.get(other)
+        except store.StoreError:
+            pass
+        else:
+            fail("别的会话的密文会话文件挪过来还能打开")
+        tampered = dict(envelope)
+        ct = bytearray(base64.urlsafe_b64decode(tampered["ct"] + "=" * (-len(tampered["ct"]) % 4)))
+        ct[5] ^= 1
+        tampered["ct"] = base64.urlsafe_b64encode(bytes(ct)).decode().rstrip("=")
+        try:
+            cipher.open_json(sid, tampered)
+        except C.StorageError as exc:
+            if exc.detail != "tampered":
+                fail(f"篡改的原因码不对：{exc.detail}")
+        else:
+            fail("篡改过的密文还能解开")
+        failed = [e for e in probe_events(data) if e.get("kind") == "security.storage_decrypt_failed"]
+        if not failed or any(secret in json.dumps(e, ensure_ascii=False) for e in failed):
+            fail("解密失败没记 security.storage_decrypt_failed，或记录里带了正文")
+        if not any(e.get("kind") == "security.storage_key_created" for e in probe_events(data)):
+            fail("首次生成主密钥没记 security.storage_key_created")
+        # 3. 拷走 data/ 到没有主密钥的机器：打不开；环境变量也降级不了；密钥不对也打不开。
+        copied = os.path.join(work, "copied")
+        shutil.copytree(data, copied)
+        os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(work, "elsewhere", "master.key")
+        for mode in ("on", "off", ""):
+            os.environ["MAS_STORAGE_ENCRYPTION"] = mode
+            try:
+                server.App(copied, timeout_sec=5)
+            except C.StorageError as exc:
+                if exc.code != "storage_key_missing":
+                    fail(f"没有主密钥时的错误码不对：{exc.code}")
+            else:
+                fail(f"没有主密钥也打开了加密数据目录（MAS_STORAGE_ENCRYPTION={mode!r}）")
+        os.environ["MAS_MASTER_KEY"] = base64.urlsafe_b64encode(C.new_master()).decode().rstrip("=")
+        try:
+            server.App(copied, timeout_sec=5)
+        except C.StorageError as exc:
+            if exc.code != "storage_key_mismatch":
+                fail(f"密钥不对时的错误码不对：{exc.code}")
+        else:
+            fail("换一把主密钥也打开了加密数据目录")
+        os.environ["MAS_MASTER_KEY"] = key_text
+        if server.App(copied, timeout_sec=5).sessions.get(sid)["messages"][0]["text"] != asked:
+            fail("MAS_MASTER_KEY 环境变量给对密钥后读不到会话")
+        os.environ.pop("MAS_MASTER_KEY")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = "sideways"
+        try:
+            C.requested_mode()
+        except C.StorageError as exc:
+            if exc.code != "storage_mode_invalid":
+                fail("非法存储模式错误码不对")
+        else:
+            fail("非法存储模式被接受")
+        # 4. 密钥位置：不许在数据目录或仓库里。
+        for bad in (os.path.join(data, "master.key"), os.path.join(ROOT, "master.key")):
+            try:
+                C.write_master(C.new_master(), data, bad)
+            except C.StorageError as exc:
+                if exc.code != "storage_key_location":
+                    fail(f"密钥位置错误码不对：{exc.code}")
+            else:
+                fail(f"主密钥被写进了数据目录或仓库：{os.path.basename(os.path.dirname(bad))}")
+        try:
+            C.write_master(master, data, os.path.join(keys, "master.key"))
+        except C.StorageError as exc:
+            if exc.code != "storage_key_exists":
+                fail("已有主密钥被覆盖或错误码不对")
+        else:
+            fail("已有主密钥被覆盖")
+        # 5. 备份与恢复：口令加密；口令错 / 太短被拒；恢复后 key_id 一致。
+        backup = C.export_backup(master, "correct horse battery staple")
+        if key_text in json.dumps(backup):
+            fail("密钥备份里有明文密钥")
+        if C.import_backup(backup, "correct horse battery staple") != master:
+            fail("密钥备份恢复不出原密钥")
+        for words, code in (("wrong horse battery staple", "storage_backup_invalid"), ("short", "storage_passphrase_weak")):
+            try:
+                (C.import_backup(backup, words) if code == "storage_backup_invalid" else C.export_backup(master, words))
+            except C.StorageError as exc:
+                if exc.code != code:
+                    fail(f"备份口令错误码不对：{exc.code}")
+            else:
+                fail(f"备份口令问题没被拒：{code}")
+        # 6. 明文数据目录迁移：on 先要求迁移；迁移后明文没了、能读；verify 全过；decrypt 能回明文。
+        legacy = os.path.join(work, "legacy")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = ""
+        os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(work, "keys2", "master.key")
+        plain = server.App(legacy, timeout_sec=5)
+        if plain.storage.mode != "plaintext":
+            fail("默认没有走明文")
+        lid = plain.sessions.create(user)["session_id"]
+        lkept = plain.sessions.add_content(lid, secret, "keep")
+        plain.sessions.add_attachment(lid, file_bytes, "image/png", "quagga.png")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = "on"
+        try:
+            server.App(legacy, timeout_sec=5)
+        except C.StorageError as exc:
+            if exc.code != "storage_migration_required":
+                fail(f"有明文时打开加密的错误码不对：{exc.code}")
+        else:
+            fail("有明文数据时直接开了加密（明文会留在盘上）")
+        new_key = C.new_master()
+        C.write_master(new_key, legacy)
+        stats = storage_tool.migrate_encrypt(legacy, new_key)
+        if stats["sessions"] != 1 or stats["blobs"] < 1:
+            fail(f"迁移统计不对：{stats}")
+        raw, _names = _raw_tree(legacy)
+        if secret.encode("utf-8") in raw or b"FILE-SECRET-BYTES" in raw:
+            fail("迁移后数据目录里还有明文")
+        if any(C.plaintext_items(legacy).values()):
+            fail(f"迁移后还数出明文：{C.plaintext_items(legacy)}")
+        migrated = server.App(legacy, timeout_sec=5)
+        item, status = migrated.sessions.resolve_content(lid, lkept["handle"], consume=False)
+        if status != "ok" or item.get("text") != secret:
+            fail("迁移后句柄读不回正文")
+        check = storage_tool.verify(legacy, new_key)
+        if check["failed_sessions"] or check["failed_blobs"] or check["sessions"] != 1:
+            fail(f"迁移后 verify 不对：{check}")
+        if not any(e.get("kind") == "security.storage_migrated" for e in probe_events(legacy)):
+            fail("迁移没记 security.storage_migrated")
+        storage_tool.migrate_decrypt(legacy, new_key)
+        os.environ["MAS_STORAGE_ENCRYPTION"] = ""
+        back = server.App(legacy, timeout_sec=5)
+        if back.storage.mode != "plaintext" or back.sessions.attachment_bytes(lid, back.sessions.get(lid)["attachments"][0]["handle"]) != file_bytes:
+            fail("decrypt 回明文后读不到字节")
+        # 7. 仅内存会话：不写 sessions/ 和 artifacts/。
+        memory_dir = os.path.join(work, "memory")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = "memory"
+        mem = server.App(memory_dir, timeout_sec=5)
+        mid = mem.sessions.create(user)["session_id"]
+        mkept = mem.sessions.add_content(mid, secret, "keep")
+        mem.sessions.add_attachment(mid, file_bytes, "image/png", "quagga.png")
+        mem.sessions.append_turn(mid, asked, "r_" + "ab" * 16)
+        if mem.sessions.resolve_content(mid, mkept["handle"], consume=False)[1] != "ok":
+            fail("仅内存会话里句柄解析不了")
+        raw, names = _raw_tree(memory_dir)
+        if secret.encode("utf-8") in raw or asked.encode("utf-8") in raw or b"FILE-SECRET-BYTES" in raw:
+            fail("仅内存会话把正文写到了盘上")
+        if any(name.startswith(("sessions", "artifacts")) for name in names):
+            fail(f"仅内存会话写了 sessions/ 或 artifacts/：{names}")
+        if mem.storage.public().get("persisted") is not False:
+            fail("仅内存会话的状态没标 persisted=false")
+        gone = mem.sessions.create(user)["session_id"]
+        mem.sessions.add_attachment(gone, file_bytes, "image/png", "gone.png")
+        if mem.sessions.delete(gone).get("blobs_removed") != 1 or any(
+                item["session_id"] == gone for item in mem.sessions.list_sessions(user)):
+            fail("仅内存会话删不掉")
+        os.environ["MAS_STORAGE_ENCRYPTION"] = ""
+        if server.App(memory_dir, timeout_sec=5).sessions.list_sessions(user):
+            fail("仅内存会话重启后还在")
+        # 8. 轨迹导出：加密时不留正文摘要。
+        from services.meta.export import Exporter
+
+        os.environ["MAS_STORAGE_ENCRYPTION"] = "on"
+        os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(keys, "master.key")
+        os.remove(session_copy)
+        fresh = server.App(data, timeout_sec=5)
+        Exporter(data, sessions=fresh.sessions).export()
+        raw, _names = _raw_tree(os.path.join(data, "trajectories")) if os.path.isdir(os.path.join(data, "trajectories")) else (b"", [])
+        if asked.encode("utf-8") in raw or b"OKAPI" in raw:
+            fail("加密时轨迹导出里留了用户正文摘要")
+        # 9. 性能：64 KiB 会话 200 次加解密、1 MiB 文件一次存取，都要很快。
+        payload = {"messages": [{"text": "字" * 20000}]}
+        started = time.perf_counter()
+        for _ in range(200):
+            cipher.open_json(sid, cipher.seal_json(sid, payload))
+        big = os.urandom(1024 * 1024)
+        big_sum = hashlib.sha256(big).hexdigest()
+        if cipher.open_blob(sid, big_sum, cipher.seal_blob(sid, big_sum, big)) != big:
+            fail("1 MiB 字节加解密不一致")
+        spent = time.perf_counter() - started
+        if spent > 10:
+            fail(f"加密太慢：{spent:.2f}s")
+        # 10. 没装 cryptography：明确报 storage_crypto_unavailable，不悄悄写明文。
+        saved_module = sys.modules.get("cryptography.hazmat.primitives.ciphers.aead")
+        sys.modules["cryptography.hazmat.primitives.ciphers.aead"] = None
+        try:
+            C.Cipher(C.new_master())
+        except C.StorageError as exc:
+            if exc.code != "storage_crypto_unavailable":
+                fail("缺 cryptography 时错误码不对")
+        else:
+            fail("缺 cryptography 时没有报错")
+        finally:
+            if saved_module is None:
+                sys.modules.pop("cryptography.hazmat.primitives.ciphers.aead", None)
+            else:
+                sys.modules["cryptography.hazmat.primitives.ciphers.aead"] = saved_module
+        # 11. 12.D 沙箱禁读主密钥目录；.gitignore 挡住密钥文件。
+        sandbox = _sandbox_module()
+        denied = sandbox.data_dirs()
+        if os.path.realpath(keys) not in denied or os.path.realpath(os.path.join(os.path.expanduser("~"), ".mas")) not in denied:
+            fail("沙箱禁读名单里没有主密钥目录")
+        with open(os.path.join(ROOT, ".gitignore"), encoding="utf-8") as handle:
+            ignored = handle.read().split()
+        if "*.key" not in ignored or "master.key" not in ignored:
+            fail(".gitignore 没挡住主密钥文件")
+        page = open(os.path.join(WEB_DIR, "static", "index.html"), encoding="utf-8").read()
+        if 'id="storage-status"' not in page:
+            fail("设置里没有本地存储状态")
+        print(f"storage crypto ok ({spent:.2f}s for 200x64KiB + 1MiB)")
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def probe_events(data_dir: str) -> list[dict]:
+    path = os.path.join(data_dir, "telemetry.jsonl")
+    out = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    return out
 
 
 def _artifact_cases() -> None:
