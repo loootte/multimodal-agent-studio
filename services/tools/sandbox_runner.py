@@ -1,4 +1,4 @@
-"""第三方工具包的子进程入口（12.D #60）。只由 tools/sandbox.py 启动，不要直接 import。
+"""第三方工具包的子进程入口（12.D #60）。只由 services/tools/sandbox.py 启动，不要直接 import。
 
 协议（一行一个 JSON，UTF-8）：
 - 父进程 → 子进程第一行：{"module", "pack_dir", "arguments", "config", "permissions", "write_roots", "deny_roots", "scratch", "function"}。

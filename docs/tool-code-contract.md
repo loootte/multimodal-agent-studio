@@ -16,7 +16,7 @@ my_tool/
 
 - `entry.module` 必须是相对路径、以 `.py` 结尾、不含 `..`；装的时候和每次发现时都用 `realpath` 核对文件确实在工具目录里，否则 `invalid_manifest`（“entry.module 指向工具目录外面。”）。
 - 内置工具（`toolpacks/builtin/`）的代码是受审查的仓库代码，在宿主进程里 import（`apps/web/module_tools.load_builtin`，同样做 realpath 检查，改了文件自动重新加载）。
-- 安装的工具（`toolpacks/installed/`）的代码**只在沙箱子进程里跑**（`poc/tools/sandbox.py`，见 [tool-sandbox.md](tool-sandbox.md)），宿主从不 import 它。
+- 安装的工具（`toolpacks/installed/`）的代码**只在沙箱子进程里跑**（`services/tools/sandbox.py`，见 [tool-sandbox.md](tool-sandbox.md)），宿主从不 import 它。
 
 ## 清单里多出来的字段
 
@@ -125,7 +125,7 @@ def preview(fields, ctx):
 
 - 契约调用和值检查：`apps/web/module_tools.py`
 - 分级守卫：`apps/web/content_guard.py`
-- 清单校验、安装确认、授权：`poc/tools/packs.py`（`entry_problem`、`has_code`、`inspect`、`install`）
-- 沙箱里按函数名调用：`poc/tools/sandbox.py`、`sandbox_runner.py`（`function` = `call` / `catalog` / `preview` / `run`）
+- 清单校验、安装确认、授权：`services/tools/packs.py`（`entry_problem`、`has_code`、`inspect`、`install`）
+- 沙箱里按函数名调用：`services/tools/sandbox.py`、`sandbox_runner.py`（`function` = `call` / `catalog` / `preview` / `run`）
 - 表单和对话：`apps/web/chat_run.py`（`start_form_tool`、`_execute_module_tool`）、`apps/web/static/character.js`
 - 检查：`apps/web/check.py` 的 `_pack_character_cases`、`_tool_install_cases`；评测 `image.form_tool_*`、`image.install_*form_tool*`、`image.install_legacy_preset_pack_rejected`

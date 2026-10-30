@@ -7,7 +7,7 @@ import comfy_client
 import comfy_poc
 import template_fill
 
-import tools._support as common
+import services.tools._support as common
 
 
 def spec(aspects: list[str], styles: list[str]) -> dict:
@@ -103,7 +103,7 @@ def generate(arguments: dict) -> dict:
 
 
 def tools():
-    from tools.api import Tool
+    from services.tools.api import Tool
 
     styles = sorted(common.load_styles())
     aspects = list(comfy_poc.ASPECTS)

@@ -134,7 +134,7 @@ python apps/web/server.py --port 0 --desktop-token <secret> --ready-file ready.j
 - `security.desktop_keychain_not_in_webview`：key 只在钥匙串，不落数据目录、页面接口拿不到；`js_api` 只有白名单方法；删掉钥匙串条目后 `remote_missing_key` 且消息不含 key。
 - `security.desktop_default_encrypted`：桌面默认加密，全新数据目录是密文、主密钥在钥匙串；已有明文时预检拒绝并给迁移命令。
 - `security.desktop_file_handle_only`：原生对话框选文件只回 `{ok, bytes}`，提交给运行的只有字节和媒体类型。
-- 现有 `apps/web/check.py`、`poc/tools/check.py`、`evals/run.py`、`evals/gate.py` 在 Web 模式（无令牌）下行为不变。
+- 现有 `apps/web/check.py`、`python -m services.tools.check`、`evals/run.py`、`evals/gate.py` 在 Web 模式（无令牌）下行为不变。
 
 ## Windows 双击入口（本机 Python，无内嵌 DLL）
 

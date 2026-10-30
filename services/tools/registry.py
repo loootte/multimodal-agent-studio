@@ -1,4 +1,6 @@
-"""从 toolpacks/ 的清单注册工具（见 tools/packs.py）。load_modules/collect 留给目录探测用。"""
+"""从 toolpacks/ 的清单注册工具（见 services/tools/packs.py）。
+
+load_modules/collect 不是注册路径，只给 services/tools/check.py 做规范探测（Tool 形状、外部参数拦截）。"""
 
 from __future__ import annotations
 
@@ -6,8 +8,8 @@ import importlib.util
 import os
 import sys
 
-from tools.api import Tool, ToolSpecError, tool_error
-from tools.schema import check as check_schema
+from services.tools.api import Tool, ToolSpecError, tool_error
+from services.tools.schema import check as check_schema
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKED_EXTERNAL = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
@@ -25,9 +27,14 @@ def external_contracts() -> list[dict]:
     return [_openai(item) for item in audience_tools("external")]
 
 
-def module(audience: str, stem: str):
-    audience_tools(audience)
-    return sys.modules[f"tools.{audience}.{stem}"]
+def module(name: str):
+    """内置 python 工具的模块（toolpacks/builtin/<name>/tool.py）。检查里取模块级辅助函数用。"""
+    from services.tools import packs
+
+    pack = packs.find(name)
+    if pack is None or not pack.builtin:
+        raise ToolSpecError(f"没有内置工具 {name}。")
+    return packs.load_module(pack)
 
 
 def validate_tool(name: str, arguments: dict) -> dict | None:
@@ -42,7 +49,7 @@ def validate_tool(name: str, arguments: dict) -> dict | None:
 
 def call_tool(name: str, arguments: dict) -> dict:
     """执行已注册的本机工具。"""
-    from tools._support import ensure_comfy_path, public_comfy_message
+    from services.tools._support import ensure_comfy_path, public_comfy_message
 
     ensure_comfy_path()
     import artifacts
@@ -131,8 +138,8 @@ def audience_tools(audience: str) -> list[Tool]:
     """只从工具包清单注册（toolpacks/）。external 给模型看，internal 是本机实现。"""
     if audience not in ("internal", "external"):
         raise ToolSpecError(f"没有这个受众：{audience}。")
-    from tools import packs
-    from tools._support import ensure_comfy_path
+    from services.tools import packs
+    from services.tools._support import ensure_comfy_path
 
     ensure_comfy_path()
     try:
@@ -151,7 +158,7 @@ def audience_tools(audience: str) -> list[Tool]:
 
 
 def _external(pack) -> Tool | None:
-    from tools import packs
+    from services.tools import packs
 
     parameters = packs.resolve_parameters(pack)
     if parameters is None:
@@ -163,7 +170,7 @@ def _external(pack) -> Tool | None:
 
 
 def _internal(pack) -> Tool | None:
-    from tools import packs
+    from services.tools import packs
 
     if pack.manifest["entry"]["kind"] != "python":
         return None
@@ -183,7 +190,7 @@ def _internal(pack) -> Tool | None:
         return packs.gate(_pack) or check_schema(_pack.name, _parameters, arguments)
 
     def run(arguments, _pack=pack, _validate=validate):
-        from tools import sandbox
+        from services.tools import sandbox
 
         problem = _validate(arguments)
         if problem:

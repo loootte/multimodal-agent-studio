@@ -163,7 +163,7 @@ def registered_tools() -> list[str]:
     from services.runtime.tools import _ensure
 
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     return [pack.name for pack in packs.discover()]
 
@@ -393,7 +393,7 @@ def backends_of(tool: str) -> list[str]:
     from services.runtime.tools import _ensure
 
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     try:
         pack = packs.find(tool)

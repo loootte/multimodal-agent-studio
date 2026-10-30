@@ -8,7 +8,8 @@
 
 entry.kind（#86）：
 - host    内置工具，宿主代码执行（名单 HOST_TOOLS）。
-- python  call(arguments, config)；内置在 poc/tools/internal/，第三方在沙箱子进程里跑。
+- python  call(arguments, config)；代码一律是工具目录里的 .py。内置的（名单 BUILTIN_PYTHON）固定为
+          toolpacks/builtin/<name>/tool.py，在宿主进程里跑；第三方在沙箱子进程里跑。
 - module  表单工具：代码是工具目录里的 .py（契约见 docs/tool-code-contract.md：catalog / preview / run），
           内置的在宿主进程里跑（受信任），第三方的在沙箱子进程里跑。content.rating=adult 的工具不管代码写了什么，
           宿主的 content_guard 都会在调用前后强制检查。
@@ -76,7 +77,7 @@ BUILTIN_PYTHON = {
     "lookup_demo": frozenset(),
     "read_skill": frozenset(),
 }
-BUILTIN_MODULES = "poc/tools/internal/"
+BUILTIN_ENTRY = "tool.py"  # 内置 python 工具的入口：只能是自己工具目录里的 tool.py（#89）
 # 12.E #61：只回句柄和元数据、不联网的内置读取工具。它们读本地内容但结果里没有正文，可以 confirm=never；
 # 其余凡是声明了 network 或 read_local_content 的工具（内置和第三方一样）都必须 confirm=always，校验时就拒绝。
 HANDLE_ONLY_READERS = frozenset({"list_local_content", "retrieve_local"})
@@ -180,15 +181,15 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif entry["kind"] == "host" and data.get("name") not in HOST_TOOLS:
         problems.append("entry.kind=host 只限内置工具名单（packs.HOST_TOOLS）。")
     elif entry["kind"] == "python" and builtin and (
-            data.get("name") not in BUILTIN_PYTHON or not str(entry.get("module") or "").startswith(BUILTIN_MODULES)):
-        problems.append(f"内置 python 工具只限名单（packs.BUILTIN_PYTHON），模块要在 {BUILTIN_MODULES} 下。")
+            data.get("name") not in BUILTIN_PYTHON or entry.get("module") != BUILTIN_ENTRY):
+        problems.append(f"内置 python 工具只限名单（packs.BUILTIN_PYTHON），入口必须是工具目录里的 {BUILTIN_ENTRY}。")
     elif entry["kind"] == "module" and builtin and data.get("name") not in HOST_TOOLS:
         problems.append("内置 module 工具只限内置工具名单（packs.HOST_TOOLS）。")
     elif entry["kind"] in ("python", "module"):
         module = entry.get("module")
         if not isinstance(module, str) or not module.endswith(".py"):
             problems.append("entry.module 必须是 .py 文件。")
-        elif (not builtin or entry["kind"] == "module") and not _relative_inside(module):
+        elif not _relative_inside(module):
             problems.append("entry.module 必须是工具目录里的相对路径（不能是绝对路径，不能有 ..）。")
     if entry and isinstance(entry, dict) and entry.get("kind") == "python" and params is None and not builtin:
         problems.append("第三方工具必须声明 parameters。")
@@ -277,9 +278,9 @@ def _content_problems(content, kind) -> list[str]:
 
 def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
     """入口代码必须是工具目录里真实存在的文件（解开符号链接以后也还在目录里）。
-    内置 python 工具的代码在 poc/tools/internal/（仓库里受审查），不按工具目录查。"""
+    内置和第三方一样按工具目录查（#89：内置 python 工具的代码也在自己的目录里）。"""
     entry = data.get("entry") or {}
-    if entry.get("kind") not in ("python", "module") or (builtin and entry.get("kind") == "python"):
+    if entry.get("kind") not in ("python", "module"):
         return None
     root = os.path.realpath(folder)
     module = os.path.realpath(os.path.join(root, entry["module"]))
@@ -410,9 +411,8 @@ class Pack:
         entry = self.manifest["entry"]
         if entry["kind"] not in ("python", "module"):
             return None
-        # 内置 python 工具的模块在 poc/tools/internal/（相对仓库根）；module 工具的代码一律在自己的工具目录里。
-        base = ROOT if (self.builtin and entry["kind"] == "python") else self.folder
-        return os.path.normpath(os.path.join(base, entry["module"]))
+        # 代码一律在工具自己的目录里（内置 python 工具也是，#89）。
+        return os.path.normpath(os.path.join(self.folder, entry["module"]))
 
     @property
     def rating(self) -> str:
@@ -612,7 +612,7 @@ def needs_confirm(pack: Pack, arguments=None) -> bool:
 
 
 def load_module(pack: Pack):
-    """只装载内置工具的模块。第三方包的代码一律不进宿主进程（12.D），由 tools/sandbox.py 在子进程里跑。"""
+    """只装载内置工具的模块。第三方包的代码一律不进宿主进程（12.D），由 services/tools/sandbox.py 在子进程里跑。"""
     if not pack.builtin:
         raise PackError("sandbox_required", f"{pack.name} 是第三方工具包，只能在沙箱子进程里运行。")
     path = pack.module_path()
@@ -621,8 +621,8 @@ def load_module(pack: Pack):
     key = (path, os.path.getmtime(path))
     if key in _modules:
         return _modules[key]
-    stem = os.path.splitext(os.path.basename(path))[0]
-    full_name = f"tools.internal.{stem}"
+    # 每个内置工具的入口都叫 tool.py，模块名按工具名区分，免得互相覆盖。
+    full_name = f"_mas_builtin_tool_{pack.name}"
     if full_name in sys.modules:
         loaded = sys.modules[full_name]
     else:
@@ -630,7 +630,6 @@ def load_module(pack: Pack):
         if spec is None or spec.loader is None:
             raise PackError("invalid_manifest", f"无法装载 {path}。")
         loaded = importlib.util.module_from_spec(spec)
-        loaded.__package__ = "tools.internal"
         sys.modules[full_name] = loaded
         try:
             spec.loader.exec_module(loaded)
@@ -651,7 +650,7 @@ def resolve_parameters(pack: Pack) -> dict | None:
     params = json.loads(json.dumps(params))
     for key, source in sources.items():
         if source == "comfyui.styles":
-            from tools._support import load_styles
+            from services.tools._support import load_styles
 
             styles = sorted(load_styles())
             if styles:

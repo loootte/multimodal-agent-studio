@@ -1,7 +1,7 @@
 """模型能调用的本机生成工具。
 
-实现放在 poc/tools/internal。这个文件保留列表、校验、调用和命令行入口。
-目录里多一个符合规范的文件，这里的列表会跟着变。
+实现在各自的工具包目录（toolpacks/builtin/<名字>/tool.py），引擎在 services/tools。
+这个文件保留列表、校验、调用和命令行入口。列表来自 toolpacks/ 清单。
 工具列表里没有 ComfyUI 节点。参数先校验，再交给模板填充和客户端。
 标准输出只有工具结果，没有 workflow JSON。
 """
@@ -18,12 +18,12 @@ import comfy_poc
 import template_fill
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-POC_DIR = os.path.dirname(SCRIPT_DIR)
-if POC_DIR not in sys.path:
-    sys.path.append(POC_DIR)
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+if REPO_ROOT not in sys.path:  # 命令行直接跑本文件时，仓库根不在路径上；引擎按 services.tools 导入
+    sys.path.append(REPO_ROOT)
 
-from tools._support import listen_run, load_styles, public_comfy_message, tool_error
-from tools.registry import call_tool, tool_names, tool_specs, validate_tool
+from services.tools._support import listen_run, load_styles, public_comfy_message, tool_error
+from services.tools.registry import call_tool, tool_names, tool_specs, validate_tool
 
 TOOL_NAMES = tool_names()
 
@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(tool_specs(), ensure_ascii=False, indent=2))
             return
         if args.command == "check":
-            from tools.check import self_check
+            from services.tools.check import self_check
 
             self_check()
             print("self_check ok")

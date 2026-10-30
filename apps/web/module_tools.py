@@ -2,7 +2,7 @@
 
 宿主负责：
 - 加载：内置工具在本进程 import（代码必须在自己目录里，解开符号链接也不能跑出去）；
-  已安装的工具每次调用都在沙箱子进程里跑（tools/sandbox.py），先过依赖和授权（packs.gate）。
+  已安装的工具每次调用都在沙箱子进程里跑（services/tools/sandbox.py），先过依赖和授权（packs.gate）。
 - 约定的函数：catalog(ctx) → 表单目录；preview(fields, ctx) / run(args, ctx) → {prompt, summary, ...}；
   可选 check_config(config, ctx)。拒绝时返回 {"error": {code, message, field}}。
 - 守卫：调用前后都过 content_guard（rating=adult 的工具一律受宿主守卫，与工具代码无关）。
@@ -155,7 +155,7 @@ def _call(pack, function: str, payload, cfg: dict):
             print(f"module tool {pack.name}.{function} failed {type(exc).__name__}", file=sys.stderr)
             raise GuardError("tool_error", "工具代码出错了。") from exc
     else:
-        from tools import sandbox
+        from services.tools import sandbox
 
         result = sandbox.run(pack, payload if function != "catalog" else {}, ctx, pack.effective(), function=function)
         if isinstance(result, dict) and result.get("ok") is False and isinstance(result.get("error"), dict):

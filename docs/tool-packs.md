@@ -68,7 +68,7 @@
 - 数据目录（会话、句柄、配置、审计）不能读、不能列；本地内容只能经句柄接口，而句柄接口目前不开放给第三方包。
 - 环境变量白名单，密钥和配置只经 `config` 显式注入。
 
-**例外：内置工具不进沙箱。** `HOST_TOOLS` 里的宿主工具和 `BUILTIN_PYTHON` 里的 `generate_image` / `generate_video` / `lookup_demo` / `read_skill` 在网页服务进程里运行（模块必须在 `poc/tools/internal/` 下），受名单和授权复核约束。其中出图、出视频要访问**本机或局域网的 ComfyUI**（Windows 上通常是 `http://127.0.0.1:8188`），这是唯一被允许连本机地址的出网，按“本机白名单客户端”处理：它走 12.A 审计（渠道 `comfyui_local`）和 12.C 策略，但不受沙箱限制。第三方包想连本机 ComfyUI 会被拒，请用内置 `generate_image`。
+**例外：内置工具不进沙箱。** `HOST_TOOLS` 里的宿主工具和 `BUILTIN_PYTHON` 里的 `generate_image` / `generate_video` / `lookup_demo` / `read_skill` 在网页服务进程里运行（代码必须是自己工具目录里的 `tool.py`，即 `toolpacks/builtin/<名字>/tool.py`，清单写 `"module": "tool.py"`），受名单和授权复核约束。其中出图、出视频要访问**本机或局域网的 ComfyUI**（Windows 上通常是 `http://127.0.0.1:8188`），这是唯一被允许连本机地址的出网，按“本机白名单客户端”处理：它走 12.A 审计（渠道 `comfyui_local`）和 12.C 策略，但不受沙箱限制。第三方包想连本机 ComfyUI 会被拒，请用内置 `generate_image`。
 
 ## 未做
 

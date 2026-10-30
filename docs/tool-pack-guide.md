@@ -2,7 +2,7 @@
 
 这份指南写给想给本项目**加一个新工具**的人：什么样的工具能装、包里放什么、`tool.json` 每个字段怎么写、入口函数怎么写、怎么在网页里安装、配置、在对话里用、导出和卸载，以及常见报错怎么改。
 
-字段的简明参考见 [tool-packs.md](tool-packs.md)，沙箱细节见 [tool-sandbox.md](tool-sandbox.md)，表单工具（`entry.kind: "module"`，例如角色定制）的函数约定见 [tool-code-contract.md](tool-code-contract.md)。本文内容以代码为准：`poc/tools/packs.py`（清单校验、安装、授权）、`poc/tools/sandbox.py` 和 `poc/tools/sandbox_runner.py`（子进程沙箱）、`poc/tools/registry.py`（注册和调用）、`poc/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
+字段的简明参考见 [tool-packs.md](tool-packs.md)，沙箱细节见 [tool-sandbox.md](tool-sandbox.md)，表单工具（`entry.kind: "module"`，例如角色定制）的函数约定见 [tool-code-contract.md](tool-code-contract.md)。本文内容以代码为准：`services/tools/packs.py`（清单校验、安装、授权）、`services/tools/sandbox.py` 和 `services/tools/sandbox_runner.py`（子进程沙箱）、`services/tools/registry.py`（注册和调用）、`services/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
 
 ## 1. 工具包是什么
 
@@ -82,7 +82,7 @@ dice_roll/              ← 目录名必须和 name 一样
 
 ### `parameters` 里能用的 JSON Schema 关键字
 
-本机校验（`poc/tools/schema.py`）实际检查的只有：`properties`、`required`、`additionalProperties: false`、每个属性的 `type`（`string`、`integer`、`number`、`boolean`、`object`、`array`）、`enum`、`minLength`、`minimum`、`maximum`、`items.type`。其他关键字（如 `pattern`、`maxLength`）会原样给模型看，但本机不检查，入口函数里要自己再校验。每个属性都写 `description`，模型靠它理解参数。
+本机校验（`services/tools/schema.py`）实际检查的只有：`properties`、`required`、`additionalProperties: false`、每个属性的 `type`（`string`、`integer`、`number`、`boolean`、`object`、`array`）、`enum`、`minLength`、`minimum`、`maximum`、`items.type`。其他关键字（如 `pattern`、`maxLength`）会原样给模型看，但本机不检查，入口函数里要自己再校验。每个属性都写 `description`，模型靠它理解参数。
 
 ### `config` 每一项
 

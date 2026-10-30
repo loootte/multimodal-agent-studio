@@ -70,11 +70,11 @@ ADR 0003 已规定：本地内容只以句柄进入模型上下文，网关在�
 
 细节见 [tool-sandbox.md](../tool-sandbox.md)。
 
-- 第三方包每次调用起一个子进程（`python -I -B -X utf8 poc/tools/sandbox_runner.py`），JSON 行协议；子进程装 `sys.addaudithook` 钩子强制权限：没 `network` 拦所有连接和域名解析；写只许临时目录和（授权 `write_files` 后）`<data_dir>/toolpack_data/<名字>/`；数据目录禁读禁列；起进程、ctypes 拒绝。超时 `MAS_TOOLPACK_TIMEOUT_SEC`（默认 30 秒）。
+- 第三方包每次调用起一个子进程（`python -I -B -X utf8 services/tools/sandbox_runner.py`（#89 前在 `poc/tools/`）），JSON 行协议；子进程装 `sys.addaudithook` 钩子强制权限：没 `network` 拦所有连接和域名解析；写只许临时目录和（授权 `write_files` 后）`<data_dir>/toolpack_data/<名字>/`；数据目录禁读禁列；起进程、ctypes 拒绝。超时 `MAS_TOOLPACK_TIMEOUT_SEC`（默认 30 秒）。
 - 环境变量白名单 + 配置显式注入：子进程拿不到 API key、令牌；密钥只经 `config`。
 - 出网：子进程每次连接经 IPC 问宿主。宿主裁决（无 `network` → `permission_denied`；回环 / 未指定 / 链路本地 / 解析不出 → `egress_policy_denied`；其余放行）并记 12.A 审计，新渠道 `toolpack`（策略不透明：只看权限和目的地，不看载荷），记录新增 `tool` 字段。
 - 越权结果：`permission_denied` 带 `violations`（`network` / `write_files` / `read_local_content` / `process` / `native`），不写 `executed`，遥测 `security.sandbox_denied`。另有 `tool_timeout`、`tool_error`、`sandbox_error`；进程内装载第三方代码报 `sandbox_required`。
-- 运行时二次核对：授权记录升级为 `mas.grant/2`（权限 + 版本 + 包内容摘要）；缺失、旧格式、内容被改都是 `permission_denied`（`grant: missing / outdated / changed`）。生效权限 = 声明 ∩ 授权。内置工具收紧为名单 `HOST_TOOLS` / `BUILTIN_PYTHON`（各自写明需要的权限，需要 ⊆ 声明 ⊆ 授权），内置模块必须在 `poc/tools/internal/`。
+- 运行时二次核对：授权记录升级为 `mas.grant/2`（权限 + 版本 + 包内容摘要）；缺失、旧格式、内容被改都是 `permission_denied`（`grant: missing / outdated / changed`）。生效权限 = 声明 ∩ 授权。内置工具收紧为名单 `HOST_TOOLS` / `BUILTIN_PYTHON`（各自写明需要的权限，需要 ⊆ 声明 ⊆ 授权），内置模块当时必须在 `poc/tools/internal/`（#89 起改为必须是自己工具目录里的 `tool.py`）。
 - 安装前权限审阅：`inspect` 返回 `review`，网页逐项勾选后才能安装。
 - 例外：内置工具不进沙箱；`generate_image` / `generate_video` 访问本机 ComfyUI 是唯一允许的本机出网，仍走 12.A 审计和 12.C 策略。
 - 局限：审计钩子是 Python 层尽力而为，C 扩展可绕过；操作系统级隔离（Job Object / seccomp / namespace）和第三方包的句柄 API 留作后续。

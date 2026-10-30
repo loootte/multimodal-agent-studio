@@ -18,7 +18,7 @@
 
 - **只给工具契约。** 第三方模型看到的是工具名字、说明和参数模式，以及句柄、种类、大小、用途、状态这些公开字段。参数里没有正文、字节、路径或原始文件名。模型自己写的画面描述丢掉，不作为本地正文。
 - **不读取本地数据。** 供应商请求、工具回传和之后的轮次都不带已入库的正文或文件字节。历史里出现过的正文换成不含正文的句柄说明。`services/gateway` 是唯一出口，打开连接之前检查载荷。正文出现在工具契约以外就失败，连接不打开。工具契约里的说明文字不参与这道检查。
-- **专用工具管理。** 接受、列出、删除、检索和按句柄使用，都走已注册的工具。运行时校验参数并执行。模型在文本里说已经执行，不算执行。现在这组工具是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content` 和 `generate_image`。`packages/artifacts` 按校验和保存文件字节，会话记录只留句柄。不为此新建 MCP 服务器、数据库或 `services/tools`。
+- **专用工具管理。** 接受、列出、删除、检索和按句柄使用，都走已注册的工具。运行时校验参数并执行。模型在文本里说已经执行，不算执行。现在这组工具是 `accept_local_content`、`list_local_content`、`retrieve_local`、`forget_local_content` 和 `generate_image`。`packages/artifacts` 按校验和保存文件字节，会话记录只留句柄。不为此新建 MCP 服务器或数据库。（当时也不建 `services/tools`；issue #89 起工具引擎放在那里，隔离规则不变。）
 - **外部访问要授权。** 外部包括第三方模型、其他会话、ComfyUI，以及以后任何本机进程以外的调用方。一次授权只覆盖该工具写明的动作：文字句柄允许本机把用户提交的文字注入 `generate_image`；文件句柄不允许把字节交给 ComfyUI；删除只作用于本会话，并清掉本会话消息里的正文副本。其他会话看到这枚句柄，如同它不存在。进程只听 `127.0.0.1`。现在没有登录，也没有远程授权，缺省拒绝。
 
 ## 后果
@@ -26,5 +26,5 @@
 - 现行路径写在 [docs/architecture.md](../architecture.md)，出口检查写在 [docs/model-gateway.md](../model-gateway.md)。离线检查在 `apps/web/check.py`。
 - 新工具若要读或写本地数据，参数收句柄，结果只回公开字段，并继续接受网关的同一道出口检查。
 - 本决定不实现登录、跨用户授权或远程 API。要做那些能力时，先写明谁授权、授权看哪一笔数据，再另写架构决定。
-- 工具放在 `poc/tools` 并按目录自注册。MCP 如何投影同一份契约，见 [ADR 0004](0004-tool-governance.md)。那份决定不新开 MCP 服务器，也不改变本决定的隔离。
+- 工具按 `toolpacks/*/tool.json` 清单注册，引擎在 `services/tools`（issue #31、#89）。MCP 如何投影同一份契约，见 [ADR 0004](0004-tool-governance.md)。那份决定不新开 MCP 服务器，也不改变本决定的隔离。
 - issue #11、issue #12 和本决定都不把路线图任一阶段标成完成。

@@ -144,11 +144,8 @@ def comfy_fields() -> list[dict]:
 
 
 def _packs():
-    tools_dir = os.path.join(ROOT, "poc")
-    if tools_dir not in sys.path:
-        sys.path.append(tools_dir)
     _ensure_poc()
-    from tools import packs
+    from services.tools import packs
 
     return packs
 
@@ -512,7 +509,7 @@ def install(store: ToolConfigStore) -> None:
     import comfy_client
 
     packs = _packs()
-    from tools import sandbox
+    from services.tools import sandbox
 
     # 12.D：tools.json 所在的数据目录（会话、句柄、审计都在这里）对第三方包的沙箱一律不可读写。
     sandbox.DATA_DIR = os.path.dirname(os.path.abspath(store.path))

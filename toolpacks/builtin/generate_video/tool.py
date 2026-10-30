@@ -10,7 +10,7 @@ import comfy_client
 import comfy_poc
 import template_fill
 
-import tools._support as common
+import services.tools._support as common
 
 
 def fields() -> dict:
@@ -202,7 +202,7 @@ def _policy(arguments: dict, job: dict) -> dict | None:
 
 
 def tools():
-    from tools.api import Tool
+    from services.tools.api import Tool
 
     aspects = list(comfy_poc.ASPECTS)
     spec_body = spec(aspects)

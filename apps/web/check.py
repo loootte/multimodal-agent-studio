@@ -809,10 +809,7 @@ def _agent_cases() -> None:
 
 
 def _mcp_projection() -> None:
-    poc_root = os.path.join(ROOT, "poc")
-    if poc_root not in sys.path:
-        sys.path.append(poc_root)
-    from tools.mcp import projection_error
+    from services.tools.mcp import projection_error
 
     message = projection_error()
     if message:
@@ -4904,8 +4901,9 @@ def _auth_cancel_case(box: ComfyState, port: int, bearer: str) -> None:
 
 def _video_defaults_case(base: str, box: ComfyState) -> None:
     """网页里没有视频入口；视频工具读同一份配置：固定种子、步数、超时。"""
-    sys.path.insert(0, os.path.join(ROOT, "poc"))
-    from tools.internal import video
+    from services.tools import packs as _packs
+
+    video = _packs.load_module(_packs.find("generate_video"))
 
     status, body = request("PUT", base + "/api/tools/comfyui/config", {"values": {
         "video_workflow": "workflows/video_api.json", "video_fields": "workflows/video.fields.json",
@@ -5551,7 +5549,7 @@ def _config_scope_unit(directory: str) -> dict:
     if injection.active_tool() is not None:
         fail("tool_scope 退出后没有复位")
     runtime_tools._ensure()
-    from tools import registry as tool_registry
+    from services.tools import registry as tool_registry
 
     seen = []
     saved = tool_registry.call_tool, tool_registry.validate_tool, chat_run._execute_web_tool_scoped
@@ -5910,10 +5908,7 @@ BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_con
 
 
 def _packs_module():
-    poc_root = os.path.join(ROOT, "poc")
-    if poc_root not in sys.path:
-        sys.path.append(poc_root)
-    from tools import packs
+    from services.tools import packs
 
     return packs
 
@@ -6002,7 +5997,7 @@ def _toolpack_cases() -> None:
     packs = _packs_module()
     from services.runtime.loop import _asks_confirm
     from services.runtime.tools import execute_tool, openai_tools, tool_mutates
-    from tools.registry import audience_tools
+    from services.tools.registry import audience_tools
 
     found = {pack.name: pack for pack in packs.discover()}
     if set(found) != BUILTIN_TOOLS or not all(pack.builtin for pack in found.values()):
@@ -6155,7 +6150,7 @@ PROBE = os.path.join(ROOT, "evals", "fixtures", "sandbox_probe")
 
 def _sandbox_module():
     _packs_module()
-    from tools import sandbox
+    from services.tools import sandbox
 
     return sandbox
 
@@ -6183,13 +6178,25 @@ def _sandbox_cases() -> None:
     from services.gateway import egress
     from services.runtime.tools import authorize, execute_tool
 
-    # 内置工具名单：host 入口只给名单里的名字；内置 python 模块必须在名单里、在 poc/tools/internal/ 下。
+    # 内置工具名单：host 入口只给名单里的名字；内置 python 模块必须在名单里，入口是自己工具目录里的 tool.py（#89）。
     host = _pack_manifest("rogue_host", entry={"kind": "host"})
     if not any("名单" in item for item in packs.validate_manifest(host, builtin=True)):
         fail(f"不在名单里的 host 工具没有被拒绝：{packs.validate_manifest(host, builtin=True)}")
     outside = _pack_manifest("lookup_demo", entry={"kind": "python", "module": "toolpacks/examples/dice_roll/tool.py"})
     if not packs.validate_manifest(outside, builtin=True):
-        fail("内置 python 工具的模块不在 poc/tools/internal/ 也通过了")
+        fail("内置 python 工具的入口不是自己目录里的 tool.py 也通过了")
+    for module in ("../generate_image/tool.py", "poc/tools/internal/demo.py", "demo.py"):
+        if not packs.validate_manifest(_pack_manifest("lookup_demo", entry={"kind": "python", "module": module}), builtin=True):
+            fail(f"内置 python 工具的入口指向 {module} 也通过了")
+    for name in packs.BUILTIN_PYTHON:
+        pack = packs.find(name)
+        same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+        if pack is None or not pack.builtin or pack.manifest["entry"] != {"kind": "python", "module": "tool.py"} \
+                or not same(os.path.dirname(pack.module_path()), pack.folder) or not os.path.isfile(pack.module_path()):
+            fail(f"内置 python 工具 {name} 的代码不在自己的工具目录里")
+    import glob
+    if glob.glob(os.path.join(ROOT, "poc", "tools", "**", "*.py"), recursive=True):
+        fail("poc/tools 应该已经删除（#89：引擎在 services/tools）")
     for name, needs in packs.HOST_TOOLS.items():
         pack = packs.find(name)
         if pack is None or not pack.builtin:
@@ -6809,8 +6816,7 @@ def main() -> None:
 def _character_units() -> None:
     """#53：清单、默认值、预设拼接、自定义覆盖、配置覆盖预设、安全规则。"""
     import character
-    sys.path.insert(0, os.path.join(ROOT, "poc", "tools"))
-    import packs
+    from services.tools import packs
 
     with open(os.path.join(ROOT, "toolpacks", "builtin", "character_image", "tool.json"), encoding="utf-8") as handle:
         manifest = json.load(handle)

@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
-
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _ROOT not in sys.path:
-    sys.path.append(_ROOT)
-
 from packages.contracts.mcp import dispatch, tools_from_openai, tools_from_specs
 
-from tools.registry import call_tool, external_contracts, tool_specs, validate_external
+from services.tools.registry import call_tool, external_contracts, tool_specs, validate_external
 
 BLOCKED = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
 
@@ -58,7 +51,7 @@ def projection_error() -> str | None:
 
 
 def _call_does_not_execute() -> str | None:
-    from tools._support import ensure_comfy_path
+    from services.tools._support import ensure_comfy_path
 
     ensure_comfy_path()
     import agent_tools

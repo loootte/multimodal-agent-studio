@@ -85,7 +85,7 @@ python poc/comfyui/agent_tools.py call generate_image --json-file image-call.jso
 python poc/comfyui/agent_tools.py call generate_video --json-file video-call.json
 ```
 
-工具按 `toolpacks/` 下的清单注册，见 [工具包规范](../../docs/tool-packs.md)。`agent_tools.py` 仍是命令入口。MCP 投影在 `poc/tools/mcp.py`，不监听端口。规范见 [ADR 0004](../../docs/adr/0004-tool-governance.md)。
+工具按 `toolpacks/` 下的清单注册，见 [工具包规范](../../docs/tool-packs.md)。`agent_tools.py` 仍是命令入口。引擎在 `services/tools/`，MCP 投影在 `services/tools/mcp.py`，不监听端口。规范见 [ADR 0004](../../docs/adr/0004-tool-governance.md)。
 
 `style` 只从 `styles.json` 选一句负向风格句，不改正向提示词。不传 `image_ref` 用文生视频模板 `workflows/video_api.json`；传入则用图生视频模板 `workflows/video_i2v_api.json`。标准输出是工具结果 JSON。失败时 `ok` 为 false，退出码为 1，不能当成已经生成。进度和 `prompt_id` 写到标准错误，不带节点名。图片和视频各有超时，写在配置的 `timeout_sec`。
 
