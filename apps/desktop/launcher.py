@@ -57,6 +57,13 @@ def _python_bin(root: Path) -> str:
     return _console_python(sys.executable)
 
 
+class HostStartError(Exception):
+    def __init__(self, message: str, commands: list[str] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.commands = commands or []
+
+
 def _spawn_host(root: Path, python: str):
     host = root / "apps/desktop/host.py"
     creation = 0
@@ -80,6 +87,17 @@ def _spawn_host(root: Path, python: str):
         line = proc.stdout.readline()
         if not line and proc.poll() is not None:
             break
+        if line.startswith("MAS_ERROR "):
+            # 13.B：宿主预检失败（例如数据目录还是明文、要先迁移）。不在这里改数据，只把提示给用户。
+            import json
+
+            try:
+                info = json.loads(line[len("MAS_ERROR ") :])
+            except ValueError:
+                info = {}
+            proc.wait(timeout=10)
+            raise HostStartError(str(info.get("message") or "桌面宿主启动失败。"),
+                                 [str(c) for c in info.get("commands") or []])
         if line.startswith("MAS_READY "):
             import json
 
@@ -133,9 +151,38 @@ def _force_kill(pid: int) -> None:
 def main() -> int:
     root = _repo_root()
     python = _python_bin(root)
-    proc, url, base, token, server_pid = _spawn_host(root, python)
+    sys.path.insert(0, str(root / "apps/desktop"))
+    import integration  # 13.B：原生对话框 / 通知 / 托盘
+
+    try:
+        proc, url, base, token, server_pid = _spawn_host(root, python)
+    except HostStartError as exc:
+        text = exc.message + ("\n\n" + "\n".join(exc.commands) if exc.commands else "")
+        integration.show_error("Multimodal Agent Studio 无法启动", text)
+        return 2
+    tray_ref: list = [None]
+
+    def notify(title: str, body: str) -> None:
+        icon = tray_ref[0]
+        if icon is not None:
+            try:
+                icon.notify(body, title)
+                return
+            except Exception:
+                pass
+        integration.system_notify(title, body)
+
+    poller = integration.NotifyPoller(base, token, notify)
+    if (os.environ.get("MAS_DESKTOP_NOTIFY") or "").strip().lower() not in ("0", "off", "false", "no"):
+        poller.start()
 
     def cleanup():
+        poller.stop()
+        if tray_ref[0] is not None:
+            try:
+                tray_ref[0].stop()
+            except Exception:
+                pass
         _http_stop(python, base, token)
         if server_pid:
             _force_kill(server_pid)
@@ -156,13 +203,52 @@ def main() -> int:
 
     try:
         if use_webview:
+            window_ref: list = [None]
+            open_dialog, save_dialog = integration.webview_dialogs(webview, window_ref)
+            # js_api 只有白名单方法（选本机文件 / 另存出站审计）；令牌等都是私有属性，JS 拿不到。
+            api = integration.DesktopApi(base, token, open_dialog, save_dialog)
             window = webview.create_window(
                 "Multimodal Agent Studio",
                 url,
                 width=1280,
                 height=860,
+                js_api=api,
             )
-            webview.start()
+            window_ref[0] = window
+            quitting = {"now": False}
+
+            def on_show():
+                try:
+                    window.show()
+                    window.restore()
+                except Exception:
+                    pass
+
+            def on_quit():
+                quitting["now"] = True
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+
+            def start_tray():
+                tray_ref[0] = integration.start_tray(on_show, on_quit, poller)
+
+            def on_closing():
+                # 托盘常驻：关窗口只是隐藏，从托盘「退出」才真正结束。没有托盘就照常退出。
+                if tray_ref[0] is not None and not quitting["now"]:
+                    try:
+                        window.hide()
+                        return False
+                    except Exception:
+                        return True
+                return True
+
+            try:
+                window.events.closing += on_closing
+            except Exception:
+                pass
+            webview.start(start_tray)
         else:
             import webbrowser
 

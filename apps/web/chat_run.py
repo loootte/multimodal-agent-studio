@@ -301,6 +301,12 @@ class Run:
             if event.get("type") in TERMINAL_EVENTS:
                 self.done.set()
             self.cond.notify_all()
+        observer = getattr(self, "observer", None)
+        if observer is not None:
+            try:
+                observer(self.run_id, event)  # 13.B 桌面通知：只看事件类型 / 工具名 / 状态
+            except Exception:
+                pass
 
     def listen(self, after: int):
         index = max(0, after)
@@ -321,8 +327,10 @@ class RunHub:
     def __init__(self):
         self._runs: dict[str, Run] = {}
         self._lock = threading.Lock()
+        self.observer = None  # 13.B：桌面壳模式挂 desktop_notify.NotifyHub.observe
 
     def add(self, run: Run) -> None:
+        run.observer = self.observer
         with self._lock:
             self._runs[run.run_id] = run
 

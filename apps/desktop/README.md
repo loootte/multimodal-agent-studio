@@ -20,3 +20,13 @@ powershell -ExecutionPolicy Bypass -File apps\desktop\build-launcher.ps1
 解释器查找（`find-python.cmd`，所有入口共用，不依赖 PATH 里有 `python`）：
 `MAS_PYTHON` → 仓库 `.venv` / `venv` → `py -3` → `D:\ProgramData\miniconda3`、`%USERPROFILE%\miniconda3`、`%USERPROFILE%\anaconda3`、`C:\ProgramData\miniconda3` → PATH 上的 `python`。
 快捷方式写入解析出的 `pythonw.exe` 绝对路径；都找不到时请设置 `MAS_PYTHON` 指向 `python.exe`。
+
+13.B（钥匙串 / 默认加密 / 原生对话框 / 托盘通知）见 docs/desktop.md 的「13.B 系统集成」：
+
+```
+python apps/desktop/keychain_tool.py status      # 钥匙串里有哪些条目（只显示末四位）
+python apps/desktop/keychain_tool.py migrate     # 文件里的密钥复制进系统钥匙串
+python apps/desktop/security_checks.py           # 13.B 安全检查（临时钥匙串文件，不碰真实条目）
+```
+
+可选依赖：`pystray` + `Pillow`（托盘常驻）；macOS / Linux 的钥匙串需要 `keyring`。

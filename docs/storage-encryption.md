@@ -99,10 +99,10 @@ python apps/web/storage_tool.py decrypt --yes             # 加密 → 明文（
 
 - ComfyUI 生成的图片（`poc/comfyui/output`、生成图工件库）不加密。
 - 遥测、出站审计本来就无正文，不加密；加密 / 内存模式下轨迹导出只留结构和字数，不留正文摘要。
-- 没接操作系统钥匙串 / DPAPI；主密钥是文件或环境变量。
+- 主密钥默认是文件或环境变量；桌面宿主（13.B）默认放系统钥匙串（Windows 凭据管理器 / macOS 钥匙串 / Secret Service），Web 模式要显式 `MAS_KEYCHAIN=on`。`storage_tool.py --keychain encrypt` 会把新主密钥写进钥匙串。
 - 迁移后删除明文在 SSD / 写时复制文件系统上不等于擦除；高敏感场景请在新磁盘上开加密后再导入。
 - 进程内存、交换文件、休眠文件不在范围。
-- 默认关闭（见上）。
+- Web 模式默认关闭（见上）；桌面宿主默认打开，已有明文数据时启动前拒绝并给迁移命令（见 docs/desktop.md 13.B）。
 
 ## 怎么检查
 

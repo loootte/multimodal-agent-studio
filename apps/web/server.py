@@ -26,6 +26,7 @@ if WEB_DIR not in sys.path:
 
 import character
 import chat_run
+import desktop_notify
 import image_run
 import resources
 import store
@@ -79,6 +80,10 @@ class App:
                              key_id=self.storage.key_id, key_source=self.storage.key_source)
         self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts, storage=self.storage)
         self.runs = chat_run.RunHub()
+        # 13.B（#75）：桌面通知只在桌面壳模式挂上；文本只来自宿主模板。
+        self.notify = desktop_notify.NotifyHub() if self.desktop_token else None
+        if self.notify is not None:
+            self.runs.observer = self.notify.observe
 
 
 def bind_host(host: str) -> str:
@@ -505,6 +510,14 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             if method == "POST" and path == "/api/desktop/stop":
                 stopped = chat_run.stop_all(app)
                 _send_json(handler, 200, {"ok": True, "stopped": stopped})
+                return
+            if method == "GET" and path == "/api/desktop/notifications":
+                # 13.B：托盘通知轮询。只有模板文本（工具名 + 状态 + 张数），没有正文和文件名。
+                try:
+                    after = max(0, int((query.get("after") or ["0"])[0]))
+                except ValueError:
+                    after = 0
+                _send_json(handler, 200, app.notify.since(after) if app.notify else {"items": [], "last": 0})
                 return
         if method == "GET" and path == "/":
             _send_file(handler, os.path.join(WEB_DIR, "static", "index.html"), "text/html; charset=utf-8")

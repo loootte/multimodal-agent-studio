@@ -1190,6 +1190,20 @@ def run_storage_encryption(h: Harness, task: dict, live: bool) -> dict:
 
 
 
+def run_desktop_security(h: Harness, task: dict, live: bool) -> dict:
+    """13.B（#75）：桌面系统集成。通知只用宿主模板；钥匙串里的 key 不进 WebView；默认加密；原生文件只得句柄。"""
+    sys.path.insert(0, os.path.join(ROOT, "apps", "desktop"))
+    import security_checks
+
+    check_name = task.get("check")
+    if check_name not in security_checks.ALL:
+        raise Failed(f"没有这个桌面安全检查：{check_name}")
+    try:
+        return security_checks.ALL[check_name]()
+    except SystemExit as exc:
+        raise Failed(str(exc) or f"{check_name} 检查失败") from exc
+
+
 def run_desktop_token(h: Harness, task: dict, live: bool) -> dict:
     """桌面启动令牌（13.A #74）：无令牌访问本地资源/设置被拒，有令牌可访问；Web 模式不启用。"""
     try:
@@ -1220,6 +1234,7 @@ RUNNERS = {
     "confirm_policy": run_confirm_policy,
     "storage_encryption": run_storage_encryption,
     "desktop_token": run_desktop_token,
+    "desktop_security": run_desktop_security,
 }
 
 

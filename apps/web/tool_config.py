@@ -24,6 +24,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from services.runtime import injection  # noqa: E402  12.G：工具执行期间不许写配置
+from packages import keychain  # noqa: E402  13.B：桌面壳的保密字段进系统钥匙串
 
 TYPES = ("string", "int", "enum", "path", "secret")
 _KINDS = ("image", "image_i2i", "video", "video_i2v")
@@ -187,6 +188,16 @@ def declarations() -> dict:
     return out
 
 
+def _keychain_secret(name: str, field: dict) -> str | None:
+    """13.B：保密字段在钥匙串里的值（只给 sidecar 内部；接口只给 hint）。未启用 / 读失败返回 None。"""
+    if not field.get("secret") or not keychain.enabled():
+        return None
+    try:
+        return keychain.get(keychain.tool_entry(name, field["name"]))
+    except keychain.KeychainError:
+        return None
+
+
 def _hint(value: str) -> str:
     return value[-4:] if len(value) >= 8 else ""
 
@@ -217,14 +228,17 @@ class ToolConfigStore:
 
     # ---- 视图 ----
     def effective(self, name: str) -> dict:
-        """运行时用的值（含保密原值）：env > 已保存 > 默认。"""
+        """运行时用的值（含保密原值）：env > 系统钥匙串（13.B，桌面壳）> 已保存 > 默认。"""
         decl = declarations()[name]
         saved = self.saved(name)
         values = {}
         for field in decl["fields"]:
             env = field.get("env")
+            stored = _keychain_secret(name, field)
             if env and os.environ.get(env):
                 value = os.environ[env]
+            elif stored:
+                value = stored
             elif field["name"] in saved:
                 value = saved[field["name"]]
             else:
@@ -240,8 +254,11 @@ class ToolConfigStore:
         for field in decl["fields"]:
             key = field["name"]
             env = field.get("env")
+            stored = _keychain_secret(name, field)
             if env and os.environ.get(env):
                 source, value = "env", os.environ[env]
+            elif stored:
+                source, value = "keychain", stored
             elif key in saved:
                 source, value = "saved", saved[key]
             else:
@@ -353,6 +370,20 @@ class ToolConfigStore:
                     unacked[field] = warnings[new]
             if unacked:
                 raise AckRequired({key: "要先确认：" + text for key, text in unacked.items()}, unacked)
+            if keychain.active():
+                # 13.B：保密字段进系统钥匙串，tools.json 里不留原值。先写钥匙串（读回校验），成功才落盘。
+                cleared = set(clear or [])
+                for field in decl["fields"]:
+                    if not field["secret"]:
+                        continue
+                    entry = keychain.tool_entry(name, field["name"])
+                    try:
+                        if field["name"] in section:
+                            keychain.set(entry, str(section.pop(field["name"])))
+                        elif reset or field["name"] in cleared or values.get(field["name"], "") is None:
+                            keychain.delete(entry)
+                    except keychain.KeychainError as exc:
+                        raise ConfigError({field["name"]: f"写系统钥匙串失败（{exc.code}），没有保存。"}) from exc
             if section:
                 data[name] = section
             else:

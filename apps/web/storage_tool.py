@@ -6,6 +6,7 @@
     python apps/web/storage_tool.py [--data-dir DIR] verify           # 逐个解开会话和字节，报坏了几个
     python apps/web/storage_tool.py export-key --out FILE             # 口令加密的主密钥备份
     python apps/web/storage_tool.py import-key --in FILE              # 从备份恢复主密钥
+    python apps/web/storage_tool.py --keychain --data-dir DIR encrypt # 13.B 桌面版：新主密钥进系统钥匙串
 
 迁移前先停掉聊天服务。口令从 MAS_BACKUP_PASSPHRASE 读，没有就交互输入（至少 12 个字符）。
 密钥和备份不许放进数据目录或仓库。任何输出里都没有密钥本身。
@@ -227,7 +228,11 @@ def main(argv: list[str] | None = None) -> int:
     imp = sub.add_parser("import-key")
     imp.add_argument("--in", dest="source", required=True)
     imp.add_argument("--key-file", default=None, help="写到哪里（默认 MAS_MASTER_KEY_FILE 或 ~/.mas/master.key）")
+    parser.add_argument("--keychain", action="store_true",
+                        help="13.B：主密钥用系统钥匙串（桌面版数据目录迁移时用；等于 MAS_KEYCHAIN=on）")
     args = parser.parse_args(argv)
+    if args.keychain and not os.environ.get("MAS_KEYCHAIN"):
+        os.environ["MAS_KEYCHAIN"] = "on"
     data_dir = os.path.abspath(args.data_dir)
     try:
         if args.command == "status":
@@ -237,8 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             created = None
             if master is None:
                 master = C.new_master()
-                created = C.write_master(master, data_dir)
-                _record(data_dir, "security.storage_key_created", key_id=C.key_id_of(master), key_source="file")
+                source = C.store_master(master, data_dir)  # 13.B：钥匙串启用且可用就进钥匙串，否则写文件
+                created = "系统钥匙串" if source == "keychain" else C.default_key_path()
+                _record(data_dir, "security.storage_key_created", key_id=C.key_id_of(master), key_source=source)
             stats = migrate_encrypt(data_dir, master)
             print(json.dumps({"ok": True, "key_id": C.key_id_of(master), **stats}, ensure_ascii=False))
             if created:

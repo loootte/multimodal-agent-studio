@@ -22,7 +22,16 @@ sys.path.insert(0, str(DESKTOP_DIR))
 sys.path.insert(0, str(ROOT / "apps" / "web"))
 sys.path.insert(0, str(ROOT))
 
+# 13.B：宿主默认打开加密 + 系统钥匙串。冒烟一律用临时钥匙串文件和临时主密钥路径，
+# 不碰真实的 Windows 凭据管理器 / macOS 钥匙串 / ~/.mas。
+_SANDBOX = tempfile.mkdtemp(prefix="mas-desk-check-")
+os.environ["MAS_KEYCHAIN"] = "file:" + os.path.join(_SANDBOX, "keychain.json")
+os.environ["MAS_MASTER_KEY_FILE"] = os.path.join(_SANDBOX, "master.key")
+os.environ.pop("MAS_MASTER_KEY", None)
+os.environ.pop("MAS_STORAGE_ENCRYPTION", None)
+
 import host as desktop_host  # noqa: E402
+import security_checks  # noqa: E402
 import server  # noqa: E402
 
 
@@ -134,6 +143,17 @@ def _sidecar_lifecycle() -> dict:
         )
         if status != 200:
             fail(f"sidecar 有令牌应 200：{status} {body[:100]}")
+        # 13.B：桌面默认加密，主密钥进钥匙串（这里是临时钥匙串文件），不落 master.key。
+        if info.get("storage_encryption") != "on" or (info.get("keychain") or {}).get("backend") != "file":
+            fail(f"桌面默认没有加密 / 钥匙串：{info.get('storage_encryption')} {info.get('keychain')}")
+        status, body, _ = http("GET", info["base"] + "/api/storage", headers={"X-MAS-Desktop-Token": side.token})
+        storage = json.loads(body)
+        if storage.get("mode") != "encrypted" or storage.get("key_source") != "keychain":
+            fail(f"sidecar 的数据目录不是加密 / 主密钥不在钥匙串：{body[:200]}")
+        if os.path.exists(os.environ["MAS_MASTER_KEY_FILE"]):
+            fail("桌面默认把主密钥写成了文件")
+        if "MAS_KEYCHAIN" in body or side.token in body:
+            fail("存储状态接口带了不该有的东西")
         pid = side.proc.pid if side.proc else 0
         side.stop()
         # 等进程退出
@@ -232,12 +252,47 @@ def _cli_ready_file() -> None:
     print("cli ready-file ok")
 
 
+def _sidecar_plaintext_refused() -> None:
+    """13.B：已有明文数据的目录，宿主启动前预检拒绝并给 storage_tool.py 迁移命令，不悄悄转换、不拉起服务。"""
+    data = tempfile.mkdtemp(prefix="mas-desk-plain-")
+    lock = Path(tempfile.mkdtemp(prefix="mas-desk-lock3-")) / "desktop.lock"
+    os.environ["MAS_STORAGE_ENCRYPTION"] = "off"
+    try:
+        app = server.App(data, timeout_sec=5)
+        app.sessions.create(app.identity.current()["user_id"])
+    finally:
+        os.environ.pop("MAS_STORAGE_ENCRYPTION", None)
+    side = desktop_host.Sidecar(data_dir=data, lock_path=lock)
+    try:
+        side.start()
+    except desktop_host.desktop_env.PreflightError as exc:
+        info = exc.public()
+        if info["code"] != "storage_migration_required" or not any("storage_tool.py" in c for c in info["commands"]):
+            fail(f"明文数据目录的引导不对：{info}")
+    else:
+        side.stop()
+        fail("明文数据目录不该直接启动（要先迁移）")
+    if side.proc is not None or lock.is_file():
+        fail("预检失败后不该留下进程或锁")
+    # 命令行入口：MAS_ERROR 一行 + 退出码 2，给启动器弹窗用。
+    proc = subprocess.run([sys.executable, str(DESKTOP_DIR / "host.py"), "--data-dir", data, "--lock-file", str(lock)],
+                          capture_output=True, text=True, encoding="utf-8", timeout=60)
+    line = next((l for l in proc.stdout.splitlines() if l.startswith("MAS_ERROR ")), "")
+    if proc.returncode != 2 or "storage_migration_required" not in line:
+        fail(f"host.py 预检失败应输出 MAS_ERROR 并退出 2：{proc.returncode} {proc.stdout[-200:]}")
+
+
 def main() -> None:
     _web_mode_no_token()
     _token_gate_unit()
     print("token gate ok")
     _sidecar_lifecycle()
     print("sidecar lifecycle ok")
+    _sidecar_plaintext_refused()
+    print("plaintext preflight ok")
+    for name, func in security_checks.ALL.items():
+        func()
+        print(f"{name} ok")
     _busy_port_and_lock()
     _cli_ready_file()
     print("desktop check ok")

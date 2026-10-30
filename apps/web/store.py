@@ -18,6 +18,7 @@ import urllib.parse
 import uuid
 
 from packages.artifacts import ArtifactError, ArtifactStore
+from packages import keychain
 from packages.artifacts import crypto as storage_crypto
 from packages.contracts.events import HANDLE_ERRORS, HANDLE_PURPOSE_TOOLS, HANDLE_SCHEMA
 from services.gateway.egress import LocalBodies
@@ -232,6 +233,14 @@ def _atomic_write(path: str, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def _keychain_get(entry: str) -> str | None:
+    """读钥匙串；读失败当作没有（不把错误细节带进接口）。"""
+    try:
+        return keychain.get(entry)
+    except keychain.KeychainError:
+        return None
+
+
 class ProviderStore:
     def __init__(self, path: str):
         self.path = path
@@ -240,10 +249,20 @@ class ProviderStore:
     def resolve(self) -> dict:
         with self._lock:
             data = self._read()
-        key = _usable(data.get("api_key") or "")
-        source = "file" if key else None
-        if not key:
+        if keychain.enabled():
+            # 13.B 桌面壳：环境变量 > 系统钥匙串 > provider.json（旧值 / 钥匙串不可用时的退路）
             key, source = _env_key(data["base_url"])
+            if not key:
+                key = _usable(_keychain_get(keychain.PROVIDER_ENTRY) or "")
+                source = "keychain" if key else None
+            if not key:
+                key = _usable(data.get("api_key") or "")
+                source = "file" if key else None
+        else:
+            key = _usable(data.get("api_key") or "")
+            source = "file" if key else None
+            if not key:
+                key, source = _env_key(data["base_url"])
         return {
             "base_url": data["base_url"],
             "model": data["model"],
@@ -292,6 +311,16 @@ class ProviderStore:
                 key = clean_key(api_key)
             else:
                 key = current.get("api_key") or ""
+            if keychain.active() and (clear_key or api_key):
+                # 13.B：新 key 进系统钥匙串，provider.json 里不留原值；清除时两边都清。
+                try:
+                    if clear_key:
+                        keychain.delete(keychain.PROVIDER_ENTRY)
+                    else:
+                        keychain.set(keychain.PROVIDER_ENTRY, key)
+                except keychain.KeychainError as exc:
+                    raise ValueError(f"写系统钥匙串失败（{exc.code}），API key 没有保存。") from exc
+                key = ""
             _atomic_write(self.path, {
                 "base_url": cleaned_base,
                 "model": cleaned_model,
