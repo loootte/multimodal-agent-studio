@@ -304,6 +304,12 @@ class Sidecar:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows 默认 GBK 输出会让读 UTF-8 的父进程解码失败；统一 UTF-8。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(description="MAS 桌面 sidecar 宿主")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--port", type=int, default=0, help="0 = 挑空闲端口")
