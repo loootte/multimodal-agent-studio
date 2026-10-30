@@ -1,8 +1,8 @@
 {
   "schema": "mas.tool/1",
   "name": "character_image",
-  "version": "1.1.0",
-  "description": "定制角色图片：用户要画一个角色/人物（性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考已有角色）时调用。只填用户说到的字段，其余用默认值（年轻成年东亚女性、黑长直、棕瞳、休闲装、站立、纯色背景、二次元动漫风格、无参考）。字段可填预设键或中文标签，例如 hair_color=red、outfit=knight_armor、pose=fighting、ethnicity=east_asian、art_style=anime，也可以填简短自由描述。reference 可空；有自定义参考时按灵感生成原创角色，不要抄袭版权角色。返回 content_handle，之后每张图调用一次 generate_image（要多张先 plan_images）。不要写露骨、色情内容；未成年角色不能配暴露服装或挑逗姿势。",
+  "version": "1.2.0",
+  "description": "定制角色图片：用户要画一个角色/人物（性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考已有角色）时调用。只填用户说到的字段，其余用默认值（年轻成年东亚女性、黑长直、棕瞳、休闲装、站立、纯色背景、二次元动漫风格、无参考）。字段可填预设键或中文标签，例如 hair_color=red、outfit=knight_armor、pose=fighting、ethnicity=east_asian、art_style=anime，也可以填简短自由描述。reference 可空；有自定义参考时按灵感生成原创角色，不要抄袭版权角色。#86 另有 shot/angle/composition（摄像机位）、light_type/light_direction/light_mood（光照）、expression（表情）、scene（动作/场景），用户没提就不填。成人模式 adult=true 默认关：只有用户这一句明确要成人内容（如“成人模式”“R18”）时才能填，否则会被拒；成人模式年龄 20+、禁止未成年/校服/幼态体型/真人或版权角色，只能本机出图（generate_image 不填 backend）；body_detail 只在成人模式可用。返回 content_handle，之后每张图调用一次 generate_image（要多张先 plan_images）。非成人模式不要写露骨、色情内容；未成年角色不能配暴露服装或挑逗姿势。",
   "order": 13,
   "parameters": {
     "type": "object",
@@ -67,6 +67,55 @@
         "type": "string",
         "maxLength": 200,
         "description": "可选。参考已有角色：默认可空（填 none 或省略）。有参考时填简短自由描述；会按灵感生成原创角色，不复制任何版权角色。用户没说就不要填。"
+      },
+      "shot": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。景别（摄像机位）：full_body、upper_body、close_up 等或中文标签（全身、半身、特写），或简短描述。没说就不填（自动）。"
+      },
+      "angle": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。角度（摄像机位）：low_angle、high_angle、side 等或中文标签（仰视、俯视、侧面），或简短描述。没说就不填。"
+      },
+      "composition": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。构图（摄像机位）：centered、rule_of_thirds、depth_of_field 等或中文标签（居中、三分法、浅景深）。没说就不填。"
+      },
+      "light_type": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。光照类型：natural、soft、neon、golden_hour 等或中文标签（自然光、柔光、霓虹灯）。没说就不填。"
+      },
+      "light_direction": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。光照方向：front、side、back、rembrandt 等或中文标签（正面光、侧光、逆光）。没说就不填。"
+      },
+      "light_mood": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。光照氛围：bright、warm、dramatic、moody 等或中文标签（明亮、温暖、戏剧性）。没说就不填。"
+      },
+      "expression": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。表情：smile、serious、shy 等或中文标签（微笑、严肃、害羞），或简短描述。没说就不填。"
+      },
+      "scene": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。动作/场景：一小段自由描述，例如“在雨中撑伞”。没说就不填。"
+      },
+      "body_detail": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "可选。身体细节，只在 adult=true 时可用：toned、abs、curvy 等预设或简短描述；不得描述幼态体型。没说就不填。"
+      },
+      "adult": {
+        "type": "boolean",
+        "description": "成人模式，默认 false。只有用户这一句明确要求成人内容时才填 true；否则不要填。"
       },
       "mode": {
         "type": "string",

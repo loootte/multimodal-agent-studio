@@ -290,6 +290,62 @@
       "fake_only": true
     },
     {
+      "id": "image.character_adult_minor_refused",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "minor"
+    },
+    {
+      "id": "image.character_adult_school_uniform_refused",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "school"
+    },
+    {
+      "id": "image.character_adult_original_only",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "original"
+    },
+    {
+      "id": "image.character_adult_default_sfw",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "default_sfw"
+    },
+    {
+      "id": "image.character_adult_prompt_order",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "order"
+    },
+    {
+      "id": "image.character_camera_light_prompt",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "camera_light"
+    },
+    {
+      "id": "image.character_adult_form_local_rating",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "form"
+    },
+    {
+      "id": "image.character_adult_chat_consent_remote_refused",
+      "category": "image",
+      "kind": "character_adult",
+      "fake_only": true,
+      "case": "chat"
+    },
+    {
       "id": "security.storage_encrypted_at_rest",
       "category": "security",
       "kind": "storage_encryption",

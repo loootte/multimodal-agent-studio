@@ -120,3 +120,69 @@ anime style illustration, character illustration, full body, highly detailed, be
 - 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_character`、`start_character`）
 - 页面：`apps/web/static/character.js`
 - 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`；评测 `image.character`
+
+## 摄像机位、光照与成人模式（#86）
+
+### 新字段（SFW 也能用）
+
+| 字段 | 名字 | 例子 |
+| --- | --- | --- |
+| 景别 | `shot` | 全身 / 七分身 / 膝上 / 半身 / 胸像 / 特写 / 远景 |
+| 角度 | `angle` | 平视 / 仰视 / 俯视 / 鸟瞰 / 侧面 / 背面 / 四分之三侧 / 倾斜 / 第一人称 |
+| 构图 | `composition` | 居中 / 三分法 / 对称 / 对角线 / 浅景深 / 框中框 / 留白 |
+| 光照类型 | `light_type` | 自然光 / 柔光 / 影棚光 / 黄金时刻 / 霓虹灯 / 烛光 / 月光 / 电影光 / 窗光 |
+| 光照方向 | `light_direction` | 正面光 / 侧光 / 逆光 / 顶光 / 底光 / 伦勃朗光 / 分割光 |
+| 氛围 | `light_mood` | 明亮 / 温暖 / 冷调 / 戏剧性 / 低调暗沉 / 梦幻 / 浪漫 / 神秘 |
+| 表情 | `expression` | 微笑 / 大笑 / 严肃 / 平静 / 害羞 / 自信 … |
+| 动作/场景 | `scene` | 自由文字，例如“在雨中撑伞” |
+| 身体细节 | `body_detail` | 只在成人模式：紧致线条 / 腹肌 / 柔软肉感 / 丰满胸部 / 宽胯 / 晒痕 / 雀斑 / 纹身 / 湿润皮肤 |
+
+这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差；`FIELDS` 仍是十二个核心字段，新字段在 `EXTRA_FIELDS` / `ADULT_FIELDS`。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
+
+提示词顺序：风格 → 画质 → 性别/年龄/人种/体型（成人模式加身体细节）→ 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。
+
+表单里每个字段是“可搜索下拉 + 自定义输入”：输入能筛选预设（中文标签），也能直接写自己的描述；清空就用默认。提示词预览实时更新。
+
+### 成人模式
+
+默认关闭。打开方式：
+
+- **表单**：勾“成人模式”会弹确认框；确认后表单换成成人预设（`GET /api/character?adult=1`），出图后端锁在本机 ComfyUI。提交带 `adult: true, adult_confirmed: true`；没确认返回 400 `adult_confirm_required`。
+- **对话**：模型调 `character_image` 时填 `adult: true`。只有用户**这一句**明确要成人内容（“成人模式”“成人内容”“R18”“18+”“NSFW” 等）才放行，否则工具返回 `adult_confirm_required`。
+
+成人预设在 `toolpacks/builtin/character_image/presets_adult.json`：
+
+- 年龄只剩 20 岁以上的四档（青年 / 成年 / 熟龄 / 中年），没有未成年选项；体型去掉“娇小”，加“曲线”。
+- 服装分级：日常 / 内衣 / 情趣 / 半裸 / 全裸 / 特殊；姿势分级：日常 / 暗示 / 开放 / 躺卧 / 互动（互动类写明 adult partner）。
+- 背景加卧室、浴室、酒店；去掉教室。画面风格去掉 Q 版。
+- 预设一律用中性、描述性的英文。
+
+### 安全规则（成人模式，硬拦，不可配置）
+
+| 规则 | 代码 |
+| --- | --- |
+| 年龄低于 18（未成年）或低于 20（成人模式门槛），阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
+| teen / child 预设（按键或中文标签） | `minor_unsafe` |
+| 自定义文字里有 少女、萝莉、正太、小孩、幼女、儿童、学生、loli、shota、child、teen、underage、schoolgirl、petite young 等 | `minor_unsafe` |
+| 校服 / 教室 / 学生类内容 | `minor_unsafe`（说明原因） |
+| 幼态体型：娇小、幼态、平胸幼体等 | `minor_unsafe`（说明原因） |
+| 真人、明星、熟人、版权角色（词表 + 《作品名》、@账号、英文人名规则） | `not_original_character`，“请只描述原创角色” |
+| 成人内容发第三方出图（表单、对话、或提示词本身露骨） | `nsfw_backend_not_allowed`，说明可能违反服务条款；对话路径记一条 `egress.blocked` |
+| 非成人模式写 `body_detail` | `invalid_field` |
+
+成人提示词尾注固定为 `all characters are adults clearly over 20 years old, mature adult features, original character`。
+
+### 结果标记
+
+成人图出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板多了“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
+
+### 接口变化
+
+- `GET /api/character?adult=1`：成人预设；返回多了 `extra_fields`（每项带 `group`：camera / light / detail）和 `adult`。
+- `POST /api/character/preview`：`{fields, adult?}`。
+- `POST /api/sessions/{id}/character`：多了 `adult`、`adult_confirmed`。
+- `character_image` 工具（1.2.0）：多了九个字符串字段和 `adult` 布尔。
+
+### 检查
+
+`apps/web/check.py` 的 `_adult_character_cases`（单元：minor / school / original / default_sfw / order / camera_light；接口：form / chat）。评测 `image.character_adult_*`、`image.character_camera_light_prompt`。

@@ -122,6 +122,86 @@
     ]},
     "reference": {"label": "参考已有角色", "options": [
       {"key": "none", "label": "无", "prompt": ""}
+    ]},
+    "shot": {"label": "景别", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "full_body", "label": "全身", "prompt": "full body shot"},
+      {"key": "three_quarter", "label": "七分身", "prompt": "three-quarter body shot"},
+      {"key": "cowboy", "label": "膝上", "prompt": "cowboy shot, framed from mid-thigh up"},
+      {"key": "upper_body", "label": "半身", "prompt": "upper body shot"},
+      {"key": "portrait", "label": "胸像", "prompt": "bust portrait"},
+      {"key": "close_up", "label": "特写", "prompt": "close-up of the face"},
+      {"key": "wide", "label": "远景", "prompt": "wide shot, small figure in a large scene"}
+    ]},
+    "angle": {"label": "角度", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "eye_level", "label": "平视", "prompt": "eye-level angle"},
+      {"key": "low_angle", "label": "仰视", "prompt": "low angle shot"},
+      {"key": "high_angle", "label": "俯视", "prompt": "high angle shot"},
+      {"key": "birds_eye", "label": "鸟瞰", "prompt": "bird's-eye view"},
+      {"key": "side", "label": "侧面", "prompt": "side view, profile"},
+      {"key": "from_behind", "label": "背面", "prompt": "view from behind"},
+      {"key": "three_quarter_view", "label": "四分之三侧", "prompt": "three-quarter view"},
+      {"key": "dutch", "label": "倾斜", "prompt": "dutch angle"},
+      {"key": "pov", "label": "第一人称", "prompt": "first-person point of view"}
+    ]},
+    "composition": {"label": "构图", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "centered", "label": "居中", "prompt": "centered composition"},
+      {"key": "rule_of_thirds", "label": "三分法", "prompt": "rule of thirds composition"},
+      {"key": "symmetrical", "label": "对称", "prompt": "symmetrical composition"},
+      {"key": "diagonal", "label": "对角线", "prompt": "diagonal composition"},
+      {"key": "depth_of_field", "label": "浅景深", "prompt": "shallow depth of field, blurred background"},
+      {"key": "framed", "label": "框中框", "prompt": "framed by foreground elements"},
+      {"key": "negative_space", "label": "留白", "prompt": "generous negative space"}
+    ]},
+    "light_type": {"label": "光照类型", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "natural", "label": "自然光", "prompt": "natural daylight"},
+      {"key": "soft", "label": "柔光", "prompt": "soft diffused light"},
+      {"key": "studio", "label": "影棚光", "prompt": "studio lighting"},
+      {"key": "golden_hour", "label": "黄金时刻", "prompt": "golden hour sunlight"},
+      {"key": "neon", "label": "霓虹灯", "prompt": "neon lighting"},
+      {"key": "candle", "label": "烛光", "prompt": "warm candlelight"},
+      {"key": "moonlight", "label": "月光", "prompt": "moonlight"},
+      {"key": "cinematic", "label": "电影光", "prompt": "cinematic lighting"},
+      {"key": "window", "label": "窗光", "prompt": "window light"}
+    ]},
+    "light_direction": {"label": "光照方向", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "front", "label": "正面光", "prompt": "front lighting"},
+      {"key": "side", "label": "侧光", "prompt": "side lighting"},
+      {"key": "back", "label": "逆光", "prompt": "backlighting, rim light"},
+      {"key": "top", "label": "顶光", "prompt": "top lighting"},
+      {"key": "bottom", "label": "底光", "prompt": "under lighting"},
+      {"key": "rembrandt", "label": "伦勃朗光", "prompt": "rembrandt lighting"},
+      {"key": "split", "label": "分割光", "prompt": "split lighting"}
+    ]},
+    "light_mood": {"label": "氛围", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "bright", "label": "明亮", "prompt": "bright and airy mood"},
+      {"key": "warm", "label": "温暖", "prompt": "warm cozy mood"},
+      {"key": "cool", "label": "冷调", "prompt": "cool blue tones"},
+      {"key": "dramatic", "label": "戏剧性", "prompt": "dramatic high contrast"},
+      {"key": "moody", "label": "低调暗沉", "prompt": "moody low-key atmosphere"},
+      {"key": "dreamy", "label": "梦幻", "prompt": "dreamy soft glow"},
+      {"key": "romantic", "label": "浪漫", "prompt": "romantic atmosphere"},
+      {"key": "mysterious", "label": "神秘", "prompt": "mysterious atmosphere"}
+    ]},
+    "expression": {"label": "表情", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""},
+      {"key": "smile", "label": "微笑", "prompt": "gentle smile"},
+      {"key": "laugh", "label": "大笑", "prompt": "laughing"},
+      {"key": "serious", "label": "严肃", "prompt": "serious expression"},
+      {"key": "calm", "label": "平静", "prompt": "calm expression"},
+      {"key": "shy", "label": "害羞", "prompt": "shy expression, light blush"},
+      {"key": "confident", "label": "自信", "prompt": "confident expression"},
+      {"key": "sad", "label": "忧伤", "prompt": "melancholic expression"},
+      {"key": "surprised", "label": "惊讶", "prompt": "surprised expression"},
+      {"key": "wink", "label": "眨眼", "prompt": "winking"}
+    ]},
+    "scene": {"label": "动作/场景", "options": [
+      {"key": "auto", "label": "自动", "prompt": ""}
     ]}
   }
 }

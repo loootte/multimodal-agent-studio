@@ -175,6 +175,11 @@
           <option value="artifact">生成文件</option>
         </select>
         <select id="res-session" aria-label="会话"><option value="">全部会话</option></select>
+        <select id="res-rating" aria-label="分级">
+          <option value="">全部分级</option>
+          <option value="general">普通</option>
+          <option value="adult">成人内容</option>
+        </select>
         <input id="res-q" type="search" placeholder="搜标签、文件名、句柄" aria-label="搜索">
       </div>
       <ul id="res-list" class="res-list"></ul>
@@ -191,8 +196,11 @@
   <dialog id="character" aria-labelledby="character-title">
     <div id="character-form">
       <h2 id="character-title">定制角色图片</h2>
-      <p class="hint">每项选一个预设，或选“自定义…”自己写。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → character_image」里改。</p>
+      <p class="hint">每项可以输入搜索预设，也可以直接写自己的描述；清空就用默认值。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → character_image」里改。</p>
+      <label class="char-adult-toggle"><input id="char-adult" type="checkbox"> 成人模式（默认关闭，开启需确认；只用本机 ComfyUI）</label>
+      <p id="char-adult-note" class="note" hidden>成人模式已开启：只画原创成年角色（20 岁以上）；未成年、校服、幼态体型、真人或版权角色会被拒绝；结果标记为成人内容。</p>
       <div id="char-fields" class="char-fields"></div>
+      <div id="char-extra" class="char-fields char-extra"></div>
       <div class="char-options">
         <label>张数 <input id="char-count" type="number" min="1" max="20" value="1"></label>
         <label>画幅

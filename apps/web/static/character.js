@@ -1,14 +1,23 @@
-// 定制角色图片（issue #53）。字段 → 预设或自定义文字；预览是本机拼出的提示词；生成走 /api/sessions/<id>/character。
+// 定制角色图片（issue #53，#86）。字段 → 预设或自定义文字；预览是本机拼出的提示词；生成走 /api/sessions/<id>/character。
+// #86：每个字段是「可搜索下拉 + 自定义输入」（input + datalist：输入能筛选预设，也能直接写自己的描述）；
+// 加了摄像机位、光照、表情、动作/场景；成人模式默认关，打开要在弹窗里确认，且只能本机 ComfyUI 出图。
 (() => {
   const dialog = document.querySelector("#character");
   const box = document.querySelector("#char-fields");
+  const extraBox = document.querySelector("#char-extra");
   const preview = document.querySelector("#char-preview");
   const note = document.querySelector("#char-note");
   const count = document.querySelector("#char-count");
-  const CUSTOM = "__custom__";
+  const adultBox = document.querySelector("#char-adult");
+  const adultNote = document.querySelector("#char-adult-note");
+  const backendSelect = document.querySelector("#char-backend");
+  const GROUP_LABELS = { camera: "摄像机位", light: "光照", detail: "细节" };
   let catalog = null;
-  const controls = {};
+  let adult = false;
+  let adultConfirmed = false;
+  let controls = {};
   let timer = null;
+  let listSeq = 0;
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -35,63 +44,71 @@
     return data;
   }
 
+  function allFields() {
+    return [...catalog.fields, ...(catalog.extra_fields || [])];
+  }
+
   function setValue(name, value) {
     const c = controls[name];
-    const field = catalog.fields.find((item) => item.name === name);
-    const hit = field.options.find((item) => item.key === value || item.label === value);
-    if (hit) {
-      c.select.value = hit.key;
-      c.custom.value = "";
-      c.custom.hidden = true;
-    } else {
-      c.select.value = CUSTOM;
-      c.custom.value = value || "";
-      c.custom.hidden = false;
+    if (!c) return;
+    const hit = c.field.options.find((item) => item.key === value || item.label === value);
+    c.input.value = hit ? hit.label : value || "";
+  }
+
+  function field(target, spec) {
+    const wrap = el("label", "char-field");
+    wrap.append(el("span", "", spec.label));
+    const input = document.createElement("input");
+    input.type = "search";
+    input.maxLength = 200;
+    input.autocomplete = "off";
+    input.placeholder = `搜索预设或自己写${spec.label}`;
+    const list = document.createElement("datalist");
+    list.id = `char-list-${++listSeq}`;
+    for (const option of spec.options) {
+      const node = document.createElement("option");
+      node.value = option.label;
+      const tag = option.group ? `${option.group} · ` : "";
+      node.label = `${tag}${option.prompt || "不加"}`;
+      list.append(node);
     }
+    input.setAttribute("list", list.id);
+    input.addEventListener("input", schedule);
+    input.addEventListener("focus", () => input.select());
+    wrap.append(input, list);
+    target.append(wrap);
+    controls[spec.name] = { input, field: spec };
   }
 
   function build() {
     box.replaceChildren();
-    for (const field of catalog.fields) {
-      const wrap = el("label", "char-field");
-      wrap.append(el("span", "", field.label));
-      const select = document.createElement("select");
-      select.dataset.field = field.name;
-      for (const option of field.options) {
-        const node = el("option", "", option.label);
-        node.value = option.key;
-        select.append(node);
+    extraBox.replaceChildren();
+    controls = {};
+    for (const spec of catalog.fields) field(box, spec);
+    let group = "";
+    let section = null;
+    for (const spec of catalog.extra_fields || []) {
+      if (spec.group !== group) {
+        group = spec.group;
+        section = el("fieldset", "char-group");
+        section.append(el("legend", "", GROUP_LABELS[group] || group));
+        extraBox.append(section);
       }
-      const custom = el("option", "", "自定义…");
-      custom.value = CUSTOM;
-      select.append(custom);
-      const input = document.createElement("input");
-      input.type = "text";
-      input.maxLength = 200;
-      input.placeholder = `自己写${field.label}`;
-      input.hidden = true;
-      select.addEventListener("change", () => {
-        input.hidden = select.value !== CUSTOM;
-        if (!input.hidden) input.focus();
-        schedule();
-      });
-      input.addEventListener("input", schedule);
-      wrap.append(select, input);
-      box.append(wrap);
-      controls[field.name] = { select, custom: input };
+      field(section, spec);
     }
   }
 
   function fields() {
     const out = {};
     for (const [name, c] of Object.entries(controls)) {
-      out[name] = c.select.value === CUSTOM ? c.custom.value.trim() : c.select.value;
+      const text = c.input.value.trim();
+      if (text) out[name] = text;
     }
     return out;
   }
 
   function reset() {
-    for (const field of catalog.fields) setValue(field.name, catalog.defaults[field.name]);
+    for (const spec of allFields()) setValue(spec.name, catalog.defaults[spec.name]);
     count.value = 1;
     schedule();
   }
@@ -103,7 +120,7 @@
 
   async function refresh() {
     try {
-      const result = await call("POST", "/api/character/preview", { fields: fields() });
+      const result = await call("POST", "/api/character/preview", { fields: fields(), adult });
       preview.textContent = result.prompt;
       say("");
       return true;
@@ -114,17 +131,61 @@
     }
   }
 
+  async function load() {
+    catalog = await call("GET", adult ? "/api/character?adult=1" : "/api/character");
+    build();
+    reset();
+  }
+
+  function syncAdult() {
+    adultBox.checked = adult;
+    adultNote.hidden = !adult;
+    dialog.classList.toggle("adult", adult);
+    for (const option of backendSelect.options) {
+      if (option.value === "remote") option.disabled = adult;
+    }
+    if (adult) backendSelect.value = "local";
+  }
+
+  async function toggleAdult() {
+    if (adultBox.checked) {
+      const ok = window.confirm(
+        "开启成人模式？\n\n" +
+          "· 会生成成人/露骨内容，只用本机 ComfyUI 出图，不会发给第三方出图服务；\n" +
+          "· 只画原创的成年角色（20 岁以上），未成年、校服、幼态体型、真人和版权角色一律拒绝；\n" +
+          "· 生成结果会标记为成人内容（rating: adult，文件名带 adult_ 前缀）。\n\n" +
+          "请确认你已成年，并且本机使用合法。",
+      );
+      if (!ok) {
+        adultBox.checked = false;
+        return;
+      }
+      adult = true;
+      adultConfirmed = true;
+    } else {
+      adult = false;
+      adultConfirmed = false;
+    }
+    syncAdult();
+    try {
+      await load();
+    } catch (error) {
+      say(error.message);
+    }
+  }
+
   async function open() {
     say("");
+    adult = false; // 每次打开都回到默认的 SFW。
+    adultConfirmed = false;
+    syncAdult();
     try {
-      catalog = await call("GET", "/api/character");
+      await load();
     } catch (error) {
       say(error.message);
       dialog.showModal();
       return;
     }
-    build();
-    reset();
     dialog.showModal();
   }
 
@@ -134,17 +195,28 @@
       say("张数要是 1 到 20。");
       return;
     }
+    if (adult && backendSelect.value !== "local") {
+      say("成人模式只能用本机 ComfyUI 出图。");
+      return;
+    }
     if (!(await refresh())) return;
     const body = {
       fields: fields(),
       count: n,
       aspect_ratio: document.querySelector("#char-aspect").value,
-      backend: document.querySelector("#char-backend").value,
+      backend: backendSelect.value,
       privacy: document.querySelector("#char-privacy").value,
     };
+    if (adult) {
+      body.adult = true;
+      body.adult_confirmed = adultConfirmed;
+    }
     dialog.close();
     const where = body.backend === "local" ? "本机 ComfyUI" : "第三方出图";
-    const label = body.privacy === "local" ? `定制角色出图（本地提示词，${n} 张，${where}）` : `定制角色出图（${n} 张，${where}）`;
+    const mode = adult ? "成人模式，" : "";
+    const label = body.privacy === "local"
+      ? `定制角色出图（${mode}本地提示词，${n} 张，${where}）`
+      : `定制角色出图（${mode}${n} 张，${where}）`;
     if (typeof window.sendCharacter === "function") await window.sendCharacter(body, label);
   }
 
@@ -152,4 +224,5 @@
   document.querySelector("#char-close").addEventListener("click", () => dialog.close());
   document.querySelector("#char-reset").addEventListener("click", reset);
   document.querySelector("#char-generate").addEventListener("click", generate);
+  adultBox.addEventListener("change", toggleAdult);
 })();

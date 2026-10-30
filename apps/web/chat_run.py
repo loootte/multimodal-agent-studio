@@ -75,6 +75,8 @@ SYSTEM = (
     "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
     "用户要画一个角色/人物（说到性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考角色）时，调用 character_image，"
     "只填用户说到的字段，其余用默认值；拿到句柄后再 generate_image（多张先 plan_images）。"
+    "景别/角度/构图、光照、表情、动作场景也是它的字段。只有用户这一句明确要成人内容（如“成人模式”“R18”）时才填 adult=true，"
+    "成人内容只用本机出图（backend 不填）。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
 _DRAFT_MARKERS = ("提示词", "内容是", "画面是", "画面：", "画面:")
@@ -699,6 +701,8 @@ def _generate_text_turn(
     pushes = {"stalls": 0, "seen": 0, "handle": "", "nudged": False, "tools": 0}
     image_turn = _wants_images("", user_text) or _image_request(user_text)
     open_turn = _open_prompt_request(user_text)
+    # #86：对话里开成人模式要用户这一句明确说要成人内容；只在本机判断，不发给谁。
+    run._turn_text = user_text
 
     def resume(text):
         if multi:
@@ -1367,15 +1371,19 @@ def _execute_stage_prompt(app, session_id, run, arguments) -> dict:
             "next": f"调用 generate_image，content_handle 填 {handle}。"}
 
 
-def _stage(run, text: str, source: str) -> str:
+def _stage(run, text: str, source: str, rating: str | None = None) -> str:
     staged = getattr(run, "_staged", None)
     if staged is None:
         staged = run._staged = {}
     for handle, item in staged.items():
         if item["text"] == text and item["source"] == source:
+            if rating:
+                item["rating"] = rating
             return handle
     handle = new_id("c_")
     staged[handle] = {"text": text, "source": source}
+    if rating:
+        staged[handle]["rating"] = rating
     return handle
 
 
@@ -1390,23 +1398,38 @@ def _execute_character(app, session_id, run, arguments) -> dict:
     """#53：模型从对话里填角色字段（没说的用默认值），拼成提示词登记成本轮句柄（1.1/1.2），再交给 generate_image。"""
     args = dict(arguments) if isinstance(arguments, dict) else {}
     source = args.pop("mode", None) or "model"
+    adult = args.pop("adult", False)
     if source not in ("chat", "model"):
         return {"ok": False, "tool": "character_image",
                 "error": {"code": "invalid_parameter", "message": "mode 只能是 chat 或 model。"}}
+    if adult not in (True, False):
+        return {"ok": False, "tool": "character_image",
+                "error": {"code": "invalid_parameter", "message": "adult 只能是 true 或 false。"}}
+    if adult and not character.adult_consent(getattr(run, "_turn_text", "")):
+        # #86 规则 5：模型不能自己开成人模式；用户这一句没明确要成人内容就拒绝，默认仍是 SFW。
+        return {"ok": False, "tool": "character_image", "executed": False,
+                "error": {"code": "adult_confirm_required",
+                          "message": "成人模式默认关闭；用户这一句没有明确要求成人内容，不能开启。",
+                          "hint": "不带 adult 重新调用画普通角色；用户要成人内容时请他明确说“成人模式”或“R18”，或在角色表单里打开成人开关。"}}
     for body in app.sessions.local_bodies(session_id):
         for value in args.values():
             if isinstance(value, str) and len(body) >= 8 and (body in value or (len(value) >= 8 and value in body)):
                 return {"ok": False, "tool": "character_image",
                         "error": {"code": "local_content", "message": "字段里有本地内容，只能用它的本地句柄出图。"}}
     try:
-        composed = character.compose(args, _character_config(app))
+        composed = character.compose(args, _character_config(app), adult=adult)
     except character.CharacterError as exc:
         return {"ok": False, "tool": "character_image", "executed": False, "error": exc.public()}
-    handle = _stage(run, composed["prompt"], source)
-    print(f"character {run.run_id} {handle} {source} {len(composed['prompt'])}", file=sys.stderr)
-    return {"ok": True, "tool": "character_image", "content_handle": handle, "source": source,
-            "summary": composed["summary"], "used_defaults": composed["used_defaults"], "prompt": composed["prompt"],
-            "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
+    rating = composed["rating"]
+    handle = _stage(run, composed["prompt"], source, rating if adult else None)
+    print(f"character {run.run_id} {handle} {source} {len(composed['prompt'])} {rating}", file=sys.stderr)
+    out = {"ok": True, "tool": "character_image", "content_handle": handle, "source": source,
+           "summary": composed["summary"], "used_defaults": composed["used_defaults"], "prompt": composed["prompt"],
+           "rating": rating,
+           "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
+    if adult:
+        out["next"] += " 成人内容只能用本机 ComfyUI：backend 不填。"
+    return out
 
 
 def start_character(app, session_id: str, body) -> Run:
@@ -1429,15 +1452,25 @@ def start_character(app, session_id: str, body) -> Run:
     seed = body.get("seed")
     if seed is not None and not (isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0):
         raise RequestError(400, "invalid_parameter", "seed 要是非负整数。")
+    adult = body.get("adult", False)
+    if adult not in (True, False):
+        raise RequestError(400, "invalid_parameter", "adult 只能是 true 或 false。")
+    if adult and body.get("adult_confirmed") is not True:
+        raise RequestError(400, "adult_confirm_required", "成人模式默认关闭，要先在弹窗里确认开启。")
+    if adult and backend != "local":
+        # #86 规则 4：露骨内容只走本机 ComfyUI。
+        raise RequestError(400, "nsfw_backend_not_allowed",
+                           "成人模式只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
     try:
-        composed = character.compose(body.get("fields") or {}, _character_config(app))
+        composed = character.compose(body.get("fields") or {}, _character_config(app), adult=adult)
     except character.CharacterError as exc:
         raise RequestError(400, exc.code, exc.message) from exc
     where = "本机 ComfyUI" if backend == "local" else "第三方出图"
+    mode = "成人模式，" if adult else ""
     if privacy == "local":
-        text = f"定制角色出图（本地提示词，{count} 张，{where}）"
+        text = f"定制角色出图（{mode}本地提示词，{count} 张，{where}）"
     else:
-        text = f"定制角色出图（{count} 张，{where}）：{composed['summary']}"
+        text = f"定制角色出图（{mode}{count} 张，{where}）：{composed['summary']}"
     message_id = new_id("m_")
     run = Run(session_id, message_id)
     run.agent_mode = "single"
@@ -1454,7 +1487,8 @@ def start_character(app, session_id: str, body) -> Run:
                      path=f"/api/sessions/{session_id}/character", session_id=session_id,
                      message_id=run.message_id, modalities=["text"])
     plan = {"prompt": composed["prompt"], "privacy": privacy, "backend": backend, "count": count,
-            "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body}
+            "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body,
+            "rating": composed["rating"] if adult else None}
     threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
     return run
 
@@ -1469,7 +1503,7 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
             record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
             handle, source = record["handle"], "local"
         else:
-            handle, source = _stage(run, plan["prompt"], "chat"), "chat"
+            handle, source = _stage(run, plan["prompt"], "chat", plan.get("rating")), "chat"
         run._image_plan = {"count": plan["count"], "items": []}
         last = None
         for index in range(plan["count"]):
@@ -1484,7 +1518,7 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
             else:
                 bound = _bind_submitted(plan["prompt"], tool_call)
             last = _generate_bound(app, session_id, message_id, run, handle, bound, source,
-                                   plan["backend"], plan["explicit_backend"])
+                                   plan["backend"], plan["explicit_backend"], rating=plan.get("rating"))
             if not last.get("ok"):
                 break
         done = int(getattr(run, "_images_done", 0) or 0)
@@ -1637,7 +1671,8 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     if staged:
         source = staged["source"]
         bound = _bind_submitted(staged["text"], tool_call)
-        return _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, bool(raw_backend))
+        return _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, bool(raw_backend),
+                               rating=staged.get("rating"))
     block = _handle_block(app, session_id, tool_call, run)
     if block == "file":
         return {
@@ -1655,7 +1690,26 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
     return _generate_bound(app, session_id, message_id, run, handle, bound, "local", backend, bool(raw_backend))
 
 
-def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend) -> dict:
+def _bound_prompt(bound) -> str:
+    arguments = (bound or {}).get("arguments") if isinstance(bound, dict) else None
+    return str((arguments or {}).get("prompt") or "")
+
+
+def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend,
+                    rating=None) -> dict:
+    # #86：成人角色（rating=adult）或提示词本身露骨的都算成人内容：只许本机出图，结果打 rating=adult。
+    if rating != character.RATING_ADULT and character.looks_adult(_bound_prompt(bound)):
+        rating = character.RATING_ADULT
+    if backend == "remote" and rating == character.RATING_ADULT:
+        settings = image_run.remote_settings()
+        egress.blocked("remote_image", settings.get("remote_base_url"), "nsfw_backend_not_allowed",
+                       local_derived=source == "local", handle=handle, tool="generate_image")
+        return _note_image(run, source, backend, explicit_backend, _image_error(
+            handle, "nsfw_backend_not_allowed",
+            "成人/露骨内容只能用本机 ComfyUI 出图，不发给第三方出图服务。",
+            "第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款、导致账号被封；改用本机 ComfyUI（backend 不填）。",
+            backend,
+        ))
     if backend == "remote":
         settings = image_run.remote_settings()
         import remote_image
@@ -1697,6 +1751,11 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
     _note_image(run, source, backend, explicit_backend, public)
     public["prompt_source"] = source
     public["backend"] = backend
+    if public.get("ok") and rating == character.RATING_ADULT:
+        marked = image_run.mark_rating(session_id, str(result.get("artifact_id") or ""), character.RATING_ADULT)
+        if marked:
+            result = dict(result, rating=character.RATING_ADULT, url=marked.get("url") or result.get("url"))
+        public["rating"] = character.RATING_ADULT
     if public.get("ok"):
         run._images_done = getattr(run, "_images_done", 0) + 1
         public["images_done_this_turn"] = run._images_done
@@ -1760,6 +1819,7 @@ def _artifact_event(message_id: str, result: dict) -> dict:
         "height": result.get("height"),
         "url": result.get("url"),
         "message_id": message_id,
+        **({"rating": result["rating"]} if result.get("rating") else {}),
     }
 
 

@@ -357,7 +357,10 @@ def _resource_route(handler, app, method, path, query) -> None:
                 raise resources.ResourceError(400, "invalid_query", "type 不合法。")
             if session and not re.fullmatch(r"s_[0-9a-f]{32}", session):
                 raise resources.ResourceError(400, "invalid_query", "session 不合法。")
-            _send_json(handler, 200, resources.inventory(app, kind, session, one("q") or None))
+            rating = one("rating") or None
+            if rating and rating not in resources.RATINGS:
+                raise resources.ResourceError(400, "invalid_query", "rating 只能是 adult 或 general。")
+            _send_json(handler, 200, resources.inventory(app, kind, session, one("q") or None, rating))
             return
         if path == "/api/resources/preview" and method == "GET":
             _send_json(handler, 200, resources.preview_text(app, one("id")))
@@ -674,12 +677,15 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
             return
         if path == "/api/character" and method == "GET":
-            _send_json(handler, 200, character.catalog(chat_run._character_config(app)))
+            # #86：?adult=1 给成人模式的预设（只是目录，不出图；开启要在表单里另外确认）。
+            adult = urllib.parse.parse_qs(parsed.query).get("adult", [""])[0] in ("1", "true")
+            _send_json(handler, 200, character.catalog(chat_run._character_config(app), adult=adult))
             return
         if path == "/api/character/preview" and method == "POST":
             body = _read_json(handler)
             try:
-                _send_json(handler, 200, character.compose(body.get("fields") or {}, chat_run._character_config(app)))
+                _send_json(handler, 200, character.compose(body.get("fields") or {}, chat_run._character_config(app),
+                                                           adult=body.get("adult") is True))
             except character.CharacterError as exc:
                 _send_json(handler, 400, exc.public())
             return

@@ -6,6 +6,7 @@
   const typeSel = document.querySelector("#res-type");
   const sessionSel = document.querySelector("#res-session");
   const search = document.querySelector("#res-q");
+  const ratingSel = document.querySelector("#res-rating");
   const preview = document.querySelector("#res-preview");
   const resNote = document.querySelector("#res-note");
   const TYPE_LABEL = { prompt: "本地提示词", text: "本地文字", file: "本地文件", attachment: "附件", artifact: "生成文件" };
@@ -41,6 +42,7 @@
     if (typeSel.value) params.set("type", typeSel.value);
     if (sessionSel.value) params.set("session", sessionSel.value);
     if (search.value.trim()) params.set("q", search.value.trim());
+    if (ratingSel.value) params.set("rating", ratingSel.value);
     let payload;
     try {
       payload = await api("GET", `/api/resources?${params}`);
@@ -79,6 +81,7 @@
       const meta = `${TYPE_LABEL[item.type] || item.type} · ${size(item.size || 0)} · ${when(item.created_at)} · 会话：${sessions}`;
       main.append(el("div", "hint", meta));
       const flags = [];
+      if (item.rating === "adult") flags.push("成人内容");
       if (item.running) flags.push("会话正在回答");
       if (item.shared) flags.push("字节被多个会话共用");
       if (item.mentions) flags.push(`会话里提到 ${item.mentions} 次`);
@@ -218,6 +221,7 @@
   document.querySelector("#res-delete-selected").addEventListener("click", () => remove([...selected]));
   typeSel.addEventListener("change", load);
   sessionSel.addEventListener("change", load);
+  ratingSel.addEventListener("change", load);
   let timer = null;
   search.addEventListener("input", () => {
     clearTimeout(timer);

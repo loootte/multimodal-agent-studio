@@ -125,6 +125,20 @@ def artifact_store():
     return store
 
 
+def mark_rating(session_id: str, artifact_id: str, rating: str) -> dict | None:
+    """#86：成人图在工件库里打 rating=adult，文件名加 adult_ 前缀。失败不影响已出的图。"""
+    _ensure_poc()
+    import artifacts
+
+    if not artifacts.is_artifact_id(artifact_id):
+        return None
+    try:
+        return artifact_store().mark_rating(session_id, artifact_id, rating)
+    except (artifacts.ArtifactError, OSError) as exc:
+        print(f"mark_rating failed {type(exc).__name__}", file=sys.stderr)
+        return None
+
+
 def open_artifact(session_id: str, artifact_id: str) -> tuple[str | None, str | None]:
     _ensure_poc()
     import artifacts

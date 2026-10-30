@@ -454,13 +454,18 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return
         staged = next((t for t in reversed(texts) if "工具结果 character_image" in t), "")
         if not staged:
-            self._emit_tool("character_image", {"hair_color": "红发", "outfit": "knight_armor"})
+            # #86：用例可以换模型填的字段（provider.character_args），默认还是 #53 的红发骑士。
+            args = getattr(self.server, "character_args", None) or {"hair_color": "红发", "outfit": "knight_armor"}
+            self._emit_tool("character_image", dict(args))
             return
         if '"ok": false' in staged:
             self._piece(_delta(content="不能这样画"))
             self._done()
             return
-        self._emit_tool("generate_image", {"content_handle": _content_handle(staged)})
+        args = {"content_handle": _content_handle(staged)}
+        if getattr(self.server, "character_backend", None):
+            args["backend"] = self.server.character_backend
+        self._emit_tool("generate_image", args)
 
     def _ready(self) -> bool:
         return "已就绪" in self._last_user()
@@ -3726,6 +3731,7 @@ def _image_cases(base: str, provider, directory: str, app=None) -> None:
         _delete_session_case(base, directory)
         _resources_case(base, provider, directory)
         _character_cases(base, provider, comfy.box, directory)
+        _adult_character_cases(base, provider, comfy.box, directory)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -6867,6 +6873,368 @@ def _character_units() -> None:
             if option.get("minor") and name != "age":
                 fail("只有年龄预设能标未成年")
     print("character units ok")
+
+
+def _adult_refused(fields: dict, code: str, words: tuple = (), adult: bool = True) -> str:
+    import character
+
+    try:
+        character.compose(fields, {}, adult=adult)
+    except character.CharacterError as exc:
+        if exc.code != code:
+            fail(f"成人模式 {fields} 应是 {code}，得到 {exc.code}：{exc.message}")
+        for word in words:
+            if word not in exc.message:
+                fail(f"成人模式 {fields} 的拒绝原因缺“{word}”：{exc.message}")
+        return exc.message
+    fail(f"成人模式 {fields} 没被拦下")
+    return ""
+
+
+def _adult_minor_units() -> None:
+    """#86：成人模式下每一条未成年路径都拒绝为 minor_unsafe。"""
+    import character
+
+    for fields in (
+        {"age": "teen"}, {"age": "child"}, {"age": "青少年（未成年）"}, {"age": "儿童"},
+        {"age": "17岁"}, {"age": "16 years old"}, {"age": "a 15-year-old"}, {"age": "十六岁"},
+        {"age": "19岁"}, {"age": "age 19"}, {"age": "19"}, {"age": "年龄：17"},
+    ):
+        _adult_refused(fields, "minor_unsafe")
+    _adult_refused({"age": "17岁"}, "minor_unsafe", ("未成年",))
+    _adult_refused({"age": "19岁"}, "minor_unsafe", ("20 岁以上",))
+    words = ("少女", "萝莉", "正太", "小孩", "幼女", "儿童", "学生", "loli", "shota", "child", "teen",
+             "underage", "schoolgirl", "petite young")
+    for word in words:
+        for name in ("reference", "gender", "scene", "outfit"):
+            _adult_refused({name: f"一个{word}角色" if name != "outfit" else f"{word} style outfit"}, "minor_unsafe")
+    for name in ("pose", "expression", "body_detail", "background"):
+        _adult_refused({name: "looks like a teen"}, "minor_unsafe")
+    # 预设列表里也拿不到未成年项；20 岁以上的自定义年龄可以。
+    adult_catalog = character.catalog({}, adult=True)
+    ages = [o["key"] for f in adult_catalog["fields"] if f["name"] == "age" for o in f["options"]]
+    if "teen" in ages or "child" in ages or any(o.get("minor") for f in adult_catalog["fields"] for o in f["options"]):
+        fail(f"成人模式的预设里有未成年项：{ages}")
+    ok = character.compose({"age": "28岁"}, {}, adult=True)
+    if not ok["adult"] or "28岁" not in ok["prompt"]:
+        fail(f"成人模式 28 岁应能画：{ok['prompt']}")
+    # 非成人模式的 #53 规则不变：未成年 + 暴露/不当姿势照旧拒绝。
+    _adult_refused({"age": "child", "outfit": "swimsuit"}, "minor_unsafe", adult=False)
+    print("adult minor units ok")
+
+
+def _adult_school_units() -> None:
+    """#86：成人模式禁用校服、教室和幼态体型，并说明原因。"""
+    for fields, words in (
+        ({"outfit": "school_uniform"}, ("校服",)),
+        ({"outfit": "校服"}, ("校服",)),
+        ({"outfit": "sailor school uniform"}, ("校服",)),
+        ({"outfit": "JK制服"}, ()),
+        ({"background": "classroom"}, ()),
+        ({"build": "petite"}, ("幼态",)),
+        ({"build": "娇小"}, ("幼态",)),
+        ({"body_detail": "幼态的身材"}, ("幼态",)),
+        ({"body_detail": "平胸幼体"}, ("幼态",)),
+        ({"art_style": "chibi"}, ()),
+    ):
+        _adult_refused(fields, "minor_unsafe", words)
+    print("adult school units ok")
+
+
+def _adult_original_units() -> None:
+    """#86：成人模式拒绝真人和版权角色，提示只描述原创角色。"""
+    for fields in (
+        {"reference": "Taylor Swift"},
+        {"reference": "某明星"},
+        {"reference": "《原神》里的角色"},
+        {"reference": "@someone"},
+        {"reference": "Hatsune Miku"},
+        {"reference": "我的前女友"},
+        {"scene": "和 Scarlett Johansson 在一起"},
+        {"reference": "celebrity lookalike"},
+    ):
+        _adult_refused(fields, "not_original_character", ("请只描述原创角色",))
+    print("adult original units ok")
+
+
+def _adult_default_units() -> None:
+    """#86：成人模式默认关；默认提示词仍是 SFW；body_detail 只在成人模式可用。"""
+    import character
+
+    with open(os.path.join(ROOT, "toolpacks", "builtin", "character_image", "tool.json"), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    props = manifest["parameters"]["properties"]
+    if props.get("adult", {}).get("type") != "boolean" or "adult" in (manifest["parameters"].get("required") or []):
+        fail("character_image 的 adult 应是可选布尔")
+    for name in character.EXTRA_FIELDS + character.ADULT_FIELDS:
+        if name not in props:
+            fail(f"character_image 清单缺 #86 字段 {name}")
+    base = character.compose({}, {})
+    if base["adult"] or base["rating"] != character.RATING_GENERAL or not base["prompt"].endswith("safe for work"):
+        fail(f"默认不是 SFW：{base['prompt']}")
+    if any(word in base["prompt"] for word in ("nude", "lingerie", "adults clearly over")):
+        fail(f"默认提示词里有成人内容：{base['prompt']}")
+    if base["used_defaults"] != list(character.FIELDS):
+        fail("加了 #86 字段后 used_defaults 不该变")
+    if character.catalog({})["adult"] or "body_detail" in [f["name"] for f in character.catalog({})["extra_fields"]]:
+        fail("默认表单不该是成人模式或有身体细节")
+    _adult_refused({"body_detail": "toned"}, "invalid_field", ("成人模式",), adult=False)
+    # SFW 模式选不到成人预设：写 lace_lingerie / nude 是自定义文字，照旧被露骨规则拦。
+    _adult_refused({"outfit": "nude"}, "unsafe_content", adult=False)
+    _adult_refused({"outfit": "lace_lingerie"}, "unsafe_content", adult=False)
+    adult = character.compose({}, {}, adult=True)
+    if not adult["adult"] or adult["rating"] != character.RATING_ADULT or not adult["prompt"].endswith(character.ADULT_TAIL):
+        fail(f"成人模式的结果没标 adult：{adult}")
+    if "safe for work" in adult["prompt"]:
+        fail("成人模式不该带 SFW 尾注")
+    if not character.adult_consent("成人模式，画一个原创角色") or character.adult_consent("画一个红发女骑士角色"):
+        fail("对话里的成人确认判断不对")
+    print("adult default units ok")
+
+
+def _prompt_positions(prompt: str, parts: list[str]) -> list[int]:
+    positions = []
+    for part in parts:
+        index = prompt.find(part)
+        if index < 0:
+            fail(f"提示词缺 {part}：{prompt}")
+        positions.append(index)
+    return positions
+
+
+def _adult_order_units() -> None:
+    """#86：提示词顺序 风格→画质→性别/年龄/体型→发型发色瞳色→服装→姿势→摄像机位→光照→背景→安全尾注。"""
+    import character
+
+    for adult, values, parts in (
+        (False, {"art_style": "watercolor", "gender": "male", "age": "adult", "build": "athletic",
+                 "hairstyle": "ponytail", "hair_color": "red", "eye_color": "green", "outfit": "knight_armor",
+                 "pose": "sitting", "shot": "upper_body", "angle": "low_angle", "light_type": "neon",
+                 "light_direction": "back", "background": "castle"},
+         ["watercolor painting", "best quality", " man", "thirties", "athletic", "ponytail", "red hair", "green eyes",
+          "knight", "sitting", "upper body shot", "low angle", "neon lighting", "backlighting", "castle", "safe for work"]),
+        (True, {"art_style": "realistic", "age": "mature", "build": "curvy", "body_detail": "toned",
+                "hair_color": "red", "outfit": "lace_lingerie", "pose": "lying_back", "shot": "close_up",
+                "light_type": "candle", "light_mood": "romantic", "background": "bedroom"},
+         ["photorealistic", "best quality", "woman", "mature", "curvy", "toned", "red hair", "lace lingerie",
+          "lying on back", "close-up", "candle", "romantic", "bedroom", character.ADULT_TAIL]),
+    ):
+        prompt = character.compose(values, {}, adult=adult)["prompt"]
+        positions = _prompt_positions(prompt, parts)
+        if positions != sorted(positions):
+            fail(f"提示词顺序不对（adult={adult}）：{prompt}")
+    print("adult order units ok")
+
+
+def _camera_light_units() -> None:
+    """#86：摄像机位和光照字段 SFW / 成人模式都能用，都进提示词；中文标签、自定义文字都行。"""
+    import character
+
+    catalog = character.catalog({})
+    groups = {f["name"]: f["group"] for f in catalog["extra_fields"]}
+    for name in character.CAMERA_FIELDS:
+        if groups.get(name) != "camera":
+            fail(f"表单里缺摄像机位字段 {name}")
+    for name in character.LIGHT_FIELDS:
+        if groups.get(name) != "light":
+            fail(f"表单里缺光照字段 {name}")
+    if catalog["defaults"].get("shot") != "auto" or len(catalog["fields"]) != 12:
+        fail("#86 字段默认应是自动，核心字段仍是 12 个")
+    values = {"shot": "特写", "angle": "仰视", "composition": "rule_of_thirds", "light_type": "golden_hour",
+              "light_direction": "侧光", "light_mood": "dramatic", "expression": "微笑", "scene": "在雨中撑伞"}
+    for adult in (False, True):
+        result = character.compose(values, {}, adult=adult)
+        prompt = result["prompt"]
+        for part in ("close-up", "low angle", "rule of thirds", "golden hour", "side lighting", "dramatic", "smil", "在雨中撑伞"):
+            if part not in prompt:
+                fail(f"摄像机位/光照/表情/场景没进提示词（adult={adult}）缺 {part}：{prompt}")
+        if "full body" in prompt:
+            fail(f"选了景别还留着 full body：{prompt}")
+        if "在雨中撑伞" not in result["summary"]:
+            fail("摘要里没有动作/场景")
+    plain = character.compose({}, {})["prompt"]
+    if any(word in plain for word in ("lighting", "angle shot", "composition")):
+        fail(f"默认（自动）不该加摄像机位/光照：{plain}")
+    print("camera light units ok")
+
+
+ADULT_UNITS = {
+    "minor": _adult_minor_units,
+    "school": _adult_school_units,
+    "original": _adult_original_units,
+    "default_sfw": _adult_default_units,
+    "order": _adult_order_units,
+    "camera_light": _camera_light_units,
+}
+
+
+def _adult_form_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#86 表单：要确认、只许本机、结果标 adult、本地资源能按分级筛。"""
+    box.set_mode("ok")
+    status, body = request("GET", base + "/api/character?adult=1")
+    catalog = json.loads(body)
+    outfits = {o["key"]: o for f in catalog.get("fields", []) if f["name"] == "outfit" for o in f["options"]}
+    groups = {o.get("group") for o in outfits.values()}
+    if status != 200 or not catalog.get("adult") or {"日常", "内衣", "情趣", "半裸", "全裸", "特殊"} - groups:
+        fail(f"/api/character?adult=1 不对：{status} {sorted(g for g in groups if g)}")
+    backgrounds = [o["key"] for f in catalog["fields"] if f["name"] == "background" for o in f["options"]]
+    if {"bedroom", "bathroom", "hotel"} - set(backgrounds) or "classroom" in backgrounds or "school_uniform" in outfits:
+        fail(f"成人背景/禁用项不对：{backgrounds}")
+    poses = {o.get("group") for f in catalog["fields"] if f["name"] == "pose" for o in f["options"]}
+    if {"日常", "暗示", "开放", "躺卧", "互动"} - poses:
+        fail(f"成人姿势分级不全：{poses}")
+    status, body = request("POST", base + "/api/character/preview", {"fields": {"outfit": "lace_lingerie"}, "adult": True})
+    if status != 200 or "lace lingerie" not in json.loads(body)["prompt"]:
+        fail(f"成人预览不对：{status} {body}")
+    status, body = request("POST", base + "/api/character/preview", {"fields": {"outfit": "school_uniform"}, "adult": True})
+    if status != 400 or json.loads(body).get("code") != "minor_unsafe":
+        fail(f"成人预览没拦校服：{status} {body}")
+    status, body = request("POST", base + "/api/character/preview", {"fields": {"outfit": "lace_lingerie"}})
+    if status != 400:
+        fail("SFW 预览不该接受成人服装")
+
+    session_id = _fresh_session(base)
+    adult_form = {"fields": {"outfit": "lace_lingerie", "background": "bedroom", "light_type": "candle"}, "adult": True}
+    before = len(box.prompts)
+    status, raw, _ = _character_form(base, session_id, adult_form)
+    if status != 400 or "adult_confirm_required" not in raw:
+        fail(f"成人模式没确认也出图了：{status} {raw[:200]}")
+    status, raw, _ = _character_form(base, session_id, dict(adult_form, adult="yes", adult_confirmed=True))
+    if status != 400:
+        fail("adult 不是布尔也接受了")
+    status, raw, _ = _character_form(base, session_id, dict(adult_form, adult_confirmed=True, backend="remote"))
+    if status != 400 or "nsfw_backend_not_allowed" not in raw or "条款" not in raw:
+        fail(f"成人模式 + 第三方没拒绝：{status} {raw[:200]}")
+    status, raw, _ = _character_form(base, session_id, dict(adult_form, fields={"age": "17岁"}, adult_confirmed=True))
+    if status != 400 or "minor_unsafe" not in raw:
+        fail(f"成人表单没拦未成年：{status} {raw[:200]}")
+    if len(box.prompts) != before:
+        fail("被拒绝的成人表单提交了 ComfyUI")
+
+    status, raw, events = _character_form(base, session_id, dict(adult_form, adult_confirmed=True, count=1))
+    if status != 200 or events[-1].get("type") != "message.completed" or len(box.prompts) != before + 1:
+        fail(f"成人模式本机出图没完成：{status} {[e.get('type') for e in events]}")
+    submitted = json.dumps(box.prompts[-1])
+    for part in ("lace lingerie", "bedroom", "candle", "adults clearly over 20"):
+        if part not in submitted:
+            fail(f"成人提示词缺 {part}")
+    artifacts = [e for e in events if e.get("type") == "artifact"]
+    if len(artifacts) != 1 or artifacts[0].get("rating") != "adult":
+        fail(f"成人出图事件没标 rating=adult：{artifacts}")
+    stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
+    if "成人模式" not in stored["messages"][0]["text"]:
+        fail("聊天记录里没写成人模式")
+    adult_items = json.loads(request("GET", base + f"/api/resources?session={session_id}&rating=adult")[1])["items"]
+    if len(adult_items) != 1 or adult_items[0].get("rating") != "adult" or not str(adult_items[0].get("file_name", "")).startswith("adult_"):
+        fail(f"本地资源里成人图没标出来或文件名没加 adult 前缀：{adult_items}")
+    general = json.loads(request("GET", base + f"/api/resources?session={session_id}&rating=general")[1])["items"]
+    if any(item.get("type") == "artifact" for item in general):
+        fail("rating=general 混进了成人图")
+    if request("GET", base + "/api/resources?rating=x")[0] != 400:
+        fail("坏的 rating 筛选没拒绝")
+    records = []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if name.endswith(".json") and "artifact" in root:
+                try:
+                    with open(os.path.join(root, name), encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("artifact_id") == artifacts[0].get("artifact_id"):
+                    records.append(data)
+    if records and (records[0].get("rating") != "adult" or not os.path.basename(str(records[0].get("path") or records[0].get("file") or "adult_")).startswith("adult_")):
+        fail(f"工件元数据没写 rating=adult：{records[0]}")
+
+    # SFW 表单照旧：结果标 general，不加前缀。
+    session_id = _fresh_session(base)
+    status, raw, events = _character_form(base, session_id, {"fields": {"hair_color": "红发", "shot": "upper_body"}})
+    artifacts = [e for e in events if e.get("type") == "artifact"]
+    if status != 200 or len(artifacts) != 1 or artifacts[0].get("rating") == "adult":
+        fail("SFW 表单结果被标成了成人")
+    items = json.loads(request("GET", base + f"/api/resources?session={session_id}&type=artifact")[1])["items"]
+    if not items or items[0].get("rating") != "general" or str(items[0].get("file_name", "")).startswith("adult_"):
+        fail(f"SFW 工件分级不对：{items}")
+    if "upper body shot" not in json.dumps(box.prompts[-1]):
+        fail("SFW 表单的景别没进提示词")
+    print("adult form ok")
+
+
+def _adult_chat_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#86 对话：同一句明确要成人内容才可用；成人内容发第三方会被拦并记出站。"""
+    box.set_mode("ok")
+    provider.mode = "character"
+    provider.character_args = {"adult": True, "outfit": "silk_robe", "light_type": "烛光", "shot": "半身"}
+    saved = {name: os.environ.get(name) for name in ("MAS_IMAGE_API_BASE", "MAS_IMAGE_API_KEY", "MAS_IMAGE_API_MODEL")}
+    try:
+        session_id = _fresh_session(base)
+        before, sent = len(box.prompts), len(provider.requests)
+        events = _speak(base, session_id, "画一个穿丝绸睡袍的女性角色", timeout=15)
+        blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
+        if "adult_confirm_required" not in blob or len(box.prompts) != before or _assistant_text(events) != "不能这样画":
+            fail(f"没明确要成人内容时模型填 adult=true 应被拒：{_assistant_text(events)} {blob[-300:]}")
+
+        session_id = _fresh_session(base)
+        events = _speak(base, session_id, "成人模式：画一个穿丝绸睡袍的原创女性角色", timeout=15)
+        if _assistant_text(events) != "好了" or len(box.prompts) != before + 1:
+            fail(f"明确要成人内容的对话没出图：{_assistant_text(events)}")
+        submitted = json.dumps(box.prompts[-1])
+        for part in ("silk robe", "candle", "upper body shot", "adults clearly over 20"):
+            if part not in submitted:
+                fail(f"对话成人提示词缺 {part}：{submitted[:400]}")
+        artifacts = [e for e in events if e.get("type") == "artifact"]
+        if not artifacts or artifacts[-1].get("rating") != "adult":
+            fail(f"对话成人图没标 rating=adult：{artifacts}")
+        result = next((e for e in events if e.get("type") == "tool_result" and e.get("tool") == "character_image"), None)
+        if result is not None and "adult" not in json.dumps(result, ensure_ascii=False):
+            fail("character_image 结果没带成人分级")
+
+        provider.character_args = {"adult": True, "age": "少女"}
+        session_id = _fresh_session(base)
+        sent = len(provider.requests)
+        events = _speak(base, session_id, "成人模式：画一个少女角色", timeout=15)
+        if "minor_unsafe" not in json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False) or len(box.prompts) != before + 1:
+            fail(f"对话成人模式没拦未成年：{len(box.prompts) - before} {_assistant_text(events)} {[(e.get("type"), e.get("tool") or e.get("name"), str(e.get("error") or e.get("text") or "")[:120]) for e in events]}")
+
+        os.environ["MAS_IMAGE_API_BASE"] = "http://127.0.0.1:9/v1"
+        os.environ["MAS_IMAGE_API_KEY"] = "sk-fake-character-86"
+        os.environ["MAS_IMAGE_API_MODEL"] = "fake-image-1"
+        provider.character_args = {"adult": True, "outfit": "lace_lingerie"}
+        provider.character_backend = "remote"
+        session_id = _fresh_session(base)
+        sent = len(provider.requests)
+        events = _speak(base, session_id, "成人模式：画一个穿蕾丝内衣的原创角色，用第三方出图", timeout=20)
+        blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
+        if "nsfw_backend_not_allowed" not in blob or len(box.prompts) != before + 1:
+            fail(f"成人内容发第三方没被拦：{blob[-400:]}")
+        if "sk-fake-character-86" in blob:
+            fail("事件里出现了第三方 key")
+        blocked = [item for item in _egress_since(base, events, ("sk-fake-character-86",))
+                   if item.get("reason_code") == "nsfw_backend_not_allowed"]
+        if not blocked:
+            fail("成人内容发第三方没有记出站拦截")
+    finally:
+        provider.mode = "ok"
+        provider.character_args = None
+        provider.character_backend = None
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    print("adult chat ok")
+
+
+def _adult_character_cases(base: str, provider, box: ComfyState, directory: str, case: str | None = None) -> None:
+    """#86 成人模式全部用例；case 只跑一组（evals 用）。"""
+    cases = dict(ADULT_UNITS)
+    cases["form"] = lambda: _adult_form_cases(base, provider, box, directory)
+    cases["chat"] = lambda: _adult_chat_cases(base, provider, box, directory)
+    if case is not None and case not in cases:
+        fail(f"没有这个成人模式用例：{case}")
+    for name, run in cases.items():
+        if case is None or name == case:
+            run()
 
 
 def _character_form(base: str, session_id: str, payload: dict, timeout: float = 15):
