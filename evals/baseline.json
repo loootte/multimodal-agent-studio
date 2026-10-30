@@ -71,7 +71,8 @@
         "security.desktop_notify_no_body": true,
         "security.desktop_keychain_not_in_webview": true,
         "security.desktop_default_encrypted": true,
-        "security.desktop_file_handle_only": true
+        "security.desktop_file_handle_only": true,
+        "security.desktop_update_egress_no_user_data": true
       }
     }
   }

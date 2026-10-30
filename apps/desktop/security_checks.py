@@ -369,11 +369,117 @@ def file_handle_only() -> dict:
     return {"returned": ["ok", "bytes"], "submitted": ["kind", "data", "media_type"]}
 
 
+
+def update_egress_no_user_data() -> dict:
+    """13.C / #76：更新检查默认关闭；开启后出站渠道 update 的载荷只有 version+platform，审计不含用户数据。"""
+    import tempfile
+    import desktop_config
+    import updater
+    from packages.contracts import events as contract
+    from services.gateway import egress
+
+    if "update" not in contract.EGRESS_CHANNELS:
+        fail("缺少 update 出站渠道")
+    policy = contract.EGRESS_POLICIES.get("update") or {}
+    if set(policy.get("fields") or ()) != {"version", "platform"}:
+        fail(f"update 渠道字段白名单不对：{policy.get('fields')}")
+
+    markers = [
+        "MARKER_USER_PROMPT_should_never_leave",
+        "C:\\\\Users\\\\victim\\\\secret.txt",
+        "sk-live-user-api-key-9f3a",
+        "session_sess_deadbeef",
+        "私人日记正文不应出站",
+    ]
+
+    with isolated() as tmp:
+        data = os.path.join(tmp, "data")
+        os.makedirs(data, exist_ok=True)
+        # 1) 默认关闭：不建连接、不出站
+        desktop_config.save({"wizard_completed": True, "auto_update": False, "update_url": "https://updates.example.invalid/check"}, data)
+        log = os.path.join(tmp, "egress.jsonl")
+        egress.configure(log)
+        result = updater.maybe_check(data)
+        if not result.get("skipped") or result.get("reason") != "auto_update_off":
+            fail(f"自动更新默认应跳过：{result}")
+        if os.path.isfile(log) and open(log, encoding="utf-8").read().strip():
+            fail("自动更新关闭时不应写出站记录")
+
+        # 2) 多字段载荷必须被策略拒绝
+        bad = {"version": "0.1.0", "platform": "windows-x86_64", "prompt": markers[0], "api_key": markers[2]}
+        ticket = egress.guard("update", "https://updates.example.invalid/check", bad)
+        if not ticket.hit or ticket.reason_code != "egress_policy_denied":
+            fail(f"带用户字段的更新载荷应被拒：{ticket.reason_code}")
+
+        # 3) 合法载荷走 guard；用假 transport，断言发出的 body 只有白名单字段且不含 marker
+        desktop_config.save({
+            "wizard_completed": True,
+            "auto_update": True,
+            "update_url": "https://updates.example.invalid/check",
+            "update_pubkey": "11" * 32,  # 占位；transport 返回的清单我们自己签不了就测到签名前
+        }, data)
+        sent = {}
+
+        def transport(url, body, headers):
+            sent["url"] = url
+            sent["body"] = body
+            sent["headers"] = headers
+            # 返回无签名清单 → verify 失败，但出站 already planned/sent
+            return 200, b'{"version":"9.9.9","url":"https://updates.example.invalid/pkg","sha256":"abcd","signature":"00"}'
+
+        try:
+            updater.check_for_update(data_dir=data, force=True, transport=transport)
+            fail("无有效签名应失败")
+        except updater.UpdateError as exc:
+            if exc.code not in ("update_bad_signature", "update_bad_pubkey", "update_unsigned"):
+                # 公钥长度不对也可能 update_bad_pubkey；占位 32 字节不是合法 ed25519 公钥
+                if exc.code not in ("update_bad_pubkey", "update_bad_signature", "update_crypto_unavailable"):
+                    fail(f"签名失败码不对：{exc.code}")
+
+        if not sent.get("body"):
+            fail("开启更新后应真正组包出站")
+        payload = __import__("json").loads(sent["body"].decode("utf-8"))
+        if set(payload) != {"version", "platform"}:
+            fail(f"出站载荷字段不对：{payload}")
+        blob = sent["body"] + sent["url"].encode()
+        for marker in markers:
+            if marker.encode("utf-8") in blob or marker in sent["body"].decode("utf-8", "replace"):
+                fail(f"更新出站含用户数据标记：{marker}")
+
+        # 审计记录里也不能有 marker
+        records = []
+        if os.path.isfile(log):
+            for line in open(log, encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    records.append(__import__("json").loads(line))
+        update_records = [r for r in records if r.get("channel") == "update"]
+        if not update_records:
+            fail("应有 update 渠道审计记录")
+        for rec in update_records:
+            dump = __import__("json").dumps(rec, ensure_ascii=False)
+            for marker in markers:
+                if marker in dump:
+                    fail(f"审计记录含用户数据：{marker}")
+            # 审计字段仍在 EGRESS_FIELDS 内
+            extra = set(rec) - set(contract.EGRESS_FIELDS)
+            if extra:
+                fail(f"审计多了未登记字段：{extra}")
+        return {
+            "skipped_when_off": True,
+            "policy_fields": sorted(policy["fields"]),
+            "update_records": len(update_records),
+            "payload_fields": sorted(payload),
+        }
+
+
+
 ALL = {
     "notify_no_body": notify_no_body,
     "keychain_not_in_webview": keychain_not_in_webview,
     "default_encrypted": default_encrypted,
     "file_handle_only": file_handle_only,
+    "update_egress_no_user_data": update_egress_no_user_data,
 }
 
 if __name__ == "__main__":

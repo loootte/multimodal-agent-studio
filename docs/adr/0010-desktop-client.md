@@ -48,8 +48,12 @@
 
 一次 `generate_image` 出一张、张数由 `plan_images` 决定、本地内容不进 LLM、单 Agent 模式不变、`remote_local_prompt` 默认 `refuse`。桌面壳不新增任何能把本地内容发给模型的路径。
 
+
+13.C 实现记录（[#76](https://github.com/loootte/multimodal-agent-studio/issues/76)）：Windows 安装布局用 `apps/desktop/packaging/windows/`（NSIS + 可选 embeddable Python），**不用**已废弃的 PyInstaller onefile。首次运行向导写 `desktop.json`（无密钥）；ComfyUI 探测只打用户填写或本机默认 `127.0.0.1:8188`，不扫网段。自动更新默认关，开启后走出站渠道 `update`，载荷与审计仅 `version`+`platform`，清单需 Ed25519 验签。卸载默认保留数据目录与钥匙串。未采购代码签名证书；SmartScreen 警告风险仍适用。`--desktop-token` CLI 改仅环境变量留给 13.D / #77。
+
 ## 后果
 
 - 新增 `apps/desktop/` 和对应构建流水线；Windows 优先，macOS / Linux 随后。
 - 安全清单增加「桌面壳」一节，`security.desktop_*` 进门禁。
-- 不买代码签名证书前，安装时会有系统警告；在发布说明里写明风险。
+- 不买代码签名证书前，安装时会有系统警告；在发布说明与本 ADR 写明风险（13.C 已落地安装脚本与向导，仍不签名）。
+- 13.C 评测 `security.desktop_update_egress_no_user_data` 进门禁。

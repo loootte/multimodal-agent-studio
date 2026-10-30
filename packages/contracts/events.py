@@ -41,7 +41,8 @@ EGRESS_SCHEMA = "mas.egress/1"
 # 出站渠道：对话模型、第三方出图、ComfyUI 提交（通常在本机）。
 # other 是给未登记出口留的渠道名：策略为空，一律 egress_policy_denied（12.C #59）。
 # toolpack（12.D #60）：第三方工具包在沙箱子进程里自己发起的连接。宿主看不到载荷，只按权限和目的地裁决、记主机名。
-EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local", "toolpack", "other")
+# update（13.C #76）：桌面更新检查；策略只放行 version + platform。
+EGRESS_CHANNELS = ("chat_completion", "remote_image", "comfyui_local", "toolpack", "update", "other")
 # 目的地范围：本机回环、局域网（私有地址）、第三方。
 EGRESS_SCOPES = ("local", "lan", "third_party")
 # 审计记录允许出现的全部字段。新增字段先在这里登记，并确认它不是正文、提示词、密钥或路径。
@@ -82,12 +83,18 @@ EGRESS_POLICIES = {
         "requires_permission": "network",
         "deny_loopback": True,
     },
+    # 13.C / #76：桌面更新检查。载荷只允许版本号和平台，不含会话、提示词、密钥、路径。
+    "update": {
+        "fields": ("version", "platform"),
+        "exempt": (),
+    },
     "other": None,
 }
+
 # 这些键的值是结构标记（角色、类型、模型名、编号），不当作正文参与短正文全文匹配。
 EGRESS_STRUCTURAL_KEYS = (
     "role", "type", "model", "id", "tool_call_id", "name", "detail", "size", "stream", "tool_choice",
-    "client_id", "class_type", "response_format", "media_type",
+    "client_id", "class_type", "response_format", "media_type", "version", "platform",
 )
 # 拦截或失败原因的白话说明（界面只显示这个，不回显正文）。
 EGRESS_REASONS = {

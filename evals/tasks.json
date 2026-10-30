@@ -550,6 +550,13 @@
       "kind": "desktop_security",
       "fake_only": true,
       "check": "file_handle_only"
+    },
+    {
+      "id": "security.desktop_update_egress_no_user_data",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "update_egress_no_user_data"
     }
   ]
 }
