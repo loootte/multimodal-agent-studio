@@ -30,7 +30,7 @@ powershell -File apps\desktop\packaging\windows\build.ps1 `
 ## 安装 / 卸载
 
 - 安装目录默认 `%LOCALAPPDATA%\MultimodalAgentStudio`（当前用户，不需管理员）。
-- 卸载**默认保留**数据目录和钥匙串条目；勾选「删除数据目录和钥匙串条目」才删。
+- 卸载**默认保留**数据目录和钥匙串条目；勾选「删除数据目录和钥匙串条目」才删（该可选段必须在删除 `runtime` 之前执行，否则钥匙串清理找不到内嵌 Python）。
 
 ## 缺口（本环境）
 

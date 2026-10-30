@@ -37,6 +37,16 @@ Section "Multimodal Agent Studio (required)" SecApp
     "$INSTDIR\start-mas.cmd" "" "$INSTDIR\icon.ico" 0
 SectionEnd
 
+Section /o "un.删除数据目录和钥匙串条目" UnSecData
+  ; Optional: only when user ticks this. Default is KEEP data.
+  ; Must run BEFORE UnSecApp so runtime\python still exists for keychain purge.
+  ; Data dir default: $LOCALAPPDATA\MultimodalAgentStudio\data
+  IfFileExists "$INSTDIR\runtime\python\python.exe" 0 +2
+    ExecWait '"$INSTDIR\runtime\python\python.exe" "$INSTDIR\app\apps\desktop\keychain_tool.py" purge-all'
+  RMDir /r "$LOCALAPPDATA\MultimodalAgentStudio\data"
+  Delete "$LOCALAPPDATA\MultimodalAgentStudio\desktop.json"
+SectionEnd
+
 Section "un.Multimodal Agent Studio" UnSecApp
   Delete "$DESKTOP\Multimodal Agent Studio.lnk"
   RMDir /r "$SMPROGRAMS\Multimodal Agent Studio"
@@ -50,14 +60,4 @@ Section "un.Multimodal Agent Studio" UnSecApp
   Delete "$INSTDIR\README.txt"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "Software\MultimodalAgentStudio"
-SectionEnd
-
-Section /o "un.删除数据目录和钥匙串条目" UnSecData
-  ; Optional: only when user ticks this. Default is KEEP data.
-  ; Data dir default: $LOCALAPPDATA\MultimodalAgentStudio\data
-  RMDir /r "$LOCALAPPDATA\MultimodalAgentStudio\data"
-  Delete "$LOCALAPPDATA\MultimodalAgentStudio\desktop.json"
-  ; Keychain purge helper (best-effort; ignores failure)
-  IfFileExists "$INSTDIR\runtime\python\python.exe" 0 +2
-    ExecWait '"$INSTDIR\runtime\python\python.exe" "$INSTDIR\app\apps\desktop\keychain_tool.py" purge-all'
 SectionEnd
