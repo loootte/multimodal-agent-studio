@@ -263,7 +263,10 @@
    - 层：运行时（`loop.py` 按上下文上限设阈值压缩，大工具结果只保留结构字段）。
    - 句柄隔离：不破坏。摘要发出前过 `local_fingerprint`；句柄不展开；`plan_images` 计划、未完成确认和句柄清单固定保留；原始会话留在本机。
    - 验收：超过阈值的长对话能继续，token 下降；压缩前后出图张数不变；阈值以下请求逐字节不变。
-   - 进度：实现在 `issue-79` 分支，见 [docs/context-compaction.md](docs/context-compaction.md)。压缩在 `services/runtime/compaction.py`；默认模型摘要（只发结构字段和句柄，前后都过本地正文检查，命中或失败退回确定性抽取并记审计）；压缩后才出现的 `session_query` 按 `ctx_N` 引用取回原文（兜底手段，本地正文只给句柄）；参数可在设置页配置（`data/context.json`，非法值回退默认）。
+   - 进度：实现在 `issue-79` 分支，见 [docs/context-compaction.md](docs/context-compaction.md)。压缩在 `services/runtime/compaction.py`；默认模型摘要（只发结构字段和句柄，前后都过本地正文检查，命中或失败退回确定性抽取并记审计）；压缩后才出现的 `session_query` 按 `ctx_N` 引用取回原文（兜底手段，本地正文只给句柄）；参数可在设置页配置（`data/context.json`，非法值回退默认）；被裁剪 / 折叠的原文存进本机会话记录（随 12.F 明文 / 加密 / 只在内存，不进会话视图和导出），下一次运行也能按引用取回。
+   - 后续（未做）：
+     - 确定性抽取作为可选默认：现在默认是模型摘要、确定性抽取只做退回手段；以后在设置里允许把确定性抽取设为默认（不调用摘要模型、零额外出站），并补对比评测（摘要质量、token、延迟）。
+     - 摘要模型可配：现在摘要走当前聊天供应商和模型；以后让摘要单独配置供应商和模型（比如更便宜的模型或本机模型），配置进 `data/context.json` 或供应商设置，出站仍走同一个网关和 `egress.inspect`，摘要调用的 token 计入预算。
 3. [#80](https://github.com/loootte/multimodal-agent-studio/issues/80) **14.C** 通用规划工具：todo / plan 模式 / goal（P1）
    - 层：运行时宿主工具和网页 todo 面板；编排者用 todo 拆分文字和研究任务。
    - 句柄隔离：不破坏。todo 和 goal 文字过指纹；todo 里的数量不算张数，张数仍只由 `plan_images` 决定；不做 Code 模式。

@@ -61,6 +61,7 @@ def _run(
     validate=None,
     choose=None,
     compaction=None,
+    archive=None,
 ):
     """产出统一事件。模型文本里说已经执行，不算执行。
 
@@ -73,6 +74,9 @@ def _run(
     把较早轮次压成摘要（默认模型生成，发前回后过本地正文检查，命中退回确定性抽取），整体再过一次检查，
     命中就退回不压缩。只记 context.compacted（条数、token 数），不记正文。发生过压缩以后工具契约里才多出
     session_query，按 ctx_N 引用取回被裁剪 / 折叠的原文（运行时自己执行，过本地正文检查，结果标 untrusted）。
+
+    archive 可选：调用方传进来的 compaction.Archive（例如网页从本地会话记录读回的），压缩时往里加原文，
+    session_query 也能取回之前运行存下的；调用方在运行后把 archive.added 写回本地。没传就只在本次运行内存里。
     """
     req = normalize(request)
     run_id = run_id or new_run_id()
@@ -103,7 +107,7 @@ def _run(
     threshold = compactor.threshold(describe(req["model"])) if compactor else None
     fixed = context.tokens(req.get("system") or "") + context.tokens(
         json.dumps(req.get("tools") or [], ensure_ascii=False, sort_keys=True))
-    archive = context.Archive()
+    archive = archive if isinstance(archive, context.Archive) else context.Archive()
     query_tool = None  # 发生过压缩、开着 session_query 以后才有（阈值以下请求不变）
     summarize = _summary_call(req, compactor, api_key=api_key, timeout_sec=timeout_sec, cancel=cancel,
                               artifacts=artifacts, local_bodies=local_bodies, base_url=base_url)

@@ -370,11 +370,35 @@ def _pinned(messages: list, start: int, end: int) -> set[int]:
     return keep
 
 
+ARCHIVE_VERSION = 1
+ARCHIVE_ITEMS = 400          # 一个会话最多留多少条原文（超了丢最早的）
+ARCHIVE_CHARS = 2_000_000    # 原文总字数上限
+
+
+def _digest(message) -> str:
+    """同一条原始消息（role + parts）跨运行得到同一个引用：只在本机算，不出站、不落盘。"""
+    import hashlib
+
+    body = {"role": message.get("role"), "parts": message.get("parts")} if isinstance(message, dict) else message
+    return hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _archivable(message) -> bool:
+    return isinstance(message, dict) and isinstance(message.get("role"), str) and isinstance(message.get("parts"), list)
+
+
 class Archive:
-    """本次运行内被裁剪 / 折叠的原始消息，按 ctx_N 引用。只在内存里，不落盘，不改会话存储。"""
+    """被裁剪 / 折叠的原始消息，按 ctx_N 引用。
+
+    运行时只在内存里用它；网页把它存进本地会话记录（session["context_archive"]，跟会话文件一起按 12.F 落盘：
+    明文 / 加密信封 / 仅内存），下一次运行再 load 回来，所以 session_query 能跨运行取回。
+    同一条原文（role + parts 相同）复用同一个引用。added 是本次运行新加的引用（调用方据此决定要不要写回）。"""
 
     def __init__(self) -> None:
         self.items: dict[str, dict] = {}
+        self.added: list[str] = []
+        self._by_digest: dict[str, str] = {}
+        self._next = 0
 
     def __len__(self) -> int:
         return len(self.items)
@@ -384,6 +408,50 @@ class Archive:
 
     def get(self, ref):
         return self.items.get(ref)
+
+    def ref_of(self, message) -> str | None:
+        return self._by_digest.get(_digest(message))
+
+    def reserve(self) -> int:
+        self._next += 1
+        return self._next
+
+    def put(self, ref: str, message: dict) -> None:
+        if not REF.fullmatch(ref) or not _archivable(message):
+            return
+        if ref not in self.items:
+            self.added.append(ref)
+        self.items[ref] = message
+        self._by_digest[_digest(message)] = ref
+        self._next = max(self._next, int(ref[4:]))
+
+    @classmethod
+    def load(cls, data) -> "Archive":
+        """从会话记录读回。格式不对的条目丢掉；不认识的版本当空档案。"""
+        archive = cls()
+        if not isinstance(data, dict) or data.get("version") != ARCHIVE_VERSION:
+            return archive
+        items = data.get("items")
+        if not isinstance(items, dict):
+            return archive
+        for ref, message in items.items():
+            if isinstance(ref, str) and REF.fullmatch(ref) and _archivable(message):
+                archive.items[ref] = message
+                archive._by_digest[_digest(message)] = ref
+                archive._next = max(archive._next, int(ref[4:]))
+        return archive
+
+    def dump(self) -> dict:
+        """写回会话记录用。超过条数 / 字数上限时丢最早的（引用号小的）。"""
+        ordered = sorted(self.items.items(), key=lambda pair: int(pair[0][4:]))
+        kept, chars = [], 0
+        for ref, message in reversed(ordered):
+            size = len(json.dumps(message, ensure_ascii=False, default=str))
+            if len(kept) >= ARCHIVE_ITEMS or chars + size > ARCHIVE_CHARS:
+                break
+            kept.append((ref, message))
+            chars += size
+        return {"version": ARCHIVE_VERSION, "items": dict(reversed(kept))}
 
 
 def _ref_of(message) -> str | None:
@@ -408,13 +476,14 @@ def compact(messages: list, config: Compaction, threshold: int, *, local_bodies=
         return None, info
     keep_refs = archive is not None and config.session_query
     pending: dict[str, dict] = {}
-    counter = [len(archive) if archive is not None else 0]
 
     def new_ref(original) -> str | None:
         if not keep_refs:
             return None
-        counter[0] += 1
-        ref = f"ctx_{counter[0]}"
+        known_ref = archive.ref_of(original)  # 同一条原文（含之前运行存下的）复用引用
+        if known_ref:
+            return known_ref
+        ref = f"ctx_{archive.reserve()}"
         pending[ref] = original
         return ref
 
@@ -470,6 +539,9 @@ def compact(messages: list, config: Compaction, threshold: int, *, local_bodies=
                     for line in _text(message).split("\n"):
                         if line.startswith("[可取回] "):
                             known = [item for item in line[len("[可取回] "):].split(", ") if REF.fullmatch(item)] + known
+            if keep_refs:
+                # 档案里更早的引用（含之前运行存下的）也列出来，模型才知道能取回什么。
+                known = [ref for ref in archive.items if ref not in known] + known
             if keep_refs and known:
                 known = list(dict.fromkeys(known))
                 extra.append(f"[可取回] " + ", ".join(known[-60:]))
@@ -498,7 +570,8 @@ def compact(messages: list, config: Compaction, threshold: int, *, local_bodies=
             info["blocked"] = reason
             return None, info
     if archive is not None:
-        archive.items.update(pending)
+        for ref, original in pending.items():
+            archive.put(ref, original)
     info.update(tokens_after=after, messages_after=len(work))
     return work, info
 

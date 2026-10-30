@@ -1436,7 +1436,7 @@ def _default_summary_reply(request) -> str:
 
 
 def _compaction_flow(*, history, compaction, local_bodies=None, budget=None, plan=3, script=None,
-                     summary_reply=_default_summary_reply):
+                     summary_reply=_default_summary_reply, archive=None):
     """脚本模型：plan_images → plan 张 generate_image → 收尾。宿主状态（计划、已出张数）只在 execute 里。
     script：自定义回复列表（项可以是 callable(request) -> 事件列表）；摘要请求单独应答（summary_reply），
     记在 state["summary_calls"]，不占脚本步数。"""
@@ -1493,7 +1493,7 @@ def _compaction_flow(*, history, compaction, local_bodies=None, budget=None, pla
         {"model": "eval-compaction", "messages": history, "tools": []},
         api_key=check.SECRET, cancel=threading.Event(), timeout_sec=2, run_id=run_id,
         execute=execute, mutating=lambda name, arguments=None: False, validate=lambda name, arguments: None,
-        compaction=compaction, local_bodies=local_bodies, budget=budget,
+        compaction=compaction, local_bodies=local_bodies, budget=budget, archive=archive,
     ))
     from services import telemetry
 
@@ -1606,6 +1606,8 @@ def run_compaction(h: Harness, task: dict, live: bool) -> dict:
             return _case_model_summary(task)
         if case == "settings":
             return _case_compaction_settings(task)
+        if case == "cross_run":
+            return _case_cross_run(task)
         raise Failed(f"不认识的 compaction 用例：{case}")
     finally:
         _restore_gateway()
@@ -1748,6 +1750,94 @@ def _case_model_summary(task: dict) -> dict:
         history=history, compaction=Compaction(limit=2000, summary="deterministic"), plan=1)
     expect(not state5["summary_calls"], "确定性模式调用了摘要模型")
     return {"summary_calls": len(summary_calls)}
+
+
+def _case_cross_run(task: dict) -> dict:
+    """跨运行取回：第一次运行压缩时的原文存进本地会话记录（加密模式下是密文），下一次运行（历史里已没有那条原文）
+    照样能用 session_query 取回；同一条原文复用引用；取回仍过本地正文检查、只给句柄、标 untrusted；丢掉本地内容时档案一并抹掉。"""
+    import re
+    import tempfile
+
+    import chat_run
+    import store as web_store
+    from packages.artifacts import crypto as storage_crypto
+    from services.runtime.compaction import Archive, Compaction
+
+    marker = task.get("marker", "LOCAL-CROSS")
+    body = f"只在本机的第一次运行检索原文 {marker} 不许发给模型"
+    config = Compaction(limit=2000, summary="deterministic")
+    root = tempfile.mkdtemp(prefix="evals-archive-")
+    try:
+        storage = storage_crypto.Storage("encrypted", storage_crypto.Cipher(storage_crypto.new_master()))
+        sessions = web_store.SessionStore(os.path.join(root, "sessions"), storage=storage)
+        session_id = sessions.create("u_" + "e" * 32)["session_id"]
+
+        class App:
+            pass
+
+        app = App()
+        app.sessions = sessions
+        # 第一次运行：长历史压缩，原文进档案，运行后写回本地会话记录。
+        first = chat_run._load_archive(app, session_id)
+        expect(len(first) == 0, "新会话的档案应当是空的")
+        history1 = _compaction_history(12, marker="甲", secret_result=body)
+        events1, calls1, _s1, _r1 = _compaction_flow(history=history1, compaction=config, plan=1, archive=first,
+                                                      local_bodies=[body])
+        expect(any(e.get("type") == "context.compacted" for e in events1) and first.added, "第一次运行没有压缩或没存原文")
+        text1 = "\n".join(_texts(calls1[0]["messages"]))
+        ref_secret = re.search(r"\[工具结果 lookup_demo (ctx_\d+)\]", text1).group(1)
+        ref_plain = re.findall(r"\[工具结果 lookup_demo (ctx_\d+)\]", text1)[1]
+        expect(marker not in json.dumps(calls1, ensure_ascii=False), "第一次运行把本地正文发给了模型")
+        chat_run._save_archive(app, session_id, first)
+        # 落盘的是加密信封，明文里看不到原文；view 里也没有档案。
+        with open(sessions._path(session_id), "r", encoding="utf-8") as handle:
+            raw = handle.read()
+        expect(marker not in raw and "很长的检索结果" not in raw and "context_archive" not in raw, "档案没有随会话加密落盘")
+        expect("context_archive" not in sessions.view(sessions.get(session_id)), "会话视图里带出了档案")
+        # 换一个存储实例（像重启后）读回。
+        reopened = web_store.SessionStore(os.path.join(root, "sessions"), storage=storage)
+        app.sessions = reopened
+        second = chat_run._load_archive(app, session_id)
+        expect(ref_secret in second and ref_plain in second and not second.added, "第二次运行没读回档案")
+        # 第二次运行：历史里没有第一次的工具结果；压缩后能取回第一次的原文，引用号不冲突。
+        history2 = _compaction_history(12, marker="乙")
+        script = [
+            _query_step(lambda text: {"ref": ref_plain}),
+            _query_step(lambda text: {"ref": ref_secret}),
+            [{"type": "message.delta", "text": "查完了"}],
+        ]
+        events2, calls2, state2, records2 = _compaction_flow(history=history2, compaction=config, script=script,
+                                                             archive=second, local_bodies=[body])
+        expect(events2[-1].get("type") == "message.completed", f"第二次运行没跑完：{events2[-1]}")
+        expect(all(_offered(c, "session_query") for c in calls2), "第二次运行压缩后没提供 session_query")
+        summary2 = "\n".join(_texts(calls2[0]["messages"]))
+        expect(ref_plain in summary2, "第二次运行的摘要里没列出之前运行可取回的引用")
+        got = _last_tool_result(calls2[1])
+        expect(got["message"].get("trust") == "untrusted" and got["result"].get("ok") and
+               "很长的检索结果。" * 10 in got["result"].get("text", "") and "art_00000001" in got["result"].get("handles", []),
+               "跨运行没取回之前运行的原文")
+        refused = _last_tool_result(calls2[2])["result"]
+        expect(refused.get("ok") is False and str(refused.get("error", {}).get("code", "")).startswith("local_") and
+               "text" not in refused, f"跨运行取回本地正文没拦：{refused}")
+        expect(marker not in json.dumps(calls2, ensure_ascii=False), "跨运行时本地正文进了模型请求")
+        expect(any(r.get("kind") == "security.egress_denied" and r.get("channel") == "session_query" for r in records2),
+               "跨运行拦截没记安全事件")
+        new_refs = set(second.added)
+        expect(new_refs and not (new_refs & set(first.items)), "第二次运行的新引用和之前的冲突")
+        # 同一条原文再压缩：复用引用，不新增。
+        again = Archive.load(second.dump())
+        _e3, _c3, _s3, _r3 = _compaction_flow(history=history2, compaction=config, plan=1, archive=again)
+        expect(not again.added, f"同一条原文换了新引用：{again.added}")
+        # 丢掉本地内容：档案里含它的原文一并抹掉。
+        chat_run._save_archive(app, session_id, second)
+        handle = reopened.add_content(session_id, body)["handle"]
+        expect(reopened.forget_content(session_id, handle) == "forgotten", "没能丢掉本地内容")
+        scrubbed = Archive.load(reopened.context_archive(session_id))
+        expect(marker not in json.dumps(scrubbed.items, ensure_ascii=False) and ref_plain in scrubbed,
+               "丢掉本地内容后档案里还有它")
+        return {"refs_first": len(first.items), "refs_second": len(second.items)}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _case_compaction_settings(task: dict) -> dict:

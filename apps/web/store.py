@@ -1035,6 +1035,27 @@ class SessionStore:
             session["updated_at"] = _now()
             self._write(session)
 
+    def context_archive(self, session_id: str):
+        """14.B（#79）：上下文压缩时被裁剪 / 折叠的原文（compaction.Archive.dump 的格式）。
+        跟会话文件一起存（明文 / 加密信封 / 仅内存，按 12.F），不出本机，不进 view / 导出。"""
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+        if session is None:
+            return None
+        return session.get("context_archive")
+
+    def save_context_archive(self, session_id: str, data: dict) -> None:
+        check_id(session_id, "会话")
+        if not isinstance(data, dict):
+            return
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return
+            session["context_archive"] = data
+            self._write(session)
+
     def put_content(self, session_id: str, message_id: str, text: str) -> dict:
         """画面描述先入库。句柄是随机标识，不编码正文。同一条消息只记一次。"""
         check_id(session_id, "会话")
@@ -1253,6 +1274,8 @@ class SessionStore:
                     message["runtime"] = _scrub_value(message["runtime"], secrets)
             if isinstance(session.get("memory"), dict):
                 session["memory"] = _scrub_value(session["memory"], secrets)
+            if isinstance(session.get("context_archive"), dict):  # 14.B 压缩原文里的也一并抹掉
+                session["context_archive"] = _scrub_value(session["context_archive"], secrets)
             session["contents"] = kept
             session["updated_at"] = _now()
             self._write(session)

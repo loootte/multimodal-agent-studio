@@ -655,6 +655,14 @@
       "kind": "compaction",
       "fake_only": true,
       "case": "settings"
+    },
+    {
+      "id": "security.compaction_cross_run",
+      "category": "security",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "cross_run",
+      "marker": "LOCAL-CROSS-91be"
     }
   ]
 }

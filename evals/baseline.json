@@ -85,7 +85,8 @@
         "security.compaction_no_local_body": true,
         "runtime.compaction_session_query": true,
         "security.compaction_model_summary": true,
-        "runtime.compaction_settings": true
+        "runtime.compaction_settings": true,
+        "security.compaction_cross_run": true
       }
     }
   }
