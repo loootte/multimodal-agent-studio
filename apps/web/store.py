@@ -241,6 +241,62 @@ def _keychain_get(entry: str) -> str | None:
         return None
 
 
+class ContextSettingsStore:
+    """14.B（#79）上下文压缩设置（context.json）。读的时候逐项校验，非法项回退默认值；文件坏了整个用默认值。"""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.RLock()
+
+    def _saved(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            return "corrupt"
+
+    def current(self) -> dict:
+        from services.runtime import compaction
+
+        with self._lock:
+            raw = self._saved()
+        values, _warnings = compaction.settings(None if raw == "corrupt" else raw)
+        return values
+
+    def public(self) -> dict:
+        from services.runtime import compaction
+
+        with self._lock:
+            raw = self._saved()
+        values, warnings = compaction.settings(None if raw == "corrupt" else raw)
+        if raw == "corrupt":
+            warnings = ["*"]
+        return {"values": values, "defaults": dict(compaction.DEFAULTS), "warnings": warnings}
+
+    def update(self, body, reset: bool = False) -> dict:
+        """只存校验通过的项（和已存的合并）；非法项不存，返回里列进 warnings，生效值是默认值。"""
+        from services.runtime import compaction
+
+        if not isinstance(body, dict):
+            body = {}
+        with self._lock:
+            raw = self._saved()
+            saved = raw if isinstance(raw, dict) and not reset else {}
+            values, warnings = compaction.settings(body)
+            accepted = {key: values[key] for key in body if key in compaction.DEFAULTS and key not in warnings}
+            cleared = [key for key in body if key in compaction.DEFAULTS and body[key] in (None, "")]
+            merged = {key: value for key, value in saved.items() if key in compaction.DEFAULTS and key not in cleared}
+            merged.update(accepted)
+            merged, _ = compaction.settings(merged)
+            stored = {key: value for key, value in merged.items() if value != compaction.DEFAULTS[key]}
+            _atomic_write(self.path, stored)
+        view = self.public()
+        view["warnings"] = sorted(set(view["warnings"]) | set(warnings))
+        return view
+
+
 class ProviderStore:
     def __init__(self, path: str):
         self.path = path
@@ -979,6 +1035,27 @@ class SessionStore:
             session["updated_at"] = _now()
             self._write(session)
 
+    def context_archive(self, session_id: str):
+        """14.B（#79）：上下文压缩时被裁剪 / 折叠的原文（compaction.Archive.dump 的格式）。
+        跟会话文件一起存（明文 / 加密信封 / 仅内存，按 12.F），不出本机，不进 view / 导出。"""
+        check_id(session_id, "会话")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+        if session is None:
+            return None
+        return session.get("context_archive")
+
+    def save_context_archive(self, session_id: str, data: dict) -> None:
+        check_id(session_id, "会话")
+        if not isinstance(data, dict):
+            return
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                return
+            session["context_archive"] = data
+            self._write(session)
+
     def put_content(self, session_id: str, message_id: str, text: str) -> dict:
         """画面描述先入库。句柄是随机标识，不编码正文。同一条消息只记一次。"""
         check_id(session_id, "会话")
@@ -1197,6 +1274,8 @@ class SessionStore:
                     message["runtime"] = _scrub_value(message["runtime"], secrets)
             if isinstance(session.get("memory"), dict):
                 session["memory"] = _scrub_value(session["memory"], secrets)
+            if isinstance(session.get("context_archive"), dict):  # 14.B 压缩原文里的也一并抹掉
+                session["context_archive"] = _scrub_value(session["context_archive"], secrets)
             session["contents"] = kept
             session["updated_at"] = _now()
             self._write(session)

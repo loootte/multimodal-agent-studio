@@ -1412,6 +1412,467 @@ def run_mcp(h: Harness, task: dict, live: bool) -> dict:
             shutil.rmtree(source, ignore_errors=True)
 
 
+def _compaction_history(turns: int, marker: str = "", long: int = 120, secret_result: str = "") -> list:
+    """一段很长的历史：用户问、助手答、带长文本的工具结果（结构字段里有句柄和 artifact_id）。
+    secret_result：放进第 0 轮工具结果正文里的文字（用来测本地正文只在归档原文里）。"""
+    from services.runtime import injection
+
+    history = []
+    for index in range(turns):
+        history.append({"role": "user", "parts": [{"type": "text", "text": f"第 {index} 轮：帮我查一下资料 {marker}"}]})
+        history.append({"role": "assistant", "parts": [{"type": "text", "text": "好的，我查一下。" + "说明" * 40}]})
+        text = "很长的检索结果。" * long
+        if index == 0 and secret_result:
+            text = secret_result + text
+        history.append(injection.tool_result_message("lookup_demo", {
+            "ok": True, "tool": "lookup_demo", "artifact_id": f"art_{index:08x}",
+            "content_handle": "c_" + f"{index:02x}" * 8, "text": text,
+        }))
+    return history
+
+
+def _default_summary_reply(request) -> str:
+    return "较早轮次：用户分多轮查资料，助手逐轮调用 lookup_demo。"
+
+
+def _compaction_flow(*, history, compaction, local_bodies=None, budget=None, plan=3, script=None,
+                     summary_reply=_default_summary_reply, archive=None):
+    """脚本模型：plan_images → plan 张 generate_image → 收尾。宿主状态（计划、已出张数）只在 execute 里。
+    script：自定义回复列表（项可以是 callable(request) -> 事件列表）；摘要请求单独应答（summary_reply），
+    记在 state["summary_calls"]，不占脚本步数。"""
+    import copy
+    import threading
+
+    from services.gateway import registry
+    from services.runtime.compaction import SUMMARIZER_SYSTEM
+    from services.runtime.loop import new_run_id, run as runtime_run
+
+    if script is None:
+        script = [[{"type": "tool.requested", "name": "plan_images", "arguments": {"count": plan}}]]
+        script += [[{"type": "tool.requested", "name": "generate_image",
+                     "arguments": {"content_handle": "c_" + "ab" * 8}}] for _ in range(plan)]
+        script += [[{"type": "message.delta", "text": "做完了"}]]
+
+    class Snapshot(check._ScriptAdapter):
+        """记下每次请求发出那一刻的副本（运行时会就地改消息列表）；摘要请求另记。"""
+
+        summary_calls: list = []
+
+        def stream(self, request, **kwargs):
+            if request.get("system") == SUMMARIZER_SYSTEM:
+                self.summary_calls.append(copy.deepcopy(request))
+                text = summary_reply(request) if summary_reply else ""
+                if text:
+                    yield {"type": "message.delta", "text": text}
+                return
+            self.calls.append(copy.deepcopy(request))
+            replies = self.replies or []
+            index = len(self.calls) - 1
+            item = replies[index] if index < len(replies) else [{"type": "message.delta", "text": "额外一步"}]
+            yield from (item(request) if callable(item) else item)
+
+    adapter = Snapshot(script)
+    adapter.summary_calls = []
+    check._install_script(registry, "eval-compaction", adapter)
+    state = {"plan": 0, "images": 0, "generate_calls": 0}
+
+    def execute(name, arguments):
+        if name == "plan_images":
+            state["plan"] = int(arguments.get("count") or 0)
+            return {"ok": True, "tool": name, "images_total": state["plan"], "images_done": state["images"]}
+        if name == "generate_image":
+            state["generate_calls"] += 1
+            state["images"] += 1  # 一次调用一张
+            return {"ok": True, "tool": name, "artifact_id": "art_" + f"{state['images']:08x}",
+                    "images_done": state["images"], "images_total": state["plan"]}
+        state.setdefault("executed", []).append(name)
+        return {"ok": False, "tool": name, "error": {"code": "unknown_tool"}}
+
+    run_id = new_run_id()
+    events = list(runtime_run(
+        {"model": "eval-compaction", "messages": history, "tools": []},
+        api_key=check.SECRET, cancel=threading.Event(), timeout_sec=2, run_id=run_id,
+        execute=execute, mutating=lambda name, arguments=None: False, validate=lambda name, arguments: None,
+        compaction=compaction, local_bodies=local_bodies, budget=budget, archive=archive,
+    ))
+    from services import telemetry
+
+    records = [item for item in telemetry.read(limit=0) if item.get("run_id") == run_id]
+    state["summary_calls"] = adapter.summary_calls
+    return events, adapter.calls, state, records
+
+
+def _texts(messages) -> list:
+    return ["".join(p.get("text") or "" for p in m.get("parts") or []) for m in messages]
+
+
+def _offered(request, name) -> bool:
+    return any((tool.get("name") or (tool.get("function") or {}).get("name")) == name
+               for tool in request.get("tools") or [] if isinstance(tool, dict))
+
+
+def _request_tokens(request) -> int:
+    from services.runtime import compaction
+
+    return compaction.tokens_in(request.get("messages") or [])
+
+
+def run_compaction(h: Harness, task: dict, live: bool) -> dict:
+    """14.B #79：上下文压缩。
+    keeps_plan：超过阈值的长对话压缩后继续跑完，请求 token 明显下降；plan_images 计划和句柄清单固定保留，
+      张数等于计划、每次 generate_image 一张；不压缩时同样的 token 预算会用尽；阈值以下请求逐字节不变；
+    no_local_body：摘要里被塞进本地正文时拦下并记录、退回不压缩，本地正文没进任何请求；事件不带正文；
+    session_query / model_summary / settings：见各自的函数。"""
+    from services.runtime.budget import Budget
+    from services.runtime.compaction import Compaction, EVENT_FIELDS, SUMMARY_BY, SUMMARY_CHANNEL
+
+    case = task["case"]
+    try:
+        if case == "keeps_plan":
+            history = _compaction_history(12)
+            events, calls, state, records = _compaction_flow(
+                history=history, compaction=Compaction(limit=2000), budget=Budget(steps=12, tokens=3000), plan=4)
+            expect(events[-1].get("type") == "message.completed", f"压缩后没跑完：{events[-1]}")
+            compacted = [e for e in events if e.get("type") == "context.compacted"]
+            expect(compacted, "超过阈值却没有压缩")
+            first, last = _request_tokens(calls[0]), _request_tokens(calls[-1])
+            expect(_request_tokens({"messages": history}) > 2000 * 0.7, "历史不够长，测不到阈值")
+            expect(first < _request_tokens({"messages": history}) * 0.5, "压缩后请求 token 没有明显下降")
+            expect(last <= 2000, f"后续请求仍超上限：{last}")
+            expect(any(e.get("turns_compacted") for e in compacted), "没有把较早轮次压成摘要")
+            expect(state["plan"] == 4 and state["images"] == 4 and state["generate_calls"] == 4,
+                   f"张数不等于计划或一次调用不止一张：{state}")
+            final = calls[-1]["messages"]
+            texts = ["".join(p.get("text") or "" for p in m.get("parts") or []) for m in final]
+            expect(any("工具结果 plan_images" in t and '"images_total": 4' in t for t in texts), "plan_images 计划没有固定保留")
+            summary = [t for t, m in zip(texts, final) if m.get("channel") == SUMMARY_CHANNEL]
+            expect(summary and "c_" + "00" * 8 in summary[0], "摘要里没有句柄清单")
+            # 尾部（keep_tail）里的工具结果原样保留；尾部之外的大结果裁剪或折叠。
+            expect(any(e.get("trimmed") for e in compacted) and
+                   sum("很长的检索结果。" * 3 in t for t in texts) <= 2, "大工具结果没有裁剪")
+            for event in compacted:
+                extra = set(event) - set(EVENT_FIELDS) - {"type", "run_id"}
+                expect(not extra and all(isinstance(event.get(k), (int, type(None))) for k in EVENT_FIELDS
+                                         if k != "summary_by") and event.get("summary_by") in SUMMARY_BY,
+                       f"context.compacted 带了多余字段：{extra}")
+            expect(any(r.get("kind") == "context.compacted" for r in records), "遥测里没有 context.compacted")
+            # 同样预算不压缩会用尽：说明是压缩让长对话跑完的。
+            events_off, _calls, _state, _r = _compaction_flow(
+                history=history, compaction=False, budget=Budget(steps=12, tokens=3000), plan=4)
+            expect(events_off[-1].get("code") == "budget_exceeded", "不压缩时这段对话本该超 token 预算")
+            # 阈值以下：默认压缩开着，请求与关掉压缩时逐字节一致。
+            short = _compaction_history(1)
+            _e1, on, _s1, _r1 = _compaction_flow(history=short, compaction=None)
+            _e2, off, _s2, _r2 = _compaction_flow(history=short, compaction=False)
+            dump = lambda calls: json.dumps(calls, ensure_ascii=False, sort_keys=True)
+            expect(dump(on) == dump(off), "阈值以下请求和不压缩时不一致")
+            expect(not any(e.get("type") == "context.compacted" for e in _e1), "阈值以下不该压缩")
+            return {"tokens_history": _request_tokens({"messages": history}), "tokens_first": first,
+                    "tokens_last": last, "images": state["images"], "compactions": len(compacted)}
+        if case == "no_local_body":
+            marker = task.get("marker", "LOCAL-COMPACT")
+            body = f"这是只留在本机的私密正文 {marker} 不许出本机"
+            history = _compaction_history(12)
+            leaky = Compaction(limit=2000, summarize=lambda messages: "摘要：" + body)
+            events, calls, state, records = _compaction_flow(
+                history=history, compaction=leaky, local_bodies=[body], plan=1)
+            expect(not any(e.get("type") == "context.compacted" for e in events), "带本地正文的摘要被采用了")
+            sent = json.dumps(calls, ensure_ascii=False)
+            expect(marker not in sent and body not in sent, "本地正文进了模型请求")
+            kinds = [r.get("kind") for r in records]
+            expect("context.compaction_blocked" in kinds, "没有记录 context.compaction_blocked")
+            expect(any(r.get("kind") == "security.egress_denied" and r.get("error_code") in
+                       ("local_content", "local_content_encoded", "local_fingerprint") for r in records),
+                   "没有记录安全事件")
+            expect(marker not in json.dumps(records, ensure_ascii=False), "遥测里出现了本地正文")
+            expect(_request_tokens(calls[0]) == _request_tokens({"messages": history}), "被拦后应当退回不压缩")
+            # 编码后的正文同样拦下。
+            import base64
+
+            encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+            sneaky = Compaction(limit=2000, summarize=lambda messages: "摘要 " + encoded)
+            events2, calls2, _s, records2 = _compaction_flow(
+                history=history, compaction=sneaky, local_bodies=[body], plan=1)
+            expect(not any(e.get("type") == "context.compacted" for e in events2), "编码后的本地正文摘要被采用了")
+            expect(encoded not in json.dumps(calls2), "编码后的本地正文进了模型请求")
+            # 默认摘要器（不含本地正文）照常压缩。
+            events3, _c, _s3, _r3 = _compaction_flow(
+                history=history, compaction=Compaction(limit=2000), local_bodies=[body], plan=1)
+            expect(any(e.get("type") == "context.compacted" for e in events3), "正常摘要被误拦")
+            return {"blocked": True, "requests": len(calls)}
+        if case == "session_query":
+            return _case_session_query(task)
+        if case == "model_summary":
+            return _case_model_summary(task)
+        if case == "settings":
+            return _case_compaction_settings(task)
+        if case == "cross_run":
+            return _case_cross_run(task)
+        raise Failed(f"不认识的 compaction 用例：{case}")
+    finally:
+        _restore_gateway()
+
+
+
+def _query_step(pick):
+    """脚本里的一步：从这次请求的消息里挑一个 ctx 引用，调用 session_query。"""
+    def step(request):
+        arguments = pick("\n".join(_texts(request.get("messages") or [])))
+        return [{"type": "tool.requested", "name": "session_query", "arguments": arguments}]
+    return step
+
+
+def _last_tool_result(request, name="session_query") -> dict:
+    """请求里最后一条 name 的工具结果：(消息, 解析出的结果 dict)。"""
+    for message in reversed(request.get("messages") or []):
+        text = "".join(p.get("text") or "" for p in message.get("parts") or [])
+        if message.get("channel") == "tool_result" and text.startswith(f"工具结果 {name} "):
+            body = text[len(f"工具结果 {name} "):].split("\n（以上是工具返回的数据")[0]
+            return {"message": message, "result": json.loads(body)}
+    raise Failed(f"请求里没有 {name} 的工具结果")
+
+
+def _case_session_query(task: dict) -> dict:
+    """session_query：只在压缩后出现在工具契约里；按 ctx 引用取回原文、分页、未知引用 not_found；
+    结果是 untrusted 工具结果；关掉开关就没有工具也没有引用；归档原文里有本地正文时只给句柄并记安全事件。"""
+    import re
+
+    from services.runtime.compaction import Compaction
+
+    first_lookup = lambda text: re.search(r"\[工具结果 lookup_demo (ctx_\d+)\]", text).group(1)
+    history = _compaction_history(12, long=400)
+    script = [
+        _query_step(lambda text: {"ref": first_lookup(text)}),
+        _query_step(lambda text: {"ref": first_lookup(text), "offset": 2000}),
+        _query_step(lambda text: {"ref": "ctx_999999"}),
+        [{"type": "message.delta", "text": "查完了"}],
+    ]
+    config = Compaction(limit=2000, summary="deterministic")
+    events, calls, state, records = _compaction_flow(history=history, compaction=config, script=script)
+    expect(events[-1].get("type") == "message.completed", f"session_query 流程没跑完：{events[-1]}")
+    expect(any(e.get("type") == "context.compacted" for e in events), "没有压缩")
+    expect(calls and all(_offered(c, "session_query") for c in calls), "压缩后工具契约里没有 session_query")
+    expect("executed" not in state, f"session_query 走到了工具执行器：{state}")
+    got = _last_tool_result(calls[1])
+    result, message = got["result"], got["message"]
+    expect(message.get("trust") == "untrusted" and message.get("channel") == "tool_result", "取回结果不是 untrusted")
+    expect(result.get("ok") and result.get("source") == "tool_result" and result.get("name") == "lookup_demo",
+           f"取回结果不对：{ {k: v for k, v in result.items() if k != 'text'} }")
+    expect("很长的检索结果。" * 10 in result.get("text", "") and result.get("more") is True and
+           result.get("offset") == 0 and result.get("total_chars", 0) > 2000, "原文没取回或没分页")
+    expect("art_00000000" in result.get("handles", []), "取回结果里没有句柄")
+    page = _last_tool_result(calls[2])["result"]
+    expect(page.get("ok") and page.get("offset") == 2000 and page.get("more") is False, f"第二页不对：{page.get('offset')}")
+    missing = _last_tool_result(calls[3])["result"]
+    expect(missing.get("ok") is False and missing.get("error", {}).get("code") == "not_found", f"未知引用：{missing}")
+    expect(sum(1 for e in events if e.get("type") == "tool.requested" and e.get("name") == "session_query") == 3,
+           "session_query 的 tool.requested 事件不对")
+    # 阈值以下：工具契约里没有 session_query。
+    _e, short_calls, _s, _r = _compaction_flow(history=_compaction_history(1), compaction=config)
+    expect(not any(_offered(c, "session_query") for c in short_calls), "阈值以下不该提供 session_query")
+    # 关掉开关：压缩照做，但没有工具也没有引用。
+    off = Compaction(limit=2000, summary="deterministic", session_query=False)
+    events_off, calls_off, _s2, _r2 = _compaction_flow(history=history, compaction=off, plan=1)
+    expect(any(e.get("type") == "context.compacted" for e in events_off), "关掉 session_query 后没压缩")
+    expect(not any(_offered(c, "session_query") for c in calls_off) and
+           not re.search(r"ctx_\d", json.dumps(calls_off, ensure_ascii=False)), "关掉开关仍有 session_query 或引用")
+    # 归档原文里有本地正文：只给句柄，记安全事件，正文没进任何请求。
+    marker = task.get("marker", "LOCAL-QUERY")
+    body = f"只在本机的检索原文 {marker} 不许发给模型"
+    secret = _compaction_history(12, secret_result=body)
+    script2 = [_query_step(lambda text: {"ref": first_lookup(text)}), [{"type": "message.delta", "text": "好"}]]
+    events3, calls3, _s3, records3 = _compaction_flow(history=secret, compaction=config, script=script2,
+                                                      local_bodies=[body])
+    expect(events3[-1].get("type") == "message.completed", f"本地正文用例没跑完：{events3[-1]}")
+    sent = json.dumps(calls3, ensure_ascii=False)
+    expect(marker not in sent and body not in sent, "本地正文经 session_query 进了模型请求")
+    refused = _last_tool_result(calls3[1])["result"]
+    expect(refused.get("ok") is False and str(refused.get("error", {}).get("code", "")).startswith("local_") and
+           "text" not in refused and "c_" + "00" * 8 in refused.get("handles", []), f"本地正文没拦或没给句柄：{refused}")
+    expect(any(r.get("kind") == "security.egress_denied" and r.get("channel") == "session_query" for r in records3),
+           "没有记 session_query 的安全事件")
+    expect(marker not in json.dumps(records3, ensure_ascii=False), "遥测里出现了本地正文")
+    return {"requests": len(calls), "total_chars": result.get("total_chars")}
+
+
+def _case_model_summary(task: dict) -> dict:
+    """模型摘要：发给摘要模型的只有结构字段和句柄；宿主追加句柄清单和可取回引用；
+    摘要回来含本地正文 → 退回确定性抽取 + 审计；折叠输入里有本地正文 → 发前就拦、不调用；空回复 → 退回。"""
+    from services.runtime.compaction import Compaction, SUMMARY_CHANNEL
+
+    history = _compaction_history(12)
+    events, calls, state, records = _compaction_flow(
+        history=history, compaction=Compaction(limit=2000), plan=1,
+        summary_reply=lambda request: "用户分 10 轮查资料，结果见句柄。")
+    compacted = [e for e in events if e.get("type") == "context.compacted"]
+    expect(compacted and compacted[0].get("summary_by") == "model", f"没用模型摘要：{compacted}")
+    expect(events[-1].get("type") == "message.completed", "模型摘要后没跑完")
+    summary_calls = state["summary_calls"]
+    expect(len(summary_calls) >= 1 and not summary_calls[0].get("tools"), "摘要请求不对（应当不带工具）")
+    sent_summary = json.dumps(summary_calls, ensure_ascii=False)
+    expect("很长的检索结果。" not in sent_summary and "c_" + "00" * 8 in sent_summary,
+           "发给摘要模型的不是结构字段 + 句柄")
+    summary = [t for t, m in zip(_texts(calls[0]["messages"]), calls[0]["messages"]) if m.get("channel") == SUMMARY_CHANNEL]
+    expect(summary and "[模型摘要]" in summary[0] and "用户分 10 轮查资料" in summary[0] and
+           "[句柄清单]" in summary[0] and "[可取回]" in summary[0], f"摘要消息不对：{summary[:1]}")
+    expect(any(r.get("kind") == "context.summary_call" and r.get("ok") for r in records), "没有记 context.summary_call")
+    # 摘要模型回来的文字含本地正文：退回确定性抽取，记审计，正文不进主请求。
+    marker = task.get("marker", "LOCAL-SUMMARY")
+    body = f"摘要模型不该知道的本机正文 {marker} 不许出本机"
+    events2, calls2, state2, records2 = _compaction_flow(
+        history=history, compaction=Compaction(limit=2000), plan=1, local_bodies=[body],
+        summary_reply=lambda request: "摘要：" + body)
+    compacted2 = [e for e in events2 if e.get("type") == "context.compacted"]
+    expect(compacted2 and compacted2[0].get("summary_by") == "host", f"命中后没退回确定性抽取：{compacted2}")
+    expect(marker not in json.dumps(calls2, ensure_ascii=False), "摘要模型回来的本地正文进了主请求")
+    fallback = [r for r in records2 if r.get("kind") == "context.summary_fallback"]
+    expect(fallback and str(fallback[0].get("error_code", "")).startswith("local_"), f"没记退回审计：{fallback}")
+    expect(any(r.get("kind") == "security.egress_denied" and r.get("channel") == "context_summary" for r in records2),
+           "没记 context_summary 安全事件")
+    expect(marker not in json.dumps(records2, ensure_ascii=False), "遥测里出现了本地正文")
+    # 折叠的输入里有本地正文：发给摘要模型之前就拦下，不调用摘要模型。
+    leaky_history = _compaction_history(12, marker=body)
+    events3, calls3, state3, records3 = _compaction_flow(
+        history=leaky_history, compaction=Compaction(limit=2000), plan=1, local_bodies=[body])
+    expect(not state3["summary_calls"], "本地正文发给了摘要模型")
+    expect(marker not in json.dumps(calls3, ensure_ascii=False), "本地正文进了模型请求")
+    fallback3 = [r for r in records3 if r.get("kind") == "context.summary_fallback"]
+    expect(fallback3 and str(fallback3[0].get("error_code", "")).startswith("local_"), "发前命中没记审计")
+    # 空回复：退回确定性抽取，照常压缩。
+    events4, _c4, state4, records4 = _compaction_flow(
+        history=history, compaction=Compaction(limit=2000), plan=1, summary_reply=lambda request: "")
+    compacted4 = [e for e in events4 if e.get("type") == "context.compacted"]
+    expect(state4["summary_calls"] and compacted4 and compacted4[0].get("summary_by") == "host", "空回复没退回")
+    expect(any(r.get("kind") == "context.summary_fallback" and r.get("error_code") == "summary_empty"
+               for r in records4), "空回复没记 summary_empty")
+    # 确定性模式：不调用摘要模型。
+    _e5, _c5, state5, _r5 = _compaction_flow(
+        history=history, compaction=Compaction(limit=2000, summary="deterministic"), plan=1)
+    expect(not state5["summary_calls"], "确定性模式调用了摘要模型")
+    return {"summary_calls": len(summary_calls)}
+
+
+def _case_cross_run(task: dict) -> dict:
+    """跨运行取回：第一次运行压缩时的原文存进本地会话记录（加密模式下是密文），下一次运行（历史里已没有那条原文）
+    照样能用 session_query 取回；同一条原文复用引用；取回仍过本地正文检查、只给句柄、标 untrusted；丢掉本地内容时档案一并抹掉。"""
+    import re
+    import tempfile
+
+    import chat_run
+    import store as web_store
+    from packages.artifacts import crypto as storage_crypto
+    from services.runtime.compaction import Archive, Compaction
+
+    marker = task.get("marker", "LOCAL-CROSS")
+    body = f"只在本机的第一次运行检索原文 {marker} 不许发给模型"
+    config = Compaction(limit=2000, summary="deterministic")
+    root = tempfile.mkdtemp(prefix="evals-archive-")
+    try:
+        storage = storage_crypto.Storage("encrypted", storage_crypto.Cipher(storage_crypto.new_master()))
+        sessions = web_store.SessionStore(os.path.join(root, "sessions"), storage=storage)
+        session_id = sessions.create("u_" + "e" * 32)["session_id"]
+
+        class App:
+            pass
+
+        app = App()
+        app.sessions = sessions
+        # 第一次运行：长历史压缩，原文进档案，运行后写回本地会话记录。
+        first = chat_run._load_archive(app, session_id)
+        expect(len(first) == 0, "新会话的档案应当是空的")
+        history1 = _compaction_history(12, marker="甲", secret_result=body)
+        events1, calls1, _s1, _r1 = _compaction_flow(history=history1, compaction=config, plan=1, archive=first,
+                                                      local_bodies=[body])
+        expect(any(e.get("type") == "context.compacted" for e in events1) and first.added, "第一次运行没有压缩或没存原文")
+        text1 = "\n".join(_texts(calls1[0]["messages"]))
+        ref_secret = re.search(r"\[工具结果 lookup_demo (ctx_\d+)\]", text1).group(1)
+        ref_plain = re.findall(r"\[工具结果 lookup_demo (ctx_\d+)\]", text1)[1]
+        expect(marker not in json.dumps(calls1, ensure_ascii=False), "第一次运行把本地正文发给了模型")
+        chat_run._save_archive(app, session_id, first)
+        # 落盘的是加密信封，明文里看不到原文；view 里也没有档案。
+        with open(sessions._path(session_id), "r", encoding="utf-8") as handle:
+            raw = handle.read()
+        expect(marker not in raw and "很长的检索结果" not in raw and "context_archive" not in raw, "档案没有随会话加密落盘")
+        expect("context_archive" not in sessions.view(sessions.get(session_id)), "会话视图里带出了档案")
+        # 换一个存储实例（像重启后）读回。
+        reopened = web_store.SessionStore(os.path.join(root, "sessions"), storage=storage)
+        app.sessions = reopened
+        second = chat_run._load_archive(app, session_id)
+        expect(ref_secret in second and ref_plain in second and not second.added, "第二次运行没读回档案")
+        # 第二次运行：历史里没有第一次的工具结果；压缩后能取回第一次的原文，引用号不冲突。
+        history2 = _compaction_history(12, marker="乙")
+        script = [
+            _query_step(lambda text: {"ref": ref_plain}),
+            _query_step(lambda text: {"ref": ref_secret}),
+            [{"type": "message.delta", "text": "查完了"}],
+        ]
+        events2, calls2, state2, records2 = _compaction_flow(history=history2, compaction=config, script=script,
+                                                             archive=second, local_bodies=[body])
+        expect(events2[-1].get("type") == "message.completed", f"第二次运行没跑完：{events2[-1]}")
+        expect(all(_offered(c, "session_query") for c in calls2), "第二次运行压缩后没提供 session_query")
+        summary2 = "\n".join(_texts(calls2[0]["messages"]))
+        expect(ref_plain in summary2, "第二次运行的摘要里没列出之前运行可取回的引用")
+        got = _last_tool_result(calls2[1])
+        expect(got["message"].get("trust") == "untrusted" and got["result"].get("ok") and
+               "很长的检索结果。" * 10 in got["result"].get("text", "") and "art_00000001" in got["result"].get("handles", []),
+               "跨运行没取回之前运行的原文")
+        refused = _last_tool_result(calls2[2])["result"]
+        expect(refused.get("ok") is False and str(refused.get("error", {}).get("code", "")).startswith("local_") and
+               "text" not in refused, f"跨运行取回本地正文没拦：{refused}")
+        expect(marker not in json.dumps(calls2, ensure_ascii=False), "跨运行时本地正文进了模型请求")
+        expect(any(r.get("kind") == "security.egress_denied" and r.get("channel") == "session_query" for r in records2),
+               "跨运行拦截没记安全事件")
+        new_refs = set(second.added)
+        expect(new_refs and not (new_refs & set(first.items)), "第二次运行的新引用和之前的冲突")
+        # 同一条原文再压缩：复用引用，不新增。
+        again = Archive.load(second.dump())
+        _e3, _c3, _s3, _r3 = _compaction_flow(history=history2, compaction=config, plan=1, archive=again)
+        expect(not again.added, f"同一条原文换了新引用：{again.added}")
+        # 丢掉本地内容：档案里含它的原文一并抹掉。
+        chat_run._save_archive(app, session_id, second)
+        handle = reopened.add_content(session_id, body)["handle"]
+        expect(reopened.forget_content(session_id, handle) == "forgotten", "没能丢掉本地内容")
+        scrubbed = Archive.load(reopened.context_archive(session_id))
+        expect(marker not in json.dumps(scrubbed.items, ensure_ascii=False) and ref_plain in scrubbed,
+               "丢掉本地内容后档案里还有它")
+        return {"refs_first": len(first.items), "refs_second": len(second.items)}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _case_compaction_settings(task: dict) -> dict:
+    """压缩设置：默认值、逐项校验、非法值回退默认并警告；关掉就不压缩；运行时按设置跑。"""
+    from services.runtime import compaction
+
+    values, warnings = compaction.settings(None)
+    expect(values == compaction.DEFAULTS and not warnings, "默认设置不对")
+    expect(values["summary"] == "model" and values["session_query"] is True and values["ratio"] == 0.7 and
+           values["keep_tail"] == 6 and values["trim_chars"] == 600 and values["limit"] is None, f"默认值：{values}")
+    values, warnings = compaction.settings({
+        "ratio": 0.5, "limit": 4000, "keep_tail": 10, "trim_chars": 300, "summary": "deterministic",
+        "summary_model": "gpt-mini", "session_query": False, "enabled": True})
+    expect(not warnings and values["ratio"] == 0.5 and values["limit"] == 4000 and values["keep_tail"] == 10 and
+           values["trim_chars"] == 300 and values["summary"] == "deterministic" and
+           values["summary_model"] == "gpt-mini" and values["session_query"] is False, f"合法设置没生效：{values}")
+    bad = {"ratio": 5, "limit": "x", "keep_tail": 1, "trim_chars": True, "summary": "llm",
+           "summary_model": "bad model;rm", "session_query": "yes", "enabled": "no", "other": 1}
+    values, warnings = compaction.settings(bad)
+    expect(values == compaction.DEFAULTS and set(warnings) == set(bad), f"非法值没回退或没警告：{values} {warnings}")
+    values, warnings = compaction.settings(["nope"])
+    expect(values == compaction.DEFAULTS and warnings == ["*"], "非字典设置没回退")
+    expect(compaction.of({"enabled": False}) is None and compaction.of(False) is None, "关掉压缩仍有压缩器")
+    made = compaction.of({"limit": 2000, "summary": "deterministic", "keep_tail": "x"})
+    expect(made.limit == 2000 and made.summary == "deterministic" and made.keep_tail == 6, "of() 没按设置建")
+    history = _compaction_history(12)
+    events, _calls, state, _r = _compaction_flow(
+        history=history, compaction={"limit": 2000, "summary": "bogus", "ratio": "high"}, plan=1)
+    expect(any(e.get("type") == "context.compacted" for e in events) and state["summary_calls"],
+           "非法字段没回退到默认（模型摘要）")
+    events_off, _c, _s, _r2 = _compaction_flow(history=history, compaction={"enabled": False}, plan=1)
+    expect(not any(e.get("type") == "context.compacted" for e in events_off), "enabled=false 仍压缩了")
+    return {"fields": len(compaction.DEFAULTS)}
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -1439,6 +1900,7 @@ RUNNERS = {
     "storage_encryption": run_storage_encryption,
     "desktop_token": run_desktop_token,
     "desktop_security": run_desktop_security,
+    "compaction": run_compaction,
 }
 
 

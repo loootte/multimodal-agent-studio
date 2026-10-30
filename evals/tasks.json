@@ -617,6 +617,52 @@
       "fake_only": true,
       "case": "untrusted_result",
       "marker": "INJECT-MCP-1e2f"
+    },
+    {
+      "id": "runtime.compaction_keeps_plan",
+      "category": "runtime",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "keeps_plan"
+    },
+    {
+      "id": "security.compaction_no_local_body",
+      "category": "security",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "no_local_body",
+      "marker": "LOCAL-COMPACT-3d9f"
+    },
+    {
+      "id": "runtime.compaction_session_query",
+      "category": "runtime",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "session_query",
+      "marker": "LOCAL-QUERY-7a21"
+    },
+    {
+      "id": "security.compaction_model_summary",
+      "category": "security",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "model_summary",
+      "marker": "LOCAL-SUMMARY-5c08"
+    },
+    {
+      "id": "runtime.compaction_settings",
+      "category": "runtime",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "settings"
+    },
+    {
+      "id": "security.compaction_cross_run",
+      "category": "security",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "cross_run",
+      "marker": "LOCAL-CROSS-91be"
     }
   ]
 }

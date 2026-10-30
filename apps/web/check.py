@@ -5584,6 +5584,30 @@ def _now_mark(base: str) -> float:
     return round(time.time(), 3) - 0.002
 
 
+def _context_settings_case(base: str) -> None:
+    """14.B（#79）：压缩设置 API。默认值；合法项保存；非法项不存、回退默认值并列进 warnings；reset 恢复默认。"""
+    status, body = request("GET", base + "/api/context")
+    view = json.loads(body)
+    if status != 200 or view["values"] != view["defaults"] or view["values"]["summary"] != "model" \
+            or view["values"]["session_query"] is not True or view["values"]["ratio"] != 0.7:
+        fail(f"压缩设置默认值不对：{status} {body}")
+    status, body = request("PUT", base + "/api/context", {"values": {
+        "ratio": 0.6, "keep_tail": 8, "summary": "deterministic", "trim_chars": -5, "limit": "big", "nope": 1}})
+    view = json.loads(body)
+    values = view["values"]
+    if status != 200 or values["ratio"] != 0.6 or values["keep_tail"] != 8 or values["summary"] != "deterministic" \
+            or values["trim_chars"] != 600 or values["limit"] is not None \
+            or not {"trim_chars", "limit", "nope"} <= set(view["warnings"]):
+        fail(f"压缩设置的校验 / 回退不对：{status} {body}")
+    again = json.loads(request("GET", base + "/api/context")[1])
+    if again["values"] != values or again["warnings"]:
+        fail(f"压缩设置没保存或存了非法项：{again}")
+    status, body = request("PUT", base + "/api/context", {"reset": True, "values": {}})
+    if status != 200 or json.loads(body)["values"] != json.loads(body)["defaults"]:
+        fail(f"压缩设置 reset 没恢复默认：{body}")
+    print("context settings ok")
+
+
 def _config_origin_case(base: str) -> dict:
     """设置 API 只收本机界面：跨站 Origin / Sec-Fetch-Site 回 403 不改配置；同源写入记 security.config_changed（只有字段名）。"""
     url = base + "/api/tools/generate_image/config"
@@ -5596,9 +5620,10 @@ def _config_origin_case(base: str) -> dict:
         if status != 403 or json.loads(body).get("code") != "config_write_forbidden":
             fail(f"跨站写配置没被拒：{headers} {status} {body}")
     for path, body_ in (("/api/provider", {"base_url": "https://evil.example/v1", "model": "x"}),
+                        ("/api/context", {"values": {"enabled": False}}),
                         ("/api/toolpacks/install", {"source": "/tmp/nowhere"}),
                         ("/api/toolpacks/x/uninstall", {})):
-        method = "PUT" if path == "/api/provider" else "POST"
+        method = "PUT" if path in ("/api/provider", "/api/context") else "POST"
         status, _ = _request_headers(method, base + path, body_, {"Origin": "https://evil.example"})
         if status != 403:
             fail(f"跨站写 {path} 没被拒：{status}")
@@ -5606,7 +5631,7 @@ def _config_origin_case(base: str) -> dict:
     if view["values"]["remote_local_prompt"]["value"] != "refuse":
         fail("跨站请求改动了 remote_local_prompt")
     denied = _config_audit_since(base, mark, "security.config_write_denied")
-    if len(denied) < 6 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
+    if len(denied) < 7 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
         fail(f"跨站写配置没记安全事件：{denied}")
     mark = _now_mark(base)
     status, body = _request_headers("PUT", url, {"values": {"remote_timeout_sec": 61}},
@@ -5631,6 +5656,7 @@ def _injection_cases(base: str, directory: str) -> None:
     _high_risk_ack_unit()
     _config_scope_unit(directory)
     _config_origin_case(base)
+    _context_settings_case(base)
     print("injection guard ok")
 
 

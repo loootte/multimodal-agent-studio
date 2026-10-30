@@ -794,6 +794,7 @@ def _generate_text_turn(
         {"kind": "status", "label": "正在询问模型"},
         persist=False,
     )
+    archive = _load_archive(app, session_id)
     try:
         for event in runtime_run(
             request,
@@ -812,6 +813,8 @@ def _generate_text_turn(
             artifacts=_session_artifacts(app, session_id, session),
             local_bodies=app.sessions.local_bodies(session_id),
             base_url=provider["base_url"],
+            compaction=_compaction_settings(app),
+            archive=archive,
         ):
             flush_traces()
             kind = event.get("type")
@@ -899,6 +902,8 @@ def _generate_text_turn(
         return "completed"
     except GatewayError as exc:
         return _fail_status(app, session_id, message_id, run, exc)
+    finally:
+        _save_archive(app, session_id, archive)
 
 
 def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_call, text) -> str:
@@ -1385,6 +1390,35 @@ def _stage(run, text: str, source: str, rating: str | None = None) -> str:
     if rating:
         staged[handle]["rating"] = rating
     return handle
+
+
+def _compaction_settings(app):
+    """14.B：设置页的压缩配置；没有设置存储（测试替身）时用默认值。"""
+    holder = getattr(app, "context", None)
+    try:
+        return holder.current() if holder is not None else None
+    except Exception:  # 读不到设置不影响对话：用默认值
+        return None
+
+
+def _load_archive(app, session_id):
+    """14.B：本会话之前运行存下的压缩原文（本地会话记录里，随会话文件按 12.F 落盘），session_query 可跨运行取回。"""
+    from services.runtime import compaction
+
+    try:
+        return compaction.Archive.load(app.sessions.context_archive(session_id))
+    except Exception:  # 读不到不影响对话：本次运行用空档案
+        return compaction.Archive()
+
+
+def _save_archive(app, session_id, archive) -> None:
+    """本次运行新加了原文才写回本地会话记录；写不进去只记遥测（没有正文），不影响对话。"""
+    if archive is None or not getattr(archive, "added", None):
+        return
+    try:
+        app.sessions.save_context_archive(session_id, archive.dump())
+    except Exception as exc:
+        telemetry.record("context.archive_save_failed", error_code=type(exc).__name__)
 
 
 def _is_web_tool(name) -> bool:

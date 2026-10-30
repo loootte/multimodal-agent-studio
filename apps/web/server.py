@@ -75,6 +75,8 @@ class App:
         self.tools = tool_config.ToolConfigStore(os.path.join(data_dir, "tools.json"))
         tool_config.install(self.tools)
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
+        # 14.B（#79）：上下文压缩设置，非法项回退默认值。
+        self.context = store.ContextSettingsStore(os.path.join(data_dir, "context.json"))
         self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
         # 12.F（#62）：本地存储加密。打不开（缺密钥、密钥不对、要先迁移）就抛 StorageError，不悄悄退回明文。
         self.storage = storage if storage is not None else storage_crypto.open_storage(data_dir)
@@ -661,6 +663,20 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
                 raise chat_run.RequestError(400, "invalid_provider", str(exc)) from exc
             _audit_config_write("provider", [key for key in ("base_url", "model", "api_key", "clear_key")
                                              if body.get(key) not in (None, "", False)])
+            _send_json(handler, 200, view)
+            return
+        if path == "/api/context" and method == "GET":
+            _send_json(handler, 200, app.context.public())
+            return
+        if path == "/api/context" and method == "PUT":
+            if not _config_write_allowed(handler, "context"):
+                return
+            body = _read_json(handler)
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            view = app.context.update(values, reset=bool(body.get("reset")))
+            from services.runtime import compaction as _compaction
+            fields = [key for key in values if key in _compaction.DEFAULTS]  # 审计只记已知字段名，不记取值
+            _audit_config_write("context", fields + (["reset"] if body.get("reset") else []))
             _send_json(handler, 200, view)
             return
         if path == "/api/tools" and method == "GET":

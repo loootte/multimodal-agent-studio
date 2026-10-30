@@ -1556,7 +1556,46 @@ function openSettings() {
   document.querySelector("#key-hint").textContent = keyHint(provider);
   showSettingsError("");
   refreshStorage();
+  refreshContext();
   settings.showModal();
+}
+
+// 14.B（#79）：上下文压缩设置。非法取值由服务端回退默认值，这里只显示回退了哪些项。
+const CONTEXT_FIELDS = ["enabled", "ratio", "limit", "keep_tail", "trim_chars", "summary", "summary_model", "session_query"];
+
+async function refreshContext() {
+  try {
+    fillContext(await api("GET", "/api/context"));
+  } catch (error) {
+    document.querySelector("#context-hint").textContent = "读不到压缩设置。";
+  }
+}
+
+function fillContext(view) {
+  const form = document.querySelector("#settings-form");
+  const values = (view && view.values) || {};
+  for (const key of CONTEXT_FIELDS) {
+    const input = form.elements["ctx_" + key];
+    if (!input) continue;
+    if (input.type === "checkbox") input.checked = Boolean(values[key]);
+    else input.value = values[key] === null || values[key] === undefined ? "" : String(values[key]);
+  }
+  const warnings = (view && view.warnings) || [];
+  document.querySelector("#context-hint").textContent = warnings.length
+    ? `这些项取值不合法，已回退默认值：${warnings.join("、")}。`
+    : "非法取值会回退默认值。";
+}
+
+function contextValues(form) {
+  const values = {};
+  for (const key of CONTEXT_FIELDS) {
+    const input = form.elements["ctx_" + key];
+    if (!input) continue;
+    if (input.type === "checkbox") values[key] = input.checked;
+    else if (input.type === "number") values[key] = input.value.trim() === "" ? null : Number(input.value);
+    else values[key] = input.value.trim() === "" ? null : input.value.trim();
+  }
+  return values;
 }
 
 // 12.F（#62）：本地存储状态。只显示模式、算法、key_id，不显示密钥和路径。
@@ -1599,10 +1638,13 @@ async function saveSettings(event) {
   if (key) body.api_key = key;
   try {
     state.provider = await api("PUT", "/api/provider", body);
+    const context = await api("PUT", "/api/context", { values: contextValues(form) });
+    fillContext(context);
     form.elements.api_key.value = "";
     document.querySelector("#key-hint").textContent = keyHint(state.provider);
     if (state.provider.configured) showNote("");
     renderChrome();
+    if ((context.warnings || []).length) return;  // 有回退的项：留在设置页让用户看到
     settings.close();
   } catch (error) {
     showSettingsError(error.message || "没能保存。");

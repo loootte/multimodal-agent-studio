@@ -35,6 +35,8 @@ EVENT_EGRESS_PLANNED = "egress.planned"
 EVENT_EGRESS_BLOCKED = "egress.blocked"
 EVENT_EGRESS_SENT = "egress.sent"
 EVENT_EGRESS_FAILED = "egress.failed"
+# 14.B（#79）：运行时压缩了上下文。只带条数和 token 数（compaction.EVENT_FIELDS），不带正文；消费方可以忽略。
+EVENT_CONTEXT_COMPACTED = "context.compacted"
 
 EGRESS_EVENTS = (EVENT_EGRESS_PLANNED, EVENT_EGRESS_BLOCKED, EVENT_EGRESS_SENT, EVENT_EGRESS_FAILED)
 EGRESS_SCHEMA = "mas.egress/1"
