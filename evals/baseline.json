@@ -72,7 +72,11 @@
         "security.desktop_keychain_not_in_webview": true,
         "security.desktop_default_encrypted": true,
         "security.desktop_file_handle_only": true,
-        "security.desktop_update_egress_no_user_data": true
+        "security.desktop_update_egress_no_user_data": true,
+        "security.desktop_navigation_blocked": true,
+        "security.desktop_ipc_denied": true,
+        "security.desktop_external_link_confirm": true,
+        "security.desktop_token_env_only": true
       }
     }
   }

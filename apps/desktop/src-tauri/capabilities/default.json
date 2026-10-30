@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "default",
-  "description": "主窗口：只开本机 sidecar 页面，无额外 IPC 权限（13.D 再收紧）",
-  "windows": ["main"],
-  "permissions": [
-    "core:default"
-  ]
+  "description": "13.D：主窗口只加载本机 sidecar 页面；不开任何插件 / 核心权限，也不给远程页面 IPC（没有 remote 字段）。唯一的自定义命令是 desktop_info。",
+  "windows": [
+    "main"
+  ],
+  "permissions": []
 }

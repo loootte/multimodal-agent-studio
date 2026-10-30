@@ -473,6 +473,291 @@ def update_egress_no_user_data() -> dict:
         }
 
 
+# ---------------------------------------------------------------- 13.D 桌面壳加固
+
+_INJECTED = "https://attacker.example/steal?d=MARKER_LOCAL_PROMPT_777#frag"
+
+
+def _events(base: str, kind: str) -> list[dict]:
+    status, body = _http(base, "GET", "/api/telemetry?limit=5000")
+    if status != 200:
+        fail(f"读遥测失败：{status}")
+    return [item for item in json.loads(body)["events"] if item.get("kind") == kind]
+
+
+def _no_marker(items, what: str) -> None:
+    dump = json.dumps(items, ensure_ascii=False)
+    for bad in ("MARKER_LOCAL_PROMPT_777", "/steal", "d=", "#frag", TOKEN):
+        if bad in dump:
+            fail(f"{what} 审计里出现了完整地址 / 查询串 / 令牌：{bad}")
+
+
+def navigation_blocked() -> dict:
+    """13.D：注入「跳转到外部地址」的工具结果：WebView 不导航（拉回 sidecar），记 security.desktop_navigation_blocked；
+    审计只有 scheme + 主机名；页面 CSP 收紧；Tauri 壳有同源导航白名单、release 关 devtools。"""
+    import server
+    import shell_guard
+
+    with isolated(MAS_DESKTOP_RELEASE=None, MAS_DESKTOP_DEVTOOLS=None) as tmp:
+        app = server.App(os.path.join(tmp, "data"), timeout_sec=5, desktop_token=TOKEN)
+        site, base = _serve(app)
+        try:
+            home = base + "/"
+            allowed = [home, base + "/static/app.js", base + "/?x=1", "about:blank", "blob:" + base + "/0b1c"]
+            port = int(base.rsplit(":", 1)[1])
+            blocked = [_INJECTED, "http://127.0.0.1:%d/" % (port + 1 if port < 65535 else port - 1),
+                       "http://localhost:%d/" % port, "https://127.0.0.1:%d/" % port, "file:///etc/passwd",
+                       "data:text/html,hi", "javascript:alert(1)", "http://127.0.0.1.attacker.example/",
+                       "http://user@127.0.0.1:%d@attacker.example/" % port, "", None, 42]
+            for url in allowed:
+                if not shell_guard.navigation_allowed(url, home):
+                    fail(f"sidecar 同源地址被误拦：{url}")
+            for url in blocked:
+                if shell_guard.navigation_allowed(url, home):
+                    fail(f"不该放行的导航：{url!r}")
+            audit = shell_guard.Audit(base, TOKEN)
+            went: list = []
+            guard = shell_guard.NavigationGuard(base, audit, went.append)
+            if not guard.check(home) or went:
+                fail("本机页面不该被拦")
+            if guard.check(_INJECTED):
+                fail("注入的外部地址没有被拦")
+            if went != [home]:
+                fail(f"被拦后应拉回 sidecar 首页：{went}")
+            events = _events(base, "security.desktop_navigation_blocked")
+            if len(events) != 1 or events[0].get("host") != "attacker.example" or events[0].get("scheme") != "https" \
+                    or events[0].get("reason") != "not_sidecar_origin":
+                fail(f"导航拦截审计不对：{events}")
+            _no_marker(events, "导航拦截")
+            # 审计接口：只认壳进程的请求头令牌；Cookie（WebView 脚本能带）、未知事件名都拒。
+            req = urllib.request.Request(base + "/api/desktop/security_event", method="POST",
+                                         data=json.dumps({"event": "security.desktop_navigation_blocked"}).encode(),
+                                         headers={"Cookie": f"mas_desktop_token={TOKEN}",
+                                                  "Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                fail("Cookie 也能写桌面安全审计（WebView 脚本可伪造）")
+            except urllib.error.HTTPError as exc:
+                if exc.code != 403:
+                    fail(f"Cookie 写审计应 403：{exc.code}")
+            status, _ = _http(base, "POST", "/api/desktop/security_event", {"event": "security.config_changed"})
+            if status != 400:
+                fail(f"白名单以外的事件名应 400：{status}")
+            status, _ = _http(base, "POST", "/api/desktop/security_event",
+                              {"event": "security.desktop_navigation_blocked", "url": _INJECTED, "host": "a b"})
+            _no_marker(_events(base, "security.desktop_navigation_blocked"), "审计接口")
+            # 页面 CSP：不许插件、改 base、表单外发、被外站嵌入。
+            req = urllib.request.Request(home, headers={"X-MAS-Desktop-Token": TOKEN})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                csp = resp.headers.get("Content-Security-Policy") or ""
+            for part in ("default-src 'self'", "script-src 'self'", "object-src 'none'", "base-uri 'none'",
+                         "form-action 'self'", "frame-ancestors 'self'"):
+                if part not in csp:
+                    fail(f"页面 CSP 缺 {part}：{csp}")
+        finally:
+            site.shutdown()
+            site.server_close()
+        # devtools：默认关；开发时 MAS_DESKTOP_DEVTOOLS=1 才开；发布构建（RELEASE 标记 / 环境变量）一律关。
+        fake_root = Path(tmp) / "repo"
+        (fake_root / "apps" / "desktop").mkdir(parents=True)
+        if shell_guard.devtools_enabled(fake_root):
+            fail("devtools 默认应关")
+        os.environ["MAS_DESKTOP_DEVTOOLS"] = "1"
+        if not shell_guard.devtools_enabled(fake_root):
+            fail("开发模式 MAS_DESKTOP_DEVTOOLS=1 应能开 devtools")
+        (fake_root / "apps" / "desktop" / "RELEASE").write_text("release", encoding="utf-8")
+        if shell_guard.devtools_enabled(fake_root):
+            fail("发布构建不该开 devtools")
+    launcher = (DESKTOP_DIR / "launcher.py").read_text(encoding="utf-8")
+    for needle in ("NavigationGuard(", "events.loaded", "debug=shell_guard.devtools_enabled("):
+        if needle not in launcher:
+            fail(f"启动器没接上导航守卫 / devtools 开关：{needle}")
+    build = (DESKTOP_DIR / "packaging" / "windows" / "build.ps1").read_text(encoding="utf-8")
+    if "apps\\desktop\\RELEASE" not in build:
+        fail("Windows 打包没写发布标记（devtools 关不掉）")
+    lib = (DESKTOP_DIR / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    for needle in (".on_navigation(", "navigation_allowed(", "security.desktop_navigation_blocked",
+                   ".devtools(cfg!(debug_assertions))"):
+        if needle not in lib:
+            fail(f"Tauri 壳缺导航白名单 / devtools 设置：{needle}")
+    cargo = (DESKTOP_DIR / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+    if re.search(r'tauri\s*=.*"devtools"', cargo):
+        fail("Tauri 依赖开了 devtools 特性（release 也会有 devtools）")
+    conf = json.loads((DESKTOP_DIR / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    csp = ((conf.get("app") or {}).get("security") or {}).get("csp")
+    if not csp or "default-src 'self'" not in csp or "object-src 'none'" not in csp:
+        fail(f"Tauri CSP 没收紧：{csp}")
+    return {"blocked": len(blocked), "audit_fields": sorted(events[0]), "devtools_release": False}
+
+
+def ipc_denied() -> dict:
+    """13.D：js_api 白名单以外的调用（含直接走 pywebview 桥的）全部拒绝并记 security.desktop_ipc_denied；
+    页面被导航到外站时，白名单方法也拒绝；Tauri 壳不开任何插件权限、不给远程页面 IPC。"""
+    import integration
+    import server
+    import shell_guard
+
+    with isolated() as tmp:
+        app = server.App(os.path.join(tmp, "data"), timeout_sec=5, desktop_token=TOKEN)
+        site, base = _serve(app)
+        try:
+            page = {"url": base + "/"}
+            opened: list = []
+            api = integration.DesktopApi(base, TOKEN, open_dialog=lambda: None, save_dialog=lambda n: None,
+                                         audit=shell_guard.Audit(base, TOKEN), current_url=lambda: page["url"],
+                                         open_folder=lambda: opened.append(1) or True)
+            if sorted(integration.public_surface(api)) != sorted(integration.JS_METHODS):
+                fail(f"js_api 暴露面不是白名单：{sorted(integration.public_surface(api))}")
+            attempts = ("read_keychain", "keychain_get", "get_token", "set_config", "evaluate_js", "run_shell",
+                        "open_path")
+            for name in attempts:
+                result = getattr(api, name)("provider")
+                if result != {"ok": False, "code": "ipc_denied"}:
+                    fail(f"白名单外的 IPC 没被拒：{name} -> {result}")
+            for name in ("_token", "_base", "__secret__"):
+                try:
+                    getattr(api, name + "_nope")
+                    fail(f"下划线属性不该被兜底：{name}")
+                except AttributeError:
+                    pass
+            if api.open_data_dir() != {"ok": True} or opened != [1]:
+                fail("白名单里的「打开数据目录」应可用且不回路径")
+            if not api.capabilities().get("native_file_dialog"):
+                fail("本机页面调用白名单方法应可用")
+            page["url"] = _INJECTED
+            for call in (lambda: api.capabilities(), lambda: api.pick_local_file("r_" + "1" * 32),
+                         lambda: api.save_egress_export(), lambda: api.open_external("https://example.org/"),
+                         lambda: api.open_data_dir()):
+                result = call()
+                if result != {"ok": False, "code": "ipc_denied"}:
+                    fail(f"外站页面调用白名单方法没被拒：{result}")
+            if opened != [1]:
+                fail("外站页面打开了数据目录")
+            events = _events(base, "security.desktop_ipc_denied")
+            by_reason: dict = {}
+            for item in events:
+                by_reason.setdefault(item.get("reason"), []).append(item.get("method"))
+            if sorted(by_reason.get("not_whitelisted") or []) != sorted(attempts):
+                fail(f"越权 IPC 没逐条记录：{by_reason}")
+            if sorted(by_reason.get("foreign_origin") or []) != sorted(
+                    ["capabilities", "pick_local_file", "save_egress_export", "open_external", "open_data_dir"]):
+                fail(f"外站页面调用没逐条记录：{by_reason}")
+            _no_marker(events, "IPC 拒绝")
+            for item in events:
+                if item.get("reason") == "foreign_origin" and item.get("host") != "attacker.example":
+                    fail(f"外站调用审计缺主机名：{item}")
+        finally:
+            site.shutdown()
+            site.server_close()
+    caps = json.loads((DESKTOP_DIR / "src-tauri" / "capabilities" / "default.json").read_text(encoding="utf-8"))
+    if caps.get("permissions") or caps.get("remote"):
+        fail(f"Tauri capabilities 应不开任何权限、不给远程页面 IPC：{caps}")
+    lib = (DESKTOP_DIR / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    handlers = re.findall(r"generate_handler!\[([^\]]*)\]", lib)
+    if [h.strip() for h in ",".join(handlers).split(",") if h.strip()] != ["desktop_info"]:
+        fail(f"Tauri 自定义命令不是白名单：{handlers}")
+    return {"denied": len(events), "whitelist": sorted(integration.JS_METHODS)}
+
+
+def external_link_confirm() -> dict:
+    """13.D：模型 / 工具结果里的链接：WebView 不打开；宿主确认卡（固定模板 + 完整地址）确认后才交给系统浏览器；
+    javascript: / file: 等直接拒；取消不打开；都记 security.desktop_external_link_confirm（只有 scheme + 主机）。"""
+    import integration
+    import server
+    import shell_guard
+
+    with isolated() as tmp:
+        app = server.App(os.path.join(tmp, "data"), timeout_sec=5, desktop_token=TOKEN)
+        site, base = _serve(app)
+        try:
+            audit = shell_guard.Audit(base, TOKEN)
+            asked: list = []
+            opened: list = []
+            answer = {"yes": False}
+
+            def confirm(title, body):
+                asked.append((title, body))
+                return answer["yes"]
+
+            links = shell_guard.ExternalLinks(confirm, opened.append, audit)
+            api = integration.DesktopApi(base, TOKEN, audit=audit, links=links, current_url=lambda: base + "/")
+            # 取消：不打开
+            if api.open_external(_INJECTED) != {"ok": False, "code": "cancelled"} or opened:
+                fail("用户取消后不该打开外链")
+            title, body = asked[-1]
+            if _INJECTED not in body or "attacker.example" not in body or title != "打开外部链接？":
+                fail(f"确认卡没显示完整地址 / 主机：{title} {body}")
+            if body != shell_guard.confirm_text(shell_guard.external_target(_INJECTED))[1]:
+                fail("确认卡文字不是宿主模板")
+            # 确认：只用系统浏览器打开同一个地址
+            answer["yes"] = True
+            if api.open_external(_INJECTED) != {"ok": True} or opened != [_INJECTED]:
+                fail(f"确认后应用系统浏览器打开原地址：{opened}")
+            # 不合法的链接：不弹确认卡、不打开
+            before = len(asked)
+            for bad in ("javascript:alert(1)", "file:///C:/Users/victim/secret.txt", "data:text/html,x",
+                        "https://user:pw@evil.example/", "https://evil.example/\n", "https://e.example/\"x",
+                        "ftp://e.example/", "x" * 3000, None, 7):
+                result = api.open_external(bad)
+                if result != {"ok": False, "code": "link_not_allowed"}:
+                    fail(f"不合法外链没被拒：{bad!r} -> {result}")
+            if len(asked) != before or opened != [_INJECTED]:
+                fail("不合法外链弹了确认卡或被打开")
+            if api.open_external("mailto:someone@example.org") != {"ok": True}:
+                fail("mailto 外链确认后应可打开")
+            events = _events(base, "security.desktop_external_link_confirm")
+            outcomes = [item.get("outcome") for item in events]
+            if outcomes[:2] != ["declined", "confirmed"] or outcomes.count("rejected") != 10 \
+                    or outcomes[-1] != "confirmed":
+                fail(f"外链确认审计不对：{outcomes}")
+            _no_marker(events, "外链确认")
+        finally:
+            site.shutdown()
+            site.server_close()
+    js = (ROOT / "apps" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    for needle in ('addEventListener("click", guardDesktopLinks, true)', "native.open_external(",
+                   "window.open = function", "event.preventDefault()"):
+        if needle not in js:
+            fail(f"界面没有拦截外链交给宿主确认：{needle}")
+    md = (ROOT / "apps" / "web" / "static" / "markdown.js").read_text(encoding="utf-8")
+    if "https?:\\/\\/|mailto:" not in md:
+        fail("markdown 链接白名单变了")
+    return {"outcomes": sorted(set(outcomes)), "confirm_title": "打开外部链接？"}
+
+
+def token_env_only() -> dict:
+    """13.D：桌面令牌只经环境变量 MAS_DESKTOP_TOKEN 传给 server，不进命令行（进程列表可见）；--desktop-token 已停用。"""
+    import server
+
+    src = (DESKTOP_DIR / "host.py").read_text(encoding="utf-8")
+    if '"--desktop-token"' in src:
+        fail("host.py 仍把令牌放在命令行里")
+    rs = (DESKTOP_DIR / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    if '.args(["-c"' in rs or "{token}'" in rs:
+        fail("Tauri 壳仍把令牌拼进子进程命令行")
+    if "X-MAS-Desktop-Token: {token}" not in rs:
+        fail("Tauri 壳应只在请求头里带令牌")
+    try:
+        server._resolve_desktop_token("x" * 64)
+        fail("--desktop-token 应被拒")
+    except SystemExit as exc:
+        if "MAS_DESKTOP_TOKEN" not in str(exc):
+            fail(f"--desktop-token 的拒绝提示不对：{exc}")
+    saved = os.environ.get("MAS_DESKTOP_TOKEN")
+    try:
+        os.environ["MAS_DESKTOP_TOKEN"] = "e" * 64
+        if server._resolve_desktop_token() != "e" * 64:
+            fail("环境变量令牌没生效")
+        os.environ.pop("MAS_DESKTOP_TOKEN")
+        if server._resolve_desktop_token() is not None:
+            fail("没令牌时应是 Web 模式")
+    finally:
+        if saved is None:
+            os.environ.pop("MAS_DESKTOP_TOKEN", None)
+        else:
+            os.environ["MAS_DESKTOP_TOKEN"] = saved
+    return {"token_via": "env", "cli_flag": "rejected"}
+
 
 ALL = {
     "notify_no_body": notify_no_body,
@@ -480,6 +765,10 @@ ALL = {
     "default_encrypted": default_encrypted,
     "file_handle_only": file_handle_only,
     "update_egress_no_user_data": update_egress_no_user_data,
+    "navigation_blocked": navigation_blocked,
+    "ipc_denied": ipc_denied,
+    "external_link_confirm": external_link_confirm,
+    "token_env_only": token_env_only,
 }
 
 if __name__ == "__main__":

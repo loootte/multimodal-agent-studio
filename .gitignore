@@ -26,3 +26,6 @@ apps/desktop/src-tauri/target/
 apps/desktop/dist/
 apps/desktop/build/
 apps/desktop/**/*.spec
+
+# 13.D release marker (written by packaging scripts only)
+apps/desktop/RELEASE

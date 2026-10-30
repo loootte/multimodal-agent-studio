@@ -209,7 +209,7 @@ def _busy_port_and_lock() -> None:
 
 
 def _cli_ready_file() -> None:
-    """server.py --port 0 --desktop-token --ready-file 写出就绪 JSON。"""
+    """server.py --port 0 --ready-file（令牌经 MAS_DESKTOP_TOKEN）写出就绪 JSON；--desktop-token 已停用。"""
     data = tempfile.mkdtemp(prefix="mas-cli-")
     ready = Path(tempfile.mkdtemp(prefix="mas-ready-")) / "ready.json"
     token = "b" * 64
@@ -219,8 +219,6 @@ def _cli_ready_file() -> None:
             str(ROOT / "apps" / "web" / "server.py"),
             "--port",
             "0",
-            "--desktop-token",
-            token,
             "--data-dir",
             data,
             "--ready-file",
@@ -232,7 +230,7 @@ def _cli_ready_file() -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        env=_child_env(),
+        env=dict(_child_env(), MAS_DESKTOP_TOKEN=token),
     )
     try:
         deadline = time.time() + 15

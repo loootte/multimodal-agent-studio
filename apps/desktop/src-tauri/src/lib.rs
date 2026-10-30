@@ -1,6 +1,9 @@
 //! MAS 桌面壳（13.A / #74）：启动 Python sidecar，窗口加载带令牌的本机页面，关窗停服务。
+//! 13.D（#77）：WebView 只许导航到 sidecar 同源地址（其余拦下并记 security.desktop_navigation_blocked）；
+//! release 构建关 devtools；IPC 只有 desktop_info，capabilities 不开任何插件权限。
 use serde::Deserialize;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -121,18 +124,27 @@ fn spawn_host(root: &Path) -> Result<(Child, ReadyInfo, String), String> {
     Err("sidecar 在超时前没有输出 MAS_READY".into())
 }
 
+/// 直接向本机 sidecar 发 POST（令牌只在请求头里，不进任何子进程命令行）。
+fn post_local(port: u16, token: &str, path: &str, body: &str) {
+    if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+X-MAS-Desktop-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\
+Connection: close\r\n\r\n{body}",
+            len = body.len()
+        );
+        let _ = stream.write_all(req.as_bytes());
+        let mut sink = Vec::new();
+        let _ = stream.read_to_end(&mut sink);
+    }
+}
+
 fn http_stop(base: &str, token: &str) {
-    let script = format!(
-        "import urllib.request\n\
-req=urllib.request.Request('{base}/api/desktop/stop', data=b'{{}}', method='POST',\n\
-headers={{'X-MAS-Desktop-Token':'{token}','Content-Type':'application/json'}})\n\
-urllib.request.urlopen(req, timeout=2)\n",
-        base = base.trim_end_matches('/'),
-        token = token.replace('\\', "\\\\").replace('\'', "\\'"),
-    );
-    let _ = Command::new(python_bin())
-        .args(["-c", &script])
-        .status();
+    let Ok(url) = base.parse::<tauri::Url>() else { return };
+    let Some(port) = url.port_or_known_default() else { return };
+    post_local(port, token, "/api/desktop/stop", "{}");
 }
 
 fn force_kill_pid(pid: u32) {
@@ -176,6 +188,44 @@ fn shutdown_host(state: &HostState) {
     }
 }
 
+/// 只认 sidecar 同源：http + 127.0.0.1 + 同一端口。about:blank 放行，其余一律拒绝。
+fn navigation_allowed(url: &tauri::Url, base: &tauri::Url) -> bool {
+    if url.as_str() == "about:blank" {
+        return true;
+    }
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && base.host_str() == Some("127.0.0.1")
+        && url.port_or_known_default() == base.port_or_known_default()
+}
+
+/// 安全审计交给 sidecar 写遥测（只发事件名 + 原因码 + scheme + 主机名，不发完整地址）。
+fn audit_navigation_blocked(base: &tauri::Url, token: &str, url: &tauri::Url) {
+    let host = url
+        .host_str()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        .take(255)
+        .collect::<String>();
+    let scheme = url
+        .scheme()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(16)
+        .collect::<String>();
+    let body = serde_json::json!({
+        "event": "security.desktop_navigation_blocked",
+        "reason": "not_sidecar_origin",
+        "scheme": scheme,
+        "host": host,
+    })
+    .to_string();
+    let Some(port) = base.port_or_known_default() else { return };
+    let token = token.to_string();
+    std::thread::spawn(move || post_local(port, &token, "/api/desktop/security_event", &body));
+}
+
 fn open_main_window(app: &AppHandle, url: &str) -> Result<(), String> {
     let parsed = url
         .parse()
@@ -187,9 +237,28 @@ fn open_main_window(app: &AppHandle, url: &str) -> Result<(), String> {
         let _ = window.show();
         return Ok(());
     }
+    let state = app.state::<HostState>();
+    let base: tauri::Url = state
+        .base
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
+        .parse()
+        .map_err(|e| format!("sidecar 地址不合法：{e}"))?;
+    let token = state.token.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
         .title("Multimodal Agent Studio")
         .inner_size(1280.0, 860.0)
+        // release 构建关 devtools（debug 构建留给开发）
+        .devtools(cfg!(debug_assertions))
+        .on_navigation(move |url| {
+            if navigation_allowed(url, &base) {
+                return true;
+            }
+            audit_navigation_blocked(&base, &token, url);
+            false
+        })
         .build()
         .map_err(|e| format!("创建窗口失败：{e}"))?;
     let _ = win.show();

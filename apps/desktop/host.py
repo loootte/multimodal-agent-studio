@@ -250,14 +250,12 @@ class Sidecar:
             str(WEB_SERVER),
             "--port",
             str(self.port),
-            "--desktop-token",
-            self.token,
             "--ready-file",
             ready_path,
         ]
         cmd.extend(["--data-dir", self.data_dir])
         env = utf8_child_env()
-        env["MAS_DESKTOP_TOKEN"] = self.token
+        env["MAS_DESKTOP_TOKEN"] = self.token  # 13.D：令牌只走环境变量，不进命令行（进程列表可见）
         # 13.B：默认落盘加密 + 系统钥匙串；有明文数据就停下给迁移命令（PreflightError），不悄悄转换。
         self.notes = desktop_env.apply_defaults(env)
         self.storage = desktop_env.preflight(self.data_dir, env)
