@@ -123,7 +123,7 @@
       </div>
       <details id="toolpack-install-box">
         <summary>安装工具包</summary>
-        <p class="hint">也能装角色定制的预设包（只有 pack.json 的目录或 .zip，会自动识别）。</p>
+        <p class="hint">安装 = 复制到仓库的 toolpacks/installed/&lt;名字&gt;（不进 git）。包里有代码、或声明了成人分级的，都要单独勾选确认。</p>
         <label>
           本机目录或 .zip 路径
           <input id="toolpack-source" autocomplete="off" spellcheck="false" placeholder="D:\toolpacks\dice_roll">
@@ -134,8 +134,10 @@
         <section id="toolpack-review" class="toolpack-review" hidden aria-live="polite">
           <h4 id="toolpack-review-title">权限审阅</h4>
           <p id="toolpack-review-desc" class="hint"></p>
-          <p class="hint">它要的权限（逐项勾选才能安装）：</p>
+          <ul id="toolpack-review-facts"></ul>
+          <p class="hint">要确认的事项（逐项勾选才能安装；「包含代码」「成人分级」也各是一项）：</p>
           <ul id="toolpack-review-perms"></ul>
+          <pre id="toolpack-review-confirm" class="presetpack-confirm" hidden></pre>
           <p class="hint">它拿不到的：<span id="toolpack-review-none"></span></p>
           <p class="hint">沙箱会这样限制它：</p>
           <ul id="toolpack-review-sandbox"></ul>
@@ -145,26 +147,7 @@
             <button type="button" id="toolpack-review-cancel">取消</button>
           </div>
         </section>
-        <section id="presetpack-review" class="toolpack-review" hidden aria-live="polite">
-          <h4 id="presetpack-review-title">预设包审阅</h4>
-          <p id="presetpack-review-desc" class="hint"></p>
-          <ul id="presetpack-review-facts"></ul>
-          <p class="hint">权限：无。</p>
-          <ul id="presetpack-review-perms"></ul>
-          <div id="presetpack-review-warnings"></div>
-          <pre id="presetpack-review-confirm" class="presetpack-confirm" hidden></pre>
-          <ul id="presetpack-review-accepts"></ul>
-          <div class="dialog-actions">
-            <button type="button" id="presetpack-review-accept" disabled>确认并安装预设包</button>
-            <button type="button" id="presetpack-review-cancel">取消</button>
-          </div>
-        </section>
         <p class="hint">什么样的工具能装、怎么写：<a href="https://github.com/loootte/multimodal-agent-studio/blob/main/docs/tool-pack-guide.md" target="_blank" rel="noopener">工具包编写指南</a></p>
-      </details>
-      <details id="presetpack-box">
-        <summary>预设包（角色定制）</summary>
-        <ul id="presetpack-list" class="agent-list"></ul>
-        <p id="presetpack-empty" class="hint">还没有预设包。在上面“安装工具包”里填预设包目录或 .zip 就能装。</p>
       </details>
       <details id="agent-box">
         <summary>Agent（多智能体）</summary>
@@ -216,11 +199,8 @@
   <dialog id="character" aria-labelledby="character-title">
     <div id="character-form">
       <h2 id="character-title">定制角色图片</h2>
-      <p class="hint">每项可以输入搜索预设，也可以直接写自己的描述；清空就用默认值。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → character_image」里改。</p>
-      <div id="char-pack-row" class="char-pack" hidden>
-        <label>预设来源 <select id="char-pack"><option value="">内置预设</option></select></label>
-        <span class="hint">本机扩展包放在代码库外，默认不选；选择时会弹确认。</span>
-      </div>
+      <p class="hint">每项可以输入搜索预设，也可以直接写自己的描述；清空就用默认值。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → 对应工具」里改。</p>
+      <div id="char-tools" class="char-pack" role="tablist" hidden></div>
       <p id="char-pack-note" class="note" hidden></p>
       <div id="char-fields" class="char-fields"></div>
       <div id="char-extra" class="char-fields char-extra"></div>

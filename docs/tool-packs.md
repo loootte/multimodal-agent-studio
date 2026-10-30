@@ -23,7 +23,9 @@
 | `parameters` | 发给模型的 JSON Schema，`type: object`，`additionalProperties: false`。`null` 表示不提供给模型（例如 `generate_video`） |
 | `mutating` | 是否改外部状态 |
 | `confirm` | `always`、`never` 或 `by_args`（配 `confirm_args`，参数里出现这些键才确认） |
-| `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现 |
+| `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现；`{"kind": "module", "module": "tool.py"}` 表单工具，按[工具代码契约](tool-code-contract.md)实现 `catalog` / `preview` / `run`（#86）。`module` 必须是工具目录里的 .py 文件，解开符号链接以后也要在目录里 |
+| `ui` | 只给 `module`：`{"form", "preview", "title", "run_label"}`，`form: true` 才出现在网页“定制”表单里 |
+| `content` | 只给 `module`：`{"rating": "general"}` 或 `{"rating": "adult", "min_age", "label", "confirm", "chat_keywords"}`；`adult` 一律受宿主分级守卫约束，见[工具代码契约](tool-code-contract.md#宿主守卫工具代码改不了) |
 | `config` | 配置字段，格式同 #28（`int`、`string`、`secret` 等） |
 | `requires.backends` | 依赖的后端名 |
 | `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`。最后一项必须为 `false` |
@@ -40,6 +42,9 @@
 
 ## 安装、导出、卸载
 
+- 装到哪：仓库的 `toolpacks/installed/<名字>/`（已在 `.gitignore` 里，装完 `git status` 不变）；环境变量 `MAS_TOOLPACKS_DIR` 可以换目录（检查和评测用临时目录）。
+- 除了权限，**包含代码**（`code`：入口是 python/module 或包里有代码文件）和**成人分级**（`rating_adult`：`content.rating=adult`）也各是审阅里要单独勾选的一项，`accept_permissions` 要正好列出 `inspect` 返回的 `accept`。
+- 只有 `pack.json` 的旧预设包不再支持（`preset_pack_unsupported`）。
 - 安装：工具对话框填本机目录或 zip 路径 → 先检查（`POST /api/toolpacks/inspect`，返回里多了 `review`：`permissions[{permission,label,risk,effect}]`、`not_granted`、`sandbox`、`mode: "subprocess"`）→ 页面展开「权限审阅」，每个权限逐项勾选 → `POST /api/toolpacks/install {source, accept_permissions}`。同意的权限和包内容摘要记在包目录的 `.granted.json`（`{"schema": "mas.grant/2", "permissions", "version", "digest"}`）。
 - 调用前复核（12.D）：授权记录要存在、是 `mas.grant/2`、摘要和当前包内容一致（否则 `permission_denied`，`grant` 为 `missing` / `outdated` / `changed`）；生效权限 = 清单声明 ∩ 授权。内置工具另有名单 `packs.HOST_TOOLS` / `packs.BUILTIN_PYTHON`，写明每个工具实际需要的权限，运行时要求 需要 ⊆ 声明 ⊆ 授权，缺了返回 `permission_denied`（带 `denied`）。工具列表的 `pack` 里多了 `sandbox`（`subprocess` / `host`）和 `grant`。
 - 强制确认（12.E）：`network` 或 `read_local_content` 为真的包必须 `confirm: "always"`，否则检查 / 安装 / 发现报 `invalid_manifest`；这类包每次调用都确认，不在一轮里复用；`review` 多 `confirm_every_call`，工具列表的 `pack` 多 `sensitive`。见 [sensitive-confirm.md](sensitive-confirm.md)。
@@ -48,13 +53,15 @@
 
 ## 错误码
 
-`invalid_manifest`、`invalid_package`、`duplicate_tool`、`dependency_missing`、`permission_denied`、`permission_not_accepted`、`builtin_tool`、`not_exportable`、`not_found`。
+`invalid_manifest`、`invalid_package`、`duplicate_tool`、`dependency_missing`、`permission_denied`、`permission_not_accepted`、`code_not_accepted`、`rating_not_accepted`、`preset_pack_unsupported`、`builtin_tool`、`not_exportable`、`not_found`。
+
+表单工具（`module`）调用时还有：`invalid_field`、`invalid_parameter`、`tool_error`、`unsafe_content`、`minor_unsafe`、`not_original_character`、`nsfw_backend_not_allowed`、`confirm_required`，见[工具代码契约](tool-code-contract.md)。
 
 沙箱调用（12.D）另有：`permission_denied`（带 `violations`，越权的类别 `network` / `write_files` / `read_local_content` / `process` / `native`）、`tool_timeout`（超过 `MAS_TOOLPACK_TIMEOUT_SEC`，默认 30 秒）、`tool_error`（入口异常、没返回对象、子进程异常退出）、`sandbox_error`（子进程没能启动）。在进程内装载第三方包代码（`packs.load_module`）一律拒绝：`sandbox_required`。
 
 ## 沙箱与本机 ComfyUI 例外
 
-第三方工具包（`toolpacks/installed/` 下、`entry.kind: "python"`）在沙箱子进程里运行，权限按清单和授权强制执行，细节见 [tool-sandbox.md](tool-sandbox.md)。要点：
+第三方工具包（`toolpacks/installed/` 下、`entry.kind: "python"` 或 `"module"`）在沙箱子进程里运行，权限按清单和授权强制执行，细节见 [tool-sandbox.md](tool-sandbox.md)。要点：
 
 - 没有 `network`：任何连接和域名解析被拦，返回 `permission_denied`；有 `network`：只许连非本机地址，连本机（回环、未指定、链路本地、解析不出的主机）返回 `permission_denied`，审计原因 `egress_policy_denied`。每次决定都记进出站审计，渠道 `toolpack`。
 - 没有 `write_files`：只能写本次调用的临时目录；有：再加 `<数据目录>/toolpack_data/<名字>/`（环境变量 `MAS_TOOLPACK_DATA`）。

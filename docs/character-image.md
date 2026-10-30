@@ -101,13 +101,17 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ## 接口
 
+`character_image` 是一个按[工具代码契约](tool-code-contract.md)实现的表单工具（`entry.kind: "module"`），走通用接口：
+
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/character` | 十二个字段的预设和生效默认值 |
-| `POST /api/character/preview` | `{fields}` → `{prompt, fields, used_defaults, minor, summary}`，不安全时 400 + `code` |
-| `POST /api/sessions/{id}/character` | `{fields, count, aspect_ratio, seed?, backend, privacy}`，返回和发消息相同的事件流 |
+| `GET /api/tools/character_image/catalog` | 核心字段和扩展字段的预设、生效默认值 |
+| `POST /api/tools/character_image/preview` | `{fields}` → `{prompt, summary, fields, used_defaults, rating}`，不安全时 400 + `code` |
+| `POST /api/sessions/{id}/tools/character_image/run` | `{fields, count, aspect_ratio, seed?, backend, privacy, confirmed?}`，返回和发消息相同的事件流 |
 
-宿主工具 `character_image` 的参数：十二个字段（字符串，可省略；`reference` 默认可空）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
+旧接口 `GET /api/character`、`POST /api/character/preview`、`POST /api/sessions/{id}/character` 保留，等于上面三个。
+
+工具参数：十二个核心字段 + 八个扩展字段（字符串，可省略；`reference` 默认可空）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
 
 ## 不做
 
@@ -115,13 +119,13 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ## 代码
 
-- 工具包：`toolpacks/builtin/character_image/`（`tool.json`、`presets.json`）
-- 拼提示词和安全规则：`apps/web/character.py`
-- 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_character`、`start_character`）
-- 页面：`apps/web/static/character.js`
-- 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`；评测 `image.character`
+- 工具：`toolpacks/builtin/character_image/`（`tool.json` 1.3.0、`tool.py`、`presets.json`）。拼提示词的代码就在工具目录的 `tool.py` 里，宿主不再有专门的代码；`apps/web/character.py` 只剩一个转发到 `tool.py` 的兼容壳（旧的 import 还能用）。
+- 通用的表单工具调用：`apps/web/module_tools.py`；分级守卫：`apps/web/content_guard.py`
+- 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_module_tool`、`start_form_tool`）
+- 页面：`apps/web/static/character.js`（通用表单，按 `GET /api/tools` 的 `form_tools` 列出可用的表单工具）
+- 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`、`_pack_character_cases`、`_tool_install_cases`；评测 `image.character*`、`image.form_tool_*`、`image.install_*`
 
-## 摄像机位、光照与本机扩展包（#86）
+## 摄像机位、光照与独立工具（#86）
 
 ### 新字段（SFW 也能用）
 
@@ -136,98 +140,53 @@ anime style illustration, character illustration, full body, highly detailed, be
 | 表情 | `expression` | 微笑 / 大笑 / 严肃 / 平静 / 害羞 / 自信 … |
 | 动作/场景 | `scene` | 自由文字，例如“在雨中撑伞” |
 
-这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差；`FIELDS` 仍是十二个核心字段，新字段在 `EXTRA_FIELDS`。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
+这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
 
-提示词顺序：风格 → 画质 → 性别/年龄/人种/体型→ 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。扩展包新加的字段紧跟在它声明的 `after` 字段后面。
+提示词顺序：风格 → 画质 → 性别/年龄/人种/体型 → 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。工具自己的 `presets.json` 里用 `added` 声明的新字段，紧跟在它的 `after` 字段后面。
 
 表单里每个字段是“可搜索下拉 + 自定义输入”：输入能筛选预设（中文标签），也能直接写自己的描述；清空就用默认。提示词预览实时更新。
 
-### 本机扩展包（不进代码库）
+### 独立的工具（不进代码库）
 
-代码库里只有通用的 SFW 预设。个人用的预设（包括分级内容）做成**本机扩展包**放在仓库外，代码库只带一个加载口子和一套安全守卫，不带任何扩展包内容。
+代码库里只有通用的 SFW 工具。个人用的版本（包括分级内容）做成**独立的工具包**：一个工具目录，里面是 `tool.json`（`entry.kind: "module"`、`ui.form: true`、`content.rating`）、`tool.py`（按[工具代码契约](tool-code-contract.md)实现，可以直接复制内置的 `tool.py`）和它自己的 `presets.json`。工具目录放在仓库外，用页面安装：
 
-**放在哪**（`apps/web/local_packs.py`）：
+1. 打开“工具配置”，展开“安装工具包”，填工具目录或 .zip 的路径，点“检查并安装”。
+2. 审阅里列出：装到哪（仓库的 `toolpacks/installed/<name>/`，已被 git 忽略）、权限、**包含代码**、`rating=adult` 时的**成人分级**（年龄下限、只能本机出图、确认文字）。
+3. “包含代码”和“成人分级”都要各自勾选，少一项就不装（`code_not_accepted` / `rating_not_accepted`）。
+4. 装好后不用重启：打开“定制”，顶部的工具下拉里就有它。选中分级工具会先弹它的 `content.confirm`，出图后端锁在本机 ComfyUI。
+5. 卸载：在工具列表里点它后面的“卸载”。
 
-- 安装目录：页面上“安装工具包”装进来的预设包放这里。Windows `%APPDATA%\MAS\toolpacks`，其他系统 `~/.config/mas/toolpacks`；环境变量 `MAS_PRESET_PACKS_DIR` 可以换（检查和评测用临时目录，不碰真实目录）。总会被加载。
-- 环境变量 `MAS_LOCAL_TOOLPACKS`：另外再加一个或多个目录（Windows 用 `;` 隔开）；设成空字符串 = 只看安装目录。
-- 没有缓存，每次请求都重新读：装好、卸载、改 pack.json 都不用重启。
-- 每个子目录一个 `pack.json`。目录在仓库里面的一律跳过（防止误提交）；坏包跳过并在 `GET /api/character` 的 `packs_skipped` 里说明原因。
+安装后的代码只在沙箱子进程里跑；改了包里任何文件，授权作废，要重新安装。只有 `pack.json` 的旧预设包不再支持（`preset_pack_unsupported`），之前的“预设来源”下拉和 `MAS_LOCAL_TOOLPACKS` / `MAS_PRESET_PACKS_DIR` 都已去掉。
 
-**pack.json**（`schema: mas.local_pack/1`，只读 JSON，不执行任何代码；不认识的键直接拒绝）：
+**对话里用**：分级工具写了 `content.chat_keywords` 时，模型可以调它，但只有用户**这一句**出现关键词之一才放行，否则 `confirm_required`。没写关键词就只能在表单里用。
 
-| 键 | 说明 |
-| --- | --- |
-| `name` / `label` / `version` / `description` | 包名（`[a-z][a-z0-9_]`）、中文名、版本、说明 |
-| `extends` | 目前只能是 `character_image` |
-| `rating` | `general`（默认）或 `adult` |
-| `confirm` | 表单选择这个包时弹的确认文字；`rating=adult` 必填 |
-| `min_age` | 只给 `adult`：年龄下限，默认 18，只能更高 |
-| `prompt_tail` | 只给 `adult`：提示词尾注（默认 `all characters are adults clearly over {min_age} years old, …`） |
-| `chat_keywords` | 对话里用户这一句要出现其中一个词才能开；不写 = 只能在表单里用 |
-| `verbatim` | `["outfit"]`：服装预设自带完整说法，不再加 `wearing` |
-| `fields` | 新字段：`name`、`label`、`after`（跟在哪个核心字段后）、`options`；自动补一个“自动”选项 |
-| `presets.replace` / `extend` / `forbidden` | 整组替换某字段的预设 / 追加预设 / 禁用某些内置键 |
+### 分级守卫（宿主硬拦，工具代码改不了）
 
-`rating=general` 的包预设里不能有露骨词，尾注仍是 SFW。
-
-### 在页面上安装 / 卸载预设包
-
-“工具配置 → 安装工具包”会自动识别预设包：目录（或 .zip）里只有 `pack.json` 且 `schema` 是 `mas.local_pack/1`，就走预设包流程（`poc/tools/packs.py` 的 `source_kind` 分类，`apps/web/local_packs.py` 的 `inspect` / `install` / `uninstall` 处理）。
-
-1. 打开“工具配置”，展开“安装工具包”，在“本机目录或 .zip 路径”里填预设包目录，例如 `C:\Users\Administrator\mas-local-toolpacks\character_image_adult`，点“检查并安装”。
-2. 出现“预设包审阅”：类型（预设包，纯数据）、扩展的工具（`character_image`）、分级、年龄下限、替换/追加的预设和新字段、对话里能不能用、装到哪。权限一栏是“无”：不执行代码、不联网、不读本地内容、不写文件。
-3. 勾选“我知道它只是预设数据，不要任何权限”。`rating=adult` 的包还会显示红色警告和包自带的确认文字，并多一项“我已成年，确认安装这个成人分级预设包”，也要勾上。全部勾上，“确认并安装预设包”才能点。
-4. 装好后在“预设包（角色定制）”列表里能看到它：类型、分级、扩展哪个工具、来源（已安装 / 来自 MAS_LOCAL_TOOLPACKS）。不用重启，打开“角色定制”，顶部“预设来源”里就有它。
-5. 卸载：在“预设包（角色定制）”列表里点它后面的“卸载”。只能卸载页面上装的；`MAS_LOCAL_TOOLPACKS` 目录里的包要自己移走。
-
-安装时的检查（只收紧，不放宽；不合格就不装、不写任何文件）：
-
-- `pack.json` 的全部校验（不认识的键、`rating=adult` 要 `confirm`、`min_age` ≥ 18 …）；
-- 把包自带的每个预设过一遍分级守卫（`character.audit_pack`）：未成年用词、低于 `min_age` 的年龄、幼态体型、校服/学生、真人或版权角色、标了 `minor` 的预设、`age` 里的 teen/child，都不让装；
-- `MAS_LOCAL_TOOLPACKS` 里已经有同名包、安装目录在仓库里面，都不让装；
-- 只拷 `pack.json` 和 README，别的文件忽略（审阅里会提示）。
-
-接口：
-
-- `POST /api/toolpacks/inspect {source}`：预设包返回 `type: "preset"`、`permissions: []`、`permission_notes`、`rating`、`min_age`、`extends`、`confirm`、`warnings`（成人分级第一条是警告）、`problems`、`target`、`upgrade`（覆盖安装时是旧版本号）。工具包返回 `type: "tool"`，其余不变。
-- `POST /api/toolpacks/install {source, accept_permissions: [], accept_rating?}`：预设包的 `accept_permissions` 必须是空列表；`rating=adult` 还要 `accept_rating: "adult"`，否则 400 `rating_not_accepted`。
-- `POST /api/toolpacks/presets/<name>/uninstall`：只卸安装目录里的；`MAS_LOCAL_TOOLPACKS` 里的返回 400 `not_installed_here`。
-- `GET /api/tools` 多了 `preset_packs`（`type`、`extends`、`rating`、`min_age`、`local_only`、`origin`）。
-- 安装、卸载和 `/api/toolpacks/*` 的其他写操作一样，只接受本机同源请求，并记一条 `security.config_changed`。
-
-**怎么用**：
-
-- **表单**：本机有扩展包时，表单顶部出现“预设来源”下拉（没有就不显示）。选包会弹 `confirm` 确认；`GET /api/character?pack=名字` 换成包的预设。`rating=adult` 的包把出图后端锁在本机 ComfyUI。提交带 `pack`、`pack_confirmed: true`；没确认返回 400 `pack_confirm_required`，包不存在返回 `pack_not_found`。
-- **对话**：有 `chat_keywords` 的包会在系统提示里列出名字。模型调 `character_image` 时填 `pack`（新字段放 `pack_fields`）；只有用户**这一句**说出包的关键词才放行，否则返回 `pack_confirm_required`。`pack_fields` 只能写包自己的新字段。
-
-### 分级守卫（`rating=adult` 的包，代码库里硬拦，扩展包改不了）
+`apps/web/content_guard.py` 对**任何** `content.rating=adult` 的工具生效（内置还是安装、代码有没有自己检查都一样），调用前查每个字段、调用后再查最终提示词：
 
 | 规则 | 代码 |
 | --- | --- |
-| 年龄低于 18（未成年）或低于包的 `min_age`，阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
-| 内置的 teen / child 等未成年预设（按键或中文标签；包自己把它们加回来也一样拦） | `minor_unsafe` |
-| 自定义文字里有 少女、萝莉、正太、小孩、幼女、儿童、学生、loli、shota、child、teen、underage、schoolgirl、petite young 等 | `minor_unsafe` |
+| 年龄低于 18（未成年）或低于工具的 `min_age`，阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
+| 少女、萝莉、正太、小孩、幼女、儿童、学生、loli、shota、child、teen、underage、schoolgirl 等 | `minor_unsafe` |
 | 校服 / 教室 / 学生类内容 | `minor_unsafe`（说明原因） |
 | 幼态体型：娇小、幼态、平胸幼体等 | `minor_unsafe`（说明原因） |
 | 真人、明星、熟人、版权角色（词表 + 《作品名》、@账号、英文人名规则） | `not_original_character`，“请只描述原创角色” |
-| 分级内容发第三方出图 | `nsfw_backend_not_allowed`，说明可能违反服务条款；对话路径记一条 `egress.blocked` |
+| 分级内容发第三方出图 | `nsfw_backend_not_allowed`，说明可能违反服务条款；记一条 `egress.blocked` |
+| 表单没确认 / 对话这一句没关键词 | `confirm_required` |
 
-拒绝原因里用包的 `label`（例如“XX不能画未成年角色”）。
+拒绝原因里用工具的 `content.label`（例如“XX不能画未成年角色”）。表单目录里，过不了守卫或标了 `minor` 的预设会被去掉；结果的 `rating` 以清单为准，工具自称 `general` 也会改成 `adult`。
 
-没有扩展包时，#53 的规则照旧：自定义文字露骨一律 `unsafe_content`，未成年角色不能配暴露服装或挑逗姿势。另外有一条和扩展包无关的通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，不许发第三方、结果打 `rating: adult`。
+普通（general）工具：#53 的规则照旧，自定义文字露骨一律 `unsafe_content`，拼出的提示词露骨也拒绝。另外有一条通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，不许发第三方、结果打 `rating: adult`。
 
 ### 结果标记
 
-分级图（`rating=adult` 的包或通用兜底）出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板有“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
-
-### 接口变化
-
-- `GET /api/character[?pack=名字]`：返回多了 `extra_fields`（每项带 `group`：camera / light / detail / pack）、`pack`（当前包）、`packs`（本机包简介，不含预设内容）、`packs_skipped`。
-- `POST /api/character/preview`：`{fields, pack?}`。
-- `POST /api/sessions/{id}/character`：多了 `pack`、`pack_confirmed`。
-- `character_image` 工具（1.2.0）：多了八个字符串字段、`pack`（字符串）和 `pack_fields`（对象）。
+分级图出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板有“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
 
 ### 检查
 
-`apps/web/check.py` 的 `_pack_character_cases`（单元：discover / minor / school / original / default_sfw / order / camera_light；接口：form / chat）。用的是临时目录里的中性夹具包；检查开始时把 `MAS_LOCAL_TOOLPACKS` 设成空，用户自己的扩展包不会混进来。评测 `image.character_pack_*`、`image.character_camera_light_prompt`。
-预设包安装：`_preset_install_cases`（install_ok / rejects_loosening / adult_requires_confirm / uninstall），评测 `image.install_preset_pack_ok`、`image.install_preset_pack_rejects_loosening`、`image.install_preset_pack_adult_requires_confirm`、`image.uninstall_preset_pack`。安装目录在 check 一开始就设成临时目录（`MAS_PRESET_PACKS_DIR`）。
+`apps/web/check.py`：
+
+- `_pack_character_cases`（评测 `form_tool`）：discover、path_escape_rejected、minor_refused、school_uniform_refused、original_only、adult_code_host_guarded（一个**不做任何检查**的分级工具，证明拦截在宿主）、default_sfw、prompt_order、camera_light_prompt、generic_catalog_route、form_local_rating、chat_consent、adult_remote_refused。
+- `_tool_install_cases`（评测 `form_tool_install`）：install_ok、legacy_preset_pack_rejected、code_and_adult_confirm、uninstall、git_clean（真装进 `toolpacks/installed/` 一个随机名字的中性夹具，前后 `git status` 一致，再卸掉）。
+
+检查开始时把 `MAS_TOOLPACKS_DIR` 设成临时目录，夹具都是临时目录里的中性工具，不碰用户自己装的工具。

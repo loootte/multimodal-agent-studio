@@ -17,9 +17,9 @@ import sys
 import threading
 import time
 
-import character
+import content_guard
+import module_tools
 import image_run
-import local_packs
 import skill_page
 import store
 from packages.contracts.events import (
@@ -129,7 +129,6 @@ _WEB_TOOLS = (
     "plan_images",
     "build_skill_page",
     "stage_prompt",
-    "character_image",
 )
 EVENT_AGENT = "agent"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
@@ -768,7 +767,7 @@ def _generate_text_turn(
                 return delegator(arguments)
         if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
             pushes["handle"] = str(arguments.get("content_handle"))
-        if name in _WEB_TOOLS and name not in take_tools:
+        if _is_web_tool(name) and name not in take_tools:
             return _execute_web_tool(app, session_id, message_id, run, name, arguments)
         return execute_tool(name, arguments)
 
@@ -1289,8 +1288,8 @@ def _execute_web_tool_scoped(app, session_id, message_id, run, name, arguments) 
         return _execute_stage_prompt(app, session_id, run, arguments)
     if name == "plan_images":
         return _execute_plan_images(run, arguments)
-    if name == "character_image":
-        return _execute_character(app, session_id, run, arguments)
+    if module_tools.is_module_tool(name):
+        return _execute_module_tool(app, session_id, run, name, arguments)
     if name == "generate_image":
         return _execute_generate_image(app, session_id, message_id, run, arguments)
     tool_call = {"name": name, "arguments": arguments if isinstance(arguments, dict) else {}}
@@ -1387,72 +1386,79 @@ def _stage(run, text: str, source: str, rating: str | None = None) -> str:
     return handle
 
 
-def _character_config(app) -> dict:
+def _is_web_tool(name) -> bool:
+    """宿主（网页）执行的工具：固定的几个，加上所有 module 表单工具（#86）。"""
+    return name in _WEB_TOOLS or module_tools.is_module_tool(name)
+
+
+def _tool_config(app, name: str) -> dict:
     try:
-        return app.tools.effective(character.TOOL)
+        return app.tools.effective(name)
     except KeyError:
-        return {}
+        pack = module_tools.get(name)
+        return module_tools.config(pack) if pack else {}
 
 
-def _execute_character(app, session_id, run, arguments) -> dict:
-    """#53：模型从对话里填角色字段（没说的用默认值），拼成提示词登记成本轮句柄（1.1/1.2），再交给 generate_image。"""
+def _character_config(app) -> dict:
+    return _tool_config(app, "character_image")
+
+
+def _execute_module_tool(app, session_id, run, name, arguments) -> dict:
+    """#53/#86：模型从对话里填表单工具的字段（没说的用默认值）；宿主过守卫、调工具代码拼提示词，登记成本轮句柄（1.1/1.2），
+    再交给 generate_image。rating=adult 的工具要用户这一句里有清单声明的关键词，且只能本机出图。"""
+    pack = module_tools.get(name)
     args = dict(arguments) if isinstance(arguments, dict) else {}
     source = args.pop("mode", None) or "model"
-    pack_name = args.pop("pack", None)
-    pack_fields = args.pop("pack_fields", None) or {}
     if source not in ("chat", "model"):
-        return {"ok": False, "tool": "character_image",
+        return {"ok": False, "tool": name,
                 "error": {"code": "invalid_parameter", "message": "mode 只能是 chat 或 model。"}}
-    if not isinstance(pack_fields, dict):
-        return {"ok": False, "tool": "character_image",
-                "error": {"code": "invalid_parameter", "message": "pack_fields 要是对象。"}}
-    pack = None
-    if pack_name not in (None, ""):
-        pack = local_packs.get(pack_name)
-        if pack is None:
-            return {"ok": False, "tool": "character_image", "executed": False,
-                    "error": {"code": "pack_not_found", "message": "本机没有这个扩展包。",
-                              "hint": "不带 pack 重新调用画普通角色。"}}
-        if not character.pack_consent(pack, getattr(run, "_turn_text", "")):
-            # #86：模型不能自己开扩展包；用户这一句没提到包的关键词就拒绝，默认仍是内置预设（SFW）。
-            return {"ok": False, "tool": "character_image", "executed": False,
-                    "error": {"code": "pack_confirm_required",
-                              "message": f"“{pack['label']}”默认关闭；用户这一句没有明确要求，不能开启。",
-                              "hint": "不带 pack 重新调用画普通角色；要用扩展包时请用户在这一句里明确说出来，或在角色表单里选择。"}}
-    elif pack_fields:
-        return {"ok": False, "tool": "character_image",
-                "error": {"code": "invalid_parameter", "message": "pack_fields 只能和 pack 一起用。"}}
-    own = {spec["name"] for spec in (pack or {}).get("fields", [])}
-    if set(pack_fields) - own:
-        return {"ok": False, "tool": "character_image",
-                "error": {"code": "invalid_field",
-                          "message": f"pack_fields 里不认识的字段：{'、'.join(sorted(set(pack_fields) - own))}。"}}
+    rated = content_guard.rated(pack.manifest)
+    info = content_guard.content(pack.manifest)
+    if rated and not content_guard.consent(pack.manifest, getattr(run, "_turn_text", "")):
+        # 模型不能自己开分级工具：用户这一句没有清单里的关键词就拒绝。
+        return {"ok": False, "tool": name, "executed": False,
+                "error": {"code": "confirm_required",
+                          "message": f"“{info['label']}”默认关闭；用户这一句没有明确要求，不能开启。",
+                          "hint": "改用普通工具；要用时请用户在这一句里明确说出来，或在表单里勾选确认。"}}
     for body in app.sessions.local_bodies(session_id):
-        for value in list(args.values()) + list(pack_fields.values()):
+        for value in args.values():
             if isinstance(value, str) and len(body) >= 8 and (body in value or (len(value) >= 8 and value in body)):
-                return {"ok": False, "tool": "character_image",
+                return {"ok": False, "tool": name,
                         "error": {"code": "local_content", "message": "字段里有本地内容，只能用它的本地句柄出图。"}}
     try:
-        composed = character.compose(dict(args, **pack_fields), _character_config(app), pack=pack)
-    except character.CharacterError as exc:
-        return {"ok": False, "tool": "character_image", "executed": False, "error": exc.public()}
+        composed = module_tools.compose(pack, args, _tool_config(app, name))
+    except content_guard.GuardError as exc:
+        return {"ok": False, "tool": name, "executed": False, "error": exc.public()}
     rating = composed["rating"]
-    rated = rating == character.RATING_ADULT
     handle = _stage(run, composed["prompt"], source, rating if rated else None)
-    print(f"character {run.run_id} {handle} {source} {len(composed['prompt'])} {rating}", file=sys.stderr)
-    out = {"ok": True, "tool": "character_image", "content_handle": handle, "source": source,
-           "summary": composed["summary"], "used_defaults": composed["used_defaults"], "prompt": composed["prompt"],
-           "rating": rating,
+    print(f"module tool {name} {run.run_id} {handle} {source} {len(composed['prompt'])} {rating}", file=sys.stderr)
+    out = {"ok": True, "tool": name, "content_handle": handle, "source": source,
+           "summary": composed["summary"], "used_defaults": composed["used_defaults"], "rating": rating,
            "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
     if rated:
         out["next"] += " 分级内容只能用本机 ComfyUI：backend 不填。"
+    else:
+        out["prompt"] = composed["prompt"]
     return out
 
 
+def _execute_character(app, session_id, run, arguments) -> dict:
+    return _execute_module_tool(app, session_id, run, "character_image", arguments)
+
+
 def start_character(app, session_id: str, body) -> Run:
-    """#53 网页表单：不经过对话模型，直接按字段拼提示词、报张数、逐张 generate_image。
+    """旧接口 /api/sessions/<id>/character：等于 character_image 的表单出图。"""
+    return start_form_tool(app, session_id, "character_image", body)
+
+
+def start_form_tool(app, session_id: str, name: str, body) -> Run:
+    """#53/#86 网页表单：不经过对话模型，按字段拼提示词、报张数、逐张 generate_image。
     privacy=chat：字段是用户自己写在页面上的文字（1.1），会作为聊天消息保存；
-    privacy=local：拼好的提示词存成本地内容（1.3），消息里只写“本地提示词”，第三方出图按 remote_local_prompt。"""
+    privacy=local：拼好的提示词存成本地内容（1.3），消息里只写“本地提示词”，第三方出图按 remote_local_prompt。
+    rating=adult 的工具：body.confirmed 必须是 true，且只能本机出图。"""
+    pack = module_tools.get(name)
+    if pack is None or not (pack.manifest.get("ui") or {}).get("form"):
+        raise RequestError(404, "not_found", "没有这个表单工具。")
     body = body if isinstance(body, dict) else {}
     privacy = body.get("privacy") or "chat"
     if privacy not in ("chat", "local"):
@@ -1469,29 +1475,31 @@ def start_character(app, session_id: str, body) -> Run:
     seed = body.get("seed")
     if seed is not None and not (isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0):
         raise RequestError(400, "invalid_parameter", "seed 要是非负整数。")
-    pack = None
-    pack_name = body.get("pack")
-    if pack_name not in (None, ""):
-        pack = local_packs.get(pack_name)
-        if pack is None:
-            raise RequestError(400, "pack_not_found", "本机没有这个扩展包。")
-        if pack.get("confirm") and body.get("pack_confirmed") is not True:
-            raise RequestError(400, "pack_confirm_required", f"“{pack['label']}”默认关闭，要先在弹窗里确认开启。")
-    rated = bool(pack) and pack["rating"] == character.RATING_ADULT
+    info = content_guard.content(pack.manifest)
+    rated = info["rating"] == content_guard.RATING_ADULT
+    if rated and body.get("confirmed") is not True:
+        raise RequestError(400, "confirm_required", f"“{info['label']}”默认关闭，要先在弹窗里确认开启。")
     if rated and backend != "local":
-        # #86：分级扩展包的内容只走本机 ComfyUI。
+        # 宿主强制：分级内容只走本机 ComfyUI，与工具代码无关。
+        try:
+            settings = image_run.remote_settings()
+            egress.blocked("remote_image", settings.get("remote_base_url"), "nsfw_backend_not_allowed",
+                           local_derived=privacy == "local", tool=name)
+        except Exception:  # 记录失败不影响拒绝
+            pass
         raise RequestError(400, "nsfw_backend_not_allowed",
-                           f"“{pack['label']}”只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
+                           f"“{info['label']}”只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
     try:
-        composed = character.compose(body.get("fields") or {}, _character_config(app), pack=pack)
-    except character.CharacterError as exc:
+        composed = module_tools.compose(pack, body.get("fields") or {}, _tool_config(app, name))
+    except content_guard.GuardError as exc:
         raise RequestError(400, exc.code, exc.message) from exc
+    title = module_tools.describe(pack)["title"]
     where = "本机 ComfyUI" if backend == "local" else "第三方出图"
-    mode = f"{pack['label']}，" if pack else ""
-    if privacy == "local":
-        text = f"定制角色出图（{mode}本地提示词，{count} 张，{where}）"
+    mode = f"{info['label']}，" if rated else ""
+    if privacy == "local" or rated:
+        text = f"{title}出图（{mode}{'本地提示词，' if privacy == 'local' else ''}{count} 张，{where}）"
     else:
-        text = f"定制角色出图（{mode}{count} 张，{where}）：{composed['summary']}"
+        text = f"{title}出图（{count} 张，{where}）：{composed['summary']}"
     message_id = new_id("m_")
     run = Run(session_id, message_id)
     run.agent_mode = "single"
@@ -1505,11 +1513,11 @@ def start_character(app, session_id: str, body) -> Run:
     app.runs.add(run)
     run.push({"type": EVENT_RUN_STARTED, "run_id": run.run_id, "message_id": run.message_id, "session_id": session_id})
     telemetry.record("web.request", trace_id=run.run_id, method="POST",
-                     path=f"/api/sessions/{session_id}/character", session_id=session_id,
+                     path=f"/api/sessions/{session_id}/tools/{name}/run", session_id=session_id,
                      message_id=run.message_id, modalities=["text"])
     plan = {"prompt": composed["prompt"], "privacy": privacy, "backend": backend, "count": count,
             "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body,
-            "rating": composed["rating"] if rated else None}
+            "rating": content_guard.RATING_ADULT if rated else None}
     threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
     return run
 
@@ -1719,9 +1727,9 @@ def _bound_prompt(bound) -> str:
 def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend,
                     rating=None) -> dict:
     # #86：分级扩展包出的角色（rating=adult）或提示词本身露骨的都算成人内容：只许本机出图，结果打 rating=adult。
-    if rating != character.RATING_ADULT and character.looks_adult(_bound_prompt(bound)):
-        rating = character.RATING_ADULT
-    if backend == "remote" and rating == character.RATING_ADULT:
+    if rating != content_guard.RATING_ADULT and content_guard.looks_adult(_bound_prompt(bound)):
+        rating = content_guard.RATING_ADULT
+    if backend == "remote" and rating == content_guard.RATING_ADULT:
         settings = image_run.remote_settings()
         egress.blocked("remote_image", settings.get("remote_base_url"), "nsfw_backend_not_allowed",
                        local_derived=source == "local", handle=handle, tool="generate_image")
@@ -1772,11 +1780,11 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
     _note_image(run, source, backend, explicit_backend, public)
     public["prompt_source"] = source
     public["backend"] = backend
-    if public.get("ok") and rating == character.RATING_ADULT:
-        marked = image_run.mark_rating(session_id, str(result.get("artifact_id") or ""), character.RATING_ADULT)
+    if public.get("ok") and rating == content_guard.RATING_ADULT:
+        marked = image_run.mark_rating(session_id, str(result.get("artifact_id") or ""), content_guard.RATING_ADULT)
         if marked:
-            result = dict(result, rating=character.RATING_ADULT, url=marked.get("url") or result.get("url"))
-        public["rating"] = character.RATING_ADULT
+            result = dict(result, rating=content_guard.RATING_ADULT, url=marked.get("url") or result.get("url"))
+        public["rating"] = content_guard.RATING_ADULT
     if public.get("ok"):
         run._images_done = getattr(run, "_images_done", 0) + 1
         public["images_done_this_turn"] = run._images_done
@@ -2011,11 +2019,12 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
     args = args if isinstance(args, dict) else {}
     destination, host, scope = "none", "", ""
     try:
-        if name in ("generate_image", "character_image") and (args.get("backend") or "local") == "remote":
+        form_tool = name != "generate_image" and module_tools.is_module_tool(name)
+        if (name == "generate_image" or form_tool) and (args.get("backend") or "local") == "remote":
             settings = image_run.remote_settings()
             host, scope = egress.destination(settings.get("remote_base_url"))
             destination = "third_party_image"
-        elif name in ("generate_image", "generate_video", "character_image"):
+        elif name in ("generate_image", "generate_video") or form_tool:
             host, scope = egress.destination(image_run.comfy_base())
             destination = "comfyui"
     except Exception:
@@ -2485,24 +2494,8 @@ def _model_messages(
         if named:
             system += " 引用：" + " ".join(named)
     system += catalog_suffix()
-    system += _pack_suffix()
     return [{"role": "system", "content": system}, *items]
 
-
-def _pack_suffix() -> str:
-    """#86：本机有对话可用的扩展包时，告诉模型 character_image 的 pack 怎么填。没有扩展包时一个字都不加。"""
-    try:
-        packs = [p for p in local_packs.discover()["packs"].values() if p.get("chat_keywords")]
-    except Exception:  # 扩展包坏了不影响聊天。
-        return ""
-    if not packs:
-        return ""
-    lines = []
-    for pack in packs:
-        rule = "，只能本机出图（backend 不填）" if pack["rating"] == character.RATING_ADULT else ""
-        lines.append(f"{pack['name']}（{pack['label']}{rule}）")
-    return (" 本机扩展包（character_image 的 pack 字段，额外字段放 pack_fields）：" + "；".join(lines)
-            + "。只有用户这一句明确提到时才填 pack。")
 
 
 def _cover_bodies(text: str, bodies: list[tuple[str, str]]) -> str:
@@ -2712,7 +2705,7 @@ def _spawn_child(app, session_id, message_id, run, provider, source, choices, ma
 
     def execute(name, arguments):
         tool_event(name, arguments, "running")
-        if name in _WEB_TOOLS:
+        if _is_web_tool(name):
             result = _execute_web_tool(app, session_id, message_id, run, name, arguments)
         else:
             result = execute_tool(name, arguments)

@@ -1,7 +1,8 @@
 """第三方工具包的子进程入口（12.D #60）。只由 tools/sandbox.py 启动，不要直接 import。
 
 协议（一行一个 JSON，UTF-8）：
-- 父进程 → 子进程第一行：{"module", "pack_dir", "arguments", "config", "permissions", "write_roots", "deny_roots", "scratch"}。
+- 父进程 → 子进程第一行：{"module", "pack_dir", "arguments", "config", "permissions", "write_roots", "deny_roots", "scratch", "function"}。
+  function 默认 call(arguments, config)；#86 表单工具（entry.kind=module）是 catalog(ctx) / preview(fields, ctx) / run(args, ctx)。
   config 里的密钥是父进程显式注入的；子进程的环境变量只有白名单，拿不到用户 shell 里的密钥。
 - 子进程 → 父进程：
   {"t": "egress", "host": ..., "port": ...}   要出网（或查域名）之前问一次，父进程回 {"allow": bool}；
@@ -164,11 +165,15 @@ def main() -> None:
     try:
         module = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(module)
-        call = getattr(module, "call", None)
+        function = spec.get("function") or "call"
+        call = getattr(module, function, None) if function in ("call", "catalog", "preview", "run") else None
         if not callable(call):
             _send({"t": "error", "error": "NoCall", "violations": violations})
             return
-        result = call(dict(spec.get("arguments") or {}), dict(spec.get("config") or {}))
+        if function == "catalog":
+            result = call(dict(spec.get("config") or {}))
+        else:
+            result = call(dict(spec.get("arguments") or {}), dict(spec.get("config") or {}))
     except BaseException as exc:  # noqa: BLE001  包里的任何异常都折成类名交回
         _send({"t": "error", "error": type(exc).__name__, "violations": violations})
         return

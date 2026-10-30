@@ -25,15 +25,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(WEB_DIR, "..", ".."))
-# #86：本机扩展包只在用户电脑上；检查里默认一个都不加载，免得用户的环境变量混进来。
-os.environ["MAS_LOCAL_TOOLPACKS"] = ""
-# 装预设包的目录也换成临时目录：检查和评测绝不碰用户真实的 %APPDATA%\\MAS\\toolpacks。
-_PRESET_HOME = tempfile.mkdtemp(prefix="mas-preset-home-")
-os.environ["MAS_PRESET_PACKS_DIR"] = _PRESET_HOME
+# #86：安装目录换成临时目录：用户自己装在 toolpacks/installed/ 里的工具（例如成人模式工具包）不会混进检查和评测，
+# 检查也不往仓库里写东西（只有 git_clean 用例故意装一个唯一名字的夹具，装完就删）。
+_TOOLPACKS_HOME = tempfile.mkdtemp(prefix="mas-toolpacks-home-")
+os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(_TOOLPACKS_HOME, "installed")
 import atexit  # noqa: E402
 import zipfile  # noqa: E402
 
-atexit.register(shutil.rmtree, _PRESET_HOME, True)
+atexit.register(shutil.rmtree, _TOOLPACKS_HOME, True)
 sys.path.insert(0, WEB_DIR)
 sys.path.insert(0, ROOT)
 
@@ -461,11 +460,12 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._piece(_delta(content="好了"))
             self._done()
             return
-        staged = next((t for t in reversed(texts) if "工具结果 character_image" in t), "")
+        tool = getattr(self.server, "character_tool", None) or "character_image"
+        staged = next((t for t in reversed(texts) if f"工具结果 {tool}" in t), "")
         if not staged:
-            # #86：用例可以换模型填的字段（provider.character_args），默认还是 #53 的红发骑士。
+            # #86：用例可以换表单工具（provider.character_tool）和模型填的字段（provider.character_args），默认还是 #53 的红发骑士。
             args = getattr(self.server, "character_args", None) or {"hair_color": "红发", "outfit": "knight_armor"}
-            self._emit_tool("character_image", dict(args))
+            self._emit_tool(tool, dict(args))
             return
         if '"ok": false' in staged:
             self._piece(_delta(content="不能这样画"))
@@ -5984,7 +5984,7 @@ def _tool_pack_guide_cases() -> None:
     saved = os.environ.get("MAS_TOOLPACKS_DIR")
     os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(folder, "installed")
     try:
-        packs.install(source, [])
+        packs.install(source, ["code"])
         result = execute_tool("guide_boom", {})
         if result.get("ok") is not False or (result.get("error") or {}).get("code") != "tool_error" \
                 or "secret-detail" in json.dumps(result, ensure_ascii=False):
@@ -6071,20 +6071,20 @@ def _toolpack_cases() -> None:
         info = packs.inspect(needy)
         if info["problems"] or len(info.get("missing") or []) != 2:
             fail(f"检查工具包时没有报出缺的依赖：{info}")
-        packs.install(needy, [])
+        packs.install(needy, ["code"])
         result = execute_tool("needs_backend", {"n": 1})
         if result.get("error", {}).get("code") != "dependency_missing" or result.get("executed") is not False:
             fail(f"缺依赖时没有稳定错误码：{result}")
         # 权限：安装要确认；授权记录被改掉后调用 permission_denied。
         netty = _write_pack(source, _pack_manifest("needs_network", confirm="always", permissions={"network": True}), _PACK_CODE)
         try:
-            packs.install(netty, [])
+            packs.install(netty, ["code"])
         except packs.PackError as exc:
             if exc.code != "permission_not_accepted":
                 fail(f"没确认权限就安装的错误码不对：{exc.code}")
         else:
             fail("没确认权限也装上了")
-        packs.install(netty, ["network"])
+        packs.install(netty, ["code", "network"])
         if execute_tool("needs_network", {"n": 2}).get("n") != 2:
             fail("授权后的工具没有执行")
         # 12.E #61：联网的第三方包每次调用都确认（不在一轮里复用）；内置工具保持一轮复用。
@@ -6105,7 +6105,7 @@ def _toolpack_cases() -> None:
         argy = _write_pack(source, _pack_manifest("by_args_tool", mutating=True, confirm="by_args", confirm_args=["overwrite"],
                                                   parameters={"type": "object", "additionalProperties": False,
                                                               "properties": {"overwrite": {"type": "boolean"}}}), _PACK_CODE)
-        packs.install(argy, [])
+        packs.install(argy, ["code"])
         if tool_mutates("by_args_tool", {}) or not tool_mutates("by_args_tool", {"overwrite": True}) or not tool_mutates("by_args_tool"):
             fail("confirm=by_args 没有按参数生效")
         if _asks_confirm(tool_mutates, "by_args_tool", {}) or not _asks_confirm(tool_mutates, "by_args_tool", {"overwrite": True}):
@@ -6226,9 +6226,10 @@ def _sandbox_cases() -> None:
     try:
         info = packs.inspect(PROBE)
         review = info.get("review") or {}
-        if info.get("problems") or review.get("mode") != "subprocess" or not review.get("sandbox") or review.get("permissions"):
-            fail(f"安装前的权限审阅不对：{info}")
-        packs.install(_probe_copy(source), [])
+        if info.get("problems") or review.get("mode") != "subprocess" or not review.get("sandbox") \
+                or [p["permission"] for p in review.get("permissions") or []] != ["code"]:
+            fail(f"安装前的权限审阅不对（不要权限的包只该有「包含代码」一项）：{info}")
+        packs.install(_probe_copy(source), ["code"])
         pack = packs.find("sandbox_probe")
         if pack.grant_state() != "ok" or packs.summary(pack).get("sandbox") != "subprocess":
             fail(f"探针包装好后授权或沙箱标记不对：{packs.summary(pack)}")
@@ -6275,7 +6276,7 @@ def _sandbox_cases() -> None:
         if not any(r.get("destination_host") == "203.0.113.7" for r in blocked) or SECRET in json.dumps(records):
             fail(f"出站审计的主机名不对或带出了密钥：{[r.get("destination_host") for r in blocked]}")
         # 授权了 network + write_files：回环地址仍拒绝（egress_policy_denied）；能写自己的数据目录；仍读不了会话。
-        packs.install(_probe_copy(source, "probe_net", network=True, write_files=True), ["network", "write_files"])
+        packs.install(_probe_copy(source, "probe_net", network=True, write_files=True), ["code", "network", "write_files"])
         result = execute_tool("probe_net", {"act": "loopback", "port": 9})
         if (result.get("error") or {}).get("violations") != ["network"]:
             fail(f"有联网权限的包连上了本机回环地址：{result}")
@@ -6300,12 +6301,12 @@ def _sandbox_cases() -> None:
             json.dump({"permissions": []}, handle)
         if (execute_tool("sandbox_probe", {"act": "scratch"}).get("error") or {}).get("grant") != "outdated":
             fail("没有内容摘要的旧授权没有被拒绝")
-        packs.install(_probe_copy(os.path.join(source, "again")), [])
+        packs.install(_probe_copy(os.path.join(source, "again")), ["code"])
         if execute_tool("sandbox_probe", {"act": "scratch"}).get("ok") is not True:
             fail("重新安装后还是被拒")
         # 超时：杀掉子进程，tool_timeout。
         slow = _write_pack(source, _pack_manifest("probe_slow"), "import time\ndef call(arguments, config):\n    time.sleep(30)\n")
-        packs.install(slow, [])
+        packs.install(slow, ["code"])
         os.environ["MAS_TOOLPACK_TIMEOUT_SEC"] = "1"
         try:
             result = execute_tool("probe_slow", {})
@@ -6657,10 +6658,12 @@ def _toolpack_http_case(base: str, directory: str) -> None:
         info = json.loads(body)
         if status != 200 or info.get("name") != "dice_roll" or info.get("problems") or info.get("permissions") != []:
             fail(f"检查示例工具包失败：{body}")
+        if info.get("code") is not True or info.get("accept") != ["code"]:
+            fail(f"含代码的示例包审阅没有要求确认「包含代码」：{body}")
         status, body = request("POST", base + "/api/toolpacks/install", {"source": example})
-        if status != 400 or json.loads(body).get("code") != "permission_not_accepted":
+        if status != 400 or json.loads(body).get("code") != "code_not_accepted":
             fail(f"没确认权限的安装没有被拒绝：{status} {body}")
-        status, body = request("POST", base + "/api/toolpacks/install", {"source": example, "accept_permissions": []})
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": example, "accept_permissions": ["code"]})
         if status != 200:
             fail(f"安装示例工具包失败：{body}")
         listing = json.loads(request("GET", base + "/api/tools")[1])
@@ -6702,7 +6705,7 @@ def _toolpack_http_case(base: str, directory: str) -> None:
         saved_source = packs.CONFIG_SOURCE
         packs.CONFIG_SOURCE = None
         try:
-            packs.install(zipped, [])
+            packs.install(zipped, ["code"])
             result = execute_tool("dice_roll", {})
             if not result.get("ok") or result.get("sides") != 6 or result.get("has_key"):
                 fail(f"另一份目录里装上的包不能用，或带走了配置：{result}")
@@ -6884,11 +6887,11 @@ def _character_units() -> None:
     print("character units ok")
 
 
-# #86 本机扩展包（local_packs）：仓库里只有加载口子和分级守卫，没有任何扩展包内容。
-# 这里的夹具包内容是中性的（晚礼服、花园……），只用来验证口子和守卫；写在临时目录，用完就删。
+# #86 表单工具（entry.kind=module）：代码是工具目录里的 .py，按 docs/tool-code-contract.md 实现；
+# 宿主负责加载、授权和分级守卫（content_guard）。这里的夹具内容是中性的（晚礼服、花园……），只用来验证口子和守卫；
+# 写在临时目录、装进临时的 MAS_TOOLPACKS_DIR，用完就删。仓库里没有任何成人内容。
 _FIXTURE_RATED = {
-    "schema": "mas.local_pack/1", "name": "rated_fixture", "label": "分级夹具", "version": "0.1.0",
-    "extends": "character_image", "rating": "adult", "min_age": 21,
+    "name": "rated_fixture", "label": "分级夹具", "version": "0.1.0", "rating": "adult", "min_age": 21,
     "confirm": "开启分级夹具？只用于测试。",
     "chat_keywords": ["分级夹具"],
     "prompt_tail": "fixture tail: all characters are adults clearly over 21 years old, original character",
@@ -6909,243 +6912,504 @@ _FIXTURE_RATED = {
     },
 }
 _FIXTURE_GENERAL = {
-    "schema": "mas.local_pack/1", "name": "general_fixture", "label": "普通夹具", "extends": "character_image",
-    "rating": "general",
+    "name": "general_fixture", "label": "普通夹具", "version": "0.1.0", "rating": "general",
     "presets": {"extend": {"outfit": [{"key": "raincoat", "label": "雨衣", "prompt": "yellow raincoat"}]}},
 }
+_BUILTIN_CHARACTER = os.path.join(ROOT, "toolpacks", "builtin", "character_image")
+
+# 不自己做任何检查的工具代码：守卫全靠宿主。trick=alpha/beta 时故意返回越界的提示词并谎称 general。
+_NAIVE_CODE = '''
+FIELDS = [
+    {"name": "age", "label": "年龄", "options": [{"key": "adult", "label": "成年", "prompt": "adult in their thirties"},
+                                               {"key": "teen", "label": "少年", "prompt": "teen"}]},
+    {"name": "outfit", "label": "服装", "options": [{"key": "gown", "label": "晚礼服", "prompt": "evening gown"},
+                                                  {"key": "uniform", "label": "制服", "prompt": "school uniform"},
+                                                  {"key": "flagged", "label": "标记项", "prompt": "plain coat", "minor": True}]},
+    {"name": "scene", "label": "场景", "options": []},
+]
 
 
-class _Packs:
-    """把夹具包写进临时目录，并把 MAS_LOCAL_TOOLPACKS 指过去；退出时还原（check 一开始就设成空）。"""
+def catalog(ctx):
+    return {"fields": FIELDS, "extra_fields": [], "defaults": {"age": "adult", "outfit": "gown"}}
 
-    def __init__(self, *packs: dict, broken: bool = False):
-        self.packs = packs
-        self.broken = broken
+
+def run(args, ctx):
+    trick = args.get("trick")
+    if trick == "alpha":
+        return {"prompt": "a teen schoolgirl in a classroom", "rating": "general", "summary": "x"}
+    if trick == "beta":
+        return {"prompt": "a nude figure", "rating": "general", "summary": "x"}
+    if trick == "gamma":
+        raise RuntimeError("secret-detail-86")
+    if trick == "delta":
+        return {"error": {"code": "Bad Code!", "message": "nope", "field": "../x"}}
+    parts = [str(args.get(k) or "") for k in ("age", "outfit", "scene")]
+    return {"prompt": ", ".join(p for p in parts if p) + ", naive tail", "rating": "general",
+            "summary": "朴素", "fields": {}, "used_defaults": []}
+
+
+def preview(fields, ctx):
+    return run(fields, ctx)
+'''
+
+
+def _engine_tool(spec: dict, parent: str) -> str:
+    """用内置 character_image 的代码（tool.py）+ 改过的 presets.json 做一个独立工具包（和成人模式工具包同一种做法）。"""
+    import copy
+
+    with open(os.path.join(_BUILTIN_CHARACTER, "tool.json"), encoding="utf-8") as handle:
+        tool = json.load(handle)
+    with open(os.path.join(_BUILTIN_CHARACTER, "presets.json"), encoding="utf-8") as handle:
+        fields = copy.deepcopy(json.load(handle)["fields"])
+    presets = spec.get("presets") or {}
+    for name, keys in (presets.get("forbidden") or {}).items():
+        fields[name]["options"] = [o for o in fields[name]["options"] if o["key"] not in keys]
+    for name, item in (presets.get("replace") or {}).items():
+        fields[name] = dict(fields[name], label=item["label"], options=copy.deepcopy(item["options"]))
+    for name, options in (presets.get("extend") or {}).items():
+        fields[name]["options"] += copy.deepcopy(options)
+    added = []
+    for item in spec.get("fields") or []:
+        fields[item["name"]] = {"label": item["label"], "options": copy.deepcopy(item["options"])}
+        added.append({"name": item["name"], "after": item["after"]})
+        tool["parameters"]["properties"][item["name"]] = {"type": "string", "maxLength": 200, "description": item["label"]}
+    tool.update(name=spec["name"], version=spec["version"], description=f"夹具：{spec['label']}（测试用）。")
+    tool["ui"] = {"form": True, "preview": True, "title": spec["label"]}
+    content = {"rating": spec["rating"]}
+    if spec["rating"] == "adult":
+        content.update(min_age=spec["min_age"], label=spec["label"], confirm=spec["confirm"],
+                       chat_keywords=spec.get("chat_keywords") or [])
+    tool["content"] = content
+    folder = os.path.join(parent, spec["name"])
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "tool.json"), "w", encoding="utf-8") as handle:
+        json.dump(tool, handle, ensure_ascii=False)
+    with open(os.path.join(folder, "presets.json"), "w", encoding="utf-8") as handle:
+        json.dump({"fields": fields, "added": added, "verbatim": spec.get("verbatim") or [],
+                   "prompt_tail": spec.get("prompt_tail") or ""}, handle, ensure_ascii=False)
+    shutil.copyfile(os.path.join(_BUILTIN_CHARACTER, "tool.py"), os.path.join(folder, "tool.py"))
+    return folder
+
+
+def _naive_manifest(name: str, rating: str) -> dict:
+    manifest = {
+        "schema": "mas.tool/1", "name": name, "version": "0.1.0", "description": "夹具：自己不做任何检查的表单工具。",
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "properties": {k: {"type": "string", "maxLength": 200} for k in ("age", "outfit", "scene", "trick")}},
+        "mutating": False, "confirm": "never", "entry": {"kind": "module", "module": "tool.py"},
+        "ui": {"form": True, "preview": True, "title": "朴素夹具"}, "content": {"rating": rating}, "permissions": {},
+    }
+    if rating == "adult":
+        manifest["content"].update(min_age=21, label="朴素分级", confirm="开启朴素分级夹具？只用于测试。", chat_keywords=["朴素分级"])
+    return manifest
+
+
+def _naive_tool(name: str, rating: str, parent: str, manifest: dict | None = None, code: str = _NAIVE_CODE) -> str:
+    folder = os.path.join(parent, name)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "tool.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest or _naive_manifest(name, rating), handle, ensure_ascii=False)
+    if code is not None:
+        with open(os.path.join(folder, "tool.py"), "w", encoding="utf-8") as handle:
+            handle.write(code)
+    return folder
+
+
+def _fixture_makers() -> dict:
+    return {
+        "rated_fixture": lambda parent: _engine_tool(_FIXTURE_RATED, parent),
+        "general_fixture": lambda parent: _engine_tool(_FIXTURE_GENERAL, parent),
+        "naive_rated": lambda parent: _naive_tool("naive_rated", "adult", parent),
+        "naive_general": lambda parent: _naive_tool("naive_general", "general", parent),
+    }
+
+
+class _Tools:
+    """把夹具工具包装进一个临时的 MAS_TOOLPACKS_DIR（按 inspect 给的 accept 确认），退出时还原并删掉。"""
+
+    def __init__(self, *names: str):
+        self.names = names
 
     def __enter__(self) -> str:
-        self.saved = os.environ.get("MAS_LOCAL_TOOLPACKS")
-        self.folder = tempfile.mkdtemp(prefix="mas-packs-")
-        for pack in self.packs:
-            os.makedirs(os.path.join(self.folder, pack["name"]))
-            with open(os.path.join(self.folder, pack["name"], "pack.json"), "w", encoding="utf-8") as handle:
-                json.dump(pack, handle, ensure_ascii=False)
-        if self.broken:
-            os.makedirs(os.path.join(self.folder, "broken"))
-            with open(os.path.join(self.folder, "broken", "pack.json"), "w", encoding="utf-8") as handle:
-                json.dump(dict(_FIXTURE_RATED, name="broken", min_age=16), handle)
-        os.environ["MAS_LOCAL_TOOLPACKS"] = self.folder
-        return self.folder
+        packs = _packs_module()
+        self.saved = os.environ.get("MAS_TOOLPACKS_DIR")
+        self.root = tempfile.mkdtemp(prefix="mas-formtools-")
+        os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(self.root, "installed")
+        self.src = os.path.join(self.root, "src")
+        os.makedirs(self.src)
+        makers = _fixture_makers()
+        for name in self.names:
+            folder = makers[name](self.src)
+            info = packs.inspect(folder)
+            if info["problems"]:
+                fail(f"夹具 {name} 不合格：{info['problems']}")
+            packs.install(folder, info["accept"])
+        return self.root
 
     def __exit__(self, *exc) -> None:
         if self.saved is None:
-            os.environ.pop("MAS_LOCAL_TOOLPACKS", None)
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
         else:
-            os.environ["MAS_LOCAL_TOOLPACKS"] = self.saved
-        shutil.rmtree(self.folder, ignore_errors=True)
+            os.environ["MAS_TOOLPACKS_DIR"] = self.saved
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
-def _rated_pack() -> dict:
-    import local_packs
+def _tool(name: str):
+    import module_tools
 
-    return local_packs.validate(json.loads(json.dumps(_FIXTURE_RATED)))
+    pack = module_tools.get(name)
+    if pack is None:
+        fail(f"表单工具 {name} 没装上")
+    return pack
 
 
-def _pack_refused(fields: dict, code: str, words: tuple = (), pack: dict | None = None) -> str:
+def _refused(name: str, fields: dict, code: str, words: tuple = (), phase: str = "run") -> str:
+    """宿主（或内置工具代码）拒绝这组字段，错误码是 code，原因里有 words。"""
     import character
+    import module_tools
+    from content_guard import GuardError
 
     try:
-        character.compose(fields, {}, pack=pack)
-    except character.CharacterError as exc:
+        module_tools.compose(_tool(name), fields, {}, phase=phase)
+    except (GuardError, character.CharacterError) as exc:
         if exc.code != code:
-            fail(f"扩展包 {fields} 应是 {code}，得到 {exc.code}：{exc.message}")
+            fail(f"{name} {fields} 应是 {code}，得到 {exc.code}：{exc.message}")
         for word in words:
             if word not in exc.message:
-                fail(f"扩展包 {fields} 的拒绝原因缺“{word}”：{exc.message}")
+                fail(f"{name} {fields} 的拒绝原因缺“{word}”：{exc.message}")
         return exc.message
-    fail(f"扩展包 {fields} 没被拦下")
+    fail(f"{name} {fields} 没被拦下")
     return ""
 
 
-def _pack_discover_units() -> None:
-    """#86：只从仓库外读 pack.json；坏包跳过并说明原因；仓库里的目录一律不认；不执行代码。"""
-    import local_packs
+def _compose(name: str, fields: dict) -> dict:
+    import module_tools
 
-    if os.environ.get("MAS_LOCAL_TOOLPACKS") != "" or local_packs.discover()["packs"]:
-        fail("check 里默认不该加载任何本机扩展包")
-    if os.path.exists(os.path.join(ROOT, "toolpacks", "builtin", "character_image", "presets_adult.json")):
-        fail("仓库里不该再有成人预设")
-    with _Packs(_FIXTURE_RATED, _FIXTURE_GENERAL, broken=True):
-        found = local_packs.discover()
-        if sorted(found["packs"]) != ["general_fixture", "rated_fixture"]:
-            fail(f"扩展包没找全：{sorted(found['packs'])}")
-        if not any(item["dir"] == "broken" and "min_age" in item["reason"] for item in found["skipped"]):
-            fail(f"min_age 低于 18 的包应被跳过：{found['skipped']}")
-        if local_packs.get("rated_fixture")["min_age"] != 21 or local_packs.get("nope") is not None:
-            fail("local_packs.get 不对")
-        summary = local_packs.summary(found["packs"]["rated_fixture"])
-        if not summary["local_only"] or "presets" in summary or not summary["confirm"]:
-            fail(f"扩展包简介不对：{summary}")
-    saved = os.environ.get("MAS_LOCAL_TOOLPACKS")
-    inside = tempfile.mkdtemp(prefix="mas-packs-", dir=ROOT)
-    try:
-        os.makedirs(os.path.join(inside, "rated_fixture"))
-        with open(os.path.join(inside, "rated_fixture", "pack.json"), "w", encoding="utf-8") as handle:
-            json.dump(_FIXTURE_RATED, handle)
-        os.environ["MAS_LOCAL_TOOLPACKS"] = inside
-        found = local_packs.discover()
-        if found["packs"] or not any("仓库" in item["reason"] for item in found["skipped"]):
-            fail(f"仓库里的扩展包目录应被拒绝：{found}")
-    finally:
-        os.environ["MAS_LOCAL_TOOLPACKS"] = saved if saved is not None else ""
-        shutil.rmtree(inside, ignore_errors=True)
+    return module_tools.compose(_tool(name), fields, {})
+
+
+def _pack_discover_units() -> None:
+    """#86：表单工具从工具目录发现；装的时候「包含代码」「成人分级」各要确认；仓库里没有成人内容；清单只认 tool.json。"""
+    import module_tools
+
+    packs = _packs_module()
+    listed = {item["name"]: item for item in module_tools.form_tools()}
+    if set(listed) != {"character_image"} or listed["character_image"]["rating"] != "general" \
+            or not listed["character_image"]["builtin"]:
+        fail(f"默认只该有内置的 character_image 表单工具：{listed}")
+    builtin_rated = [p.name for p in packs.discover() if p.builtin and packs.rating(p.manifest) == "adult"]
+    if builtin_rated or os.path.exists(os.path.join(_BUILTIN_CHARACTER, "presets_adult.json")):
+        fail(f"仓库里不该有成人分级的工具或预设：{builtin_rated}")
+    if os.path.exists(os.path.join(WEB_DIR, "local_packs.py")):
+        fail("apps/web/local_packs.py 应已删除（工具代码要在工具目录里）")
+    with _Tools("rated_fixture", "general_fixture", "naive_rated") as root:
+        listed = {item["name"]: item for item in module_tools.form_tools()}
+        if set(listed) != {"character_image", "rated_fixture", "general_fixture", "naive_rated"}:
+            fail(f"装上的表单工具没找全：{sorted(listed)}")
+        rated = listed["rated_fixture"]
+        if rated["rating"] != "adult" or not rated.get("local_only") or rated.get("min_age") != 21 \
+                or not rated.get("confirm") or rated.get("builtin") or rated.get("title") != "分级夹具":
+            fail(f"分级工具简介不对：{rated}")
+        if "evening_gown" in json.dumps(listed, ensure_ascii=False) or "options" in json.dumps(listed):
+            fail("工具简介里不该带预设内容")
+        if listed["general_fixture"]["rating"] != "general" or listed["general_fixture"].get("local_only"):
+            fail(f"普通工具简介不对：{listed['general_fixture']}")
+        if not os.path.isfile(os.path.join(root, "installed", "rated_fixture", "tool.py")):
+            fail("工具代码没跟着装进工具目录")
+        # 已安装的工具被改过：授权作废，不再列为可用。
+        with open(os.path.join(root, "installed", "naive_rated", "tool.py"), "a", encoding="utf-8") as handle:
+            handle.write("\n# changed\n")
+        changed = {item["name"]: item for item in module_tools.form_tools()}["naive_rated"]
+        if not changed.get("unavailable"):
+            fail(f"装好后被改过的工具还被当成可用：{changed}")
+        from content_guard import GuardError
+        try:
+            module_tools.compose(_tool("naive_rated"), {}, {})
+        except GuardError as exc:
+            if exc.code != "permission_denied":
+                fail(f"被改过的工具错误码不对：{exc.code}")
+        else:
+            fail("被改过的工具还在跑")
+    # 清单校验：content / ui 只给 module 工具；分级要写全；内置 module 只限名单。
+    good = _naive_manifest("good_form", "adult")
+    if packs.validate_manifest(good):
+        fail(f"合格的表单工具清单被拒绝：{packs.validate_manifest(good)}")
     bad_cases = (
-        ({"rating": "adult", "confirm": ""}, "confirm"),
-        ({"min_age": 17}, "min_age"),
-        ({"rating": "spicy"}, "rating"),
-        ({"extends": "generate_image"}, "extends"),
-        ({"run": "python evil.py"}, "不认识的键"),
-        ({"verbatim": ["pose"]}, "verbatim"),
-        ({"fields": [{"name": "age", "label": "x", "options": [{"key": "a", "label": "a", "prompt": "a"}]}]}, "重名"),
+        ({"content": {"rating": "adult", "min_age": 21, "label": "x"}}, "confirm"),
+        ({"content": {"rating": "adult", "min_age": 17, "label": "x", "confirm": "y"}}, "min_age"),
+        ({"content": {"rating": "spicy"}}, "rating"),
+        ({"content": {"rating": "general", "run": "evil"}}, "content 只能有"),
+        ({"ui": {"form": True, "script": "x.js"}}, "ui 只能有"),
+        ({"entry": {"kind": "python", "module": "tool.py"}}, "ui 只能用在"),
+        ({"entry": {"kind": "module", "module": "../evil.py"}}, "相对路径"),
+        ({"entry": {"kind": "module", "module": "C:/evil.py"}}, "相对路径"),
+        ({"entry": {"kind": "module", "module": "tool.txt"}}, ".py"),
     )
     for patch, word in bad_cases:
-        try:
-            local_packs.validate(dict(_FIXTURE_RATED, **patch))
-        except local_packs.PackError as exc:
-            if word not in str(exc):
-                fail(f"坏包 {patch} 的原因缺“{word}”：{exc}")
-        else:
-            fail(f"坏包 {patch} 没被拒绝")
-    try:
-        local_packs.validate(dict(_FIXTURE_GENERAL, presets={"extend": {"outfit": [
-            {"key": "x", "label": "x", "prompt": "nude"}]}}))
-    except local_packs.PackError:
-        pass
-    else:
-        fail("rating=general 的包里有露骨预设也接受了")
+        problems = packs.validate_manifest(dict(good, **patch))
+        if not any(word in p for p in problems):
+            fail(f"坏清单 {patch} 的问题缺“{word}”：{problems}")
     print("pack discover units ok")
 
 
+def _path_escape_units() -> None:
+    """#86：工具代码必须在自己的工具目录里（解开符号链接也一样）；内置代码在宿主进程里加载前也查。"""
+    import module_tools
+    from content_guard import GuardError
+
+    packs = _packs_module()
+    root = tempfile.mkdtemp(prefix="mas-escape-")
+    try:
+        outside = os.path.join(root, "evil.py")
+        with open(outside, "w", encoding="utf-8") as handle:
+            handle.write("def run(args, ctx):\n    return {'prompt': 'x'}\n")
+        dotted = _naive_tool("dotted", "general", os.path.join(root, "a"),
+                             manifest=dict(_naive_manifest("dotted", "general"), entry={"kind": "module", "module": "../../evil.py"}))
+        info = packs.inspect(dotted)
+        if not any("相对路径" in p for p in info["problems"]):
+            fail(f"entry.module 用 .. 跑出工具目录没被拒绝：{info['problems']}")
+        missing = _naive_tool("missing_code", "general", os.path.join(root, "b"), code=None)
+        if not any("不在工具目录里" in p for p in packs.inspect(missing)["problems"]):
+            fail("entry.module 指向不存在的文件没被拒绝")
+        linked = _naive_tool("linked", "general", os.path.join(root, "c"), code=None)
+        try:
+            os.symlink(outside, os.path.join(linked, "tool.py"))
+        except (OSError, NotImplementedError):
+            linked = None  # Windows 没有建符号链接的权限：只查上面两种。
+        if linked:
+            info = packs.inspect(linked)
+            if not any("目录外面" in p for p in info["problems"]):
+                fail(f"符号链接跑出工具目录没被拒绝：{info['problems']}")
+            try:
+                packs.install(linked, ["code"])
+            except packs.PackError as exc:
+                if exc.code != "invalid_manifest":
+                    fail(f"符号链接的包安装错误码不对：{exc.code}")
+            else:
+                fail("符号链接跑出工具目录的包装上了")
+        try:
+            module_tools.load_builtin(outside, _BUILTIN_CHARACTER)
+        except GuardError as exc:
+            if exc.code != "tool_error":
+                fail(f"内置加载越界的错误码不对：{exc.code}")
+        else:
+            fail("内置工具加载了目录外的代码")
+        if module_tools.load_builtin(os.path.join(_BUILTIN_CHARACTER, "tool.py"), _BUILTIN_CHARACTER) is None:
+            fail("内置工具代码加载不了")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("path escape units ok")
+
+
 def _pack_minor_units() -> None:
-    """#86：rating=adult 的扩展包里，每一条未成年路径都由仓库里的守卫拒绝为 minor_unsafe；min_age 只能更高。"""
+    """#86：rating=adult 的工具，每一条未成年路径都由宿主拒绝为 minor_unsafe；min_age 只能更高。
+    同样的规则对「自己不做任何检查」的工具代码（naive_rated）也成立：守卫在宿主，不在工具代码。"""
     import character
 
-    pack = _rated_pack()
-    for fields in (
-        {"age": "teen"}, {"age": "child"}, {"age": "青少年（未成年）"}, {"age": "儿童"},
-        {"age": "17岁"}, {"age": "16 years old"}, {"age": "a 15-year-old"}, {"age": "十六岁"},
-        {"age": "20岁"}, {"age": "age 19"}, {"age": "19"}, {"age": "年龄：17"},
-    ):
-        _pack_refused(fields, "minor_unsafe", pack=pack)
-    _pack_refused({"age": "17岁"}, "minor_unsafe", ("未成年",), pack=pack)
-    _pack_refused({"age": "20岁"}, "minor_unsafe", ("21 岁以上", "分级夹具"), pack=pack)
-    words = ("少女", "萝莉", "正太", "小孩", "幼女", "儿童", "学生", "loli", "shota", "child", "teen",
-             "underage", "schoolgirl", "petite young")
-    for word in words:
-        for name in ("reference", "gender", "scene", "outfit"):
-            _pack_refused({name: f"一个{word}角色" if name != "outfit" else f"{word} style outfit"}, "minor_unsafe", pack=pack)
-    for name in ("pose", "expression", "accessory", "background"):
-        _pack_refused({name: "looks like a teen"}, "minor_unsafe", pack=pack)
-    view = character.catalog({}, pack=pack)
-    ages = [o["key"] for f in view["fields"] if f["name"] == "age" for o in f["options"]]
-    if "teen" in ages or "child" in ages or any(o.get("minor") for f in view["fields"] for o in f["options"]):
-        fail(f"分级扩展包的预设里有未成年项：{ages}")
-    ok = character.compose({"age": "28岁"}, {}, pack=pack)
-    if ok["rating"] != character.RATING_ADULT or "28岁" not in ok["prompt"]:
-        fail(f"分级扩展包 28 岁应能画：{ok['prompt']}")
-    # 没有扩展包时 #53 规则不变。
-    _pack_refused({"age": "child", "outfit": "swimsuit"}, "minor_unsafe")
-    # 包自己的 forbidden 删不掉守卫：就算包把 teen 加回预设，守卫照样拒绝。
-    sneaky = json.loads(json.dumps(_FIXTURE_RATED))
-    sneaky["presets"]["forbidden"] = {}
-    sneaky["presets"]["replace"]["age"]["options"].append({"key": "teen", "label": "少年", "prompt": "teen"})
-    import local_packs
+    with _Tools("rated_fixture", "naive_rated"):
+        for tool in ("rated_fixture", "naive_rated"):
+            for fields in (
+                {"age": "teen"}, {"age": "child"}, {"age": "青少年（未成年）"}, {"age": "儿童"},
+                {"age": "17岁"}, {"age": "16 years old"}, {"age": "a 15-year-old"}, {"age": "十六岁"},
+                {"age": "20岁"}, {"age": "age 19"}, {"age": "19"}, {"age": "年龄：17"},
+            ):
+                _refused(tool, fields, "minor_unsafe")
+            _refused(tool, {"age": "17岁"}, "minor_unsafe", ("未成年",))
+            for word in ("少女", "萝莉", "正太", "小孩", "幼女", "儿童", "学生", "loli", "shota", "child", "teen",
+                         "underage", "schoolgirl", "petite young"):
+                for name in ("scene", "outfit"):
+                    _refused(tool, {name: f"一个{word}角色" if name != "outfit" else f"{word} style outfit"}, "minor_unsafe")
+            _refused(tool, {"scene": "looks like a teen"}, "minor_unsafe", phase="preview")
+        _refused("rated_fixture", {"age": "20岁"}, "minor_unsafe", ("21 岁以上", "分级夹具"))
+        _refused("naive_rated", {"age": "20岁"}, "minor_unsafe", ("21 岁以上", "朴素分级"))
+        for name in ("reference", "gender", "pose", "expression", "accessory", "background"):
+            _refused("rated_fixture", {name: "looks like a teen"}, "minor_unsafe")
+        # 工具代码自己返回越界的提示词、还谎称 general：宿主查最终提示词并拒绝。
+        _refused("naive_rated", {"trick": "alpha"}, "minor_unsafe", ("最终提示词",))
+        # 目录：标了 minor 或守卫不放行的预设不进表单。
+        import module_tools
 
-    _pack_refused({"age": "teen"}, "minor_unsafe", pack=local_packs.validate(sneaky))
+        view = module_tools.catalog(_tool("naive_rated"))
+        options = {f["name"]: [o["key"] for o in f["options"]] for f in view["fields"]}
+        if options.get("age") != ["adult"] or options.get("outfit") != ["gown"]:
+            fail(f"分级工具的目录没去掉未成年/校服/标记项：{options}")
+        view = module_tools.catalog(_tool("rated_fixture"))
+        ages = [o["key"] for f in view["fields"] if f["name"] == "age" for o in f["options"]]
+        if "teen" in ages or "child" in ages or any(o.get("minor") for f in view["fields"] for o in f["options"]):
+            fail(f"分级工具的预设里有未成年项：{ages}")
+        for tool in ("rated_fixture", "naive_rated"):
+            ok = _compose(tool, {"age": "28岁"})
+            if ok["rating"] != "adult" or "28岁" not in ok["prompt"]:
+                fail(f"{tool} 28 岁应能画：{ok['prompt']}")
+    # 内置 character_image 的 #53 规则不变。
+    try:
+        character.compose({"age": "child", "outfit": "swimsuit"}, {})
+    except character.CharacterError as exc:
+        if exc.code != "minor_unsafe":
+            fail(f"#53 未成年+泳装错误码不对：{exc.code}")
+    else:
+        fail("#53 未成年+泳装没被拦下")
     print("pack minor units ok")
 
 
 def _pack_school_units() -> None:
-    """#86：分级扩展包禁用校服、教室和幼态体型，并说明原因。"""
-    pack = _rated_pack()
-    for fields, words in (
-        ({"outfit": "school_uniform"}, ("校服",)),
-        ({"outfit": "校服"}, ("校服",)),
-        ({"outfit": "sailor school uniform"}, ("校服",)),
-        ({"outfit": "JK制服"}, ()),
-        ({"background": "classroom"}, ()),
-        ({"build": "petite"}, ("幼态",)),
-        ({"build": "娇小"}, ("幼态",)),
-        ({"accessory": "幼态的身材"}, ("幼态",)),
-        ({"art_style": "chibi"}, ()),
-    ):
-        _pack_refused(fields, "minor_unsafe", words, pack=pack)
+    """#86：分级工具禁用校服、教室和幼态体型，并说明原因（宿主规则，两种工具代码都一样）。"""
+    with _Tools("rated_fixture", "naive_rated"):
+        for tool in ("rated_fixture", "naive_rated"):
+            for fields, words in (
+                ({"outfit": "school_uniform"}, ("校服",)),
+                ({"outfit": "校服"}, ("校服",)),
+                ({"outfit": "sailor school uniform"}, ("校服",)),
+                ({"outfit": "JK制服"}, ()),
+                ({"scene": "classroom"}, ()),
+                ({"scene": "幼态的身材"}, ("幼态",)),
+                ({"outfit": "娇小的连衣裙"}, ("幼态",)),
+            ):
+                _refused(tool, fields, "minor_unsafe", words)
+        for fields, words in (({"build": "petite"}, ("幼态",)), ({"build": "娇小"}, ("幼态",)),
+                              ({"background": "classroom"}, ()), ({"art_style": "chibi"}, ()),
+                              ({"accessory": "幼态的身材"}, ("幼态",))):
+            _refused("rated_fixture", fields, "minor_unsafe", words)
     print("pack school units ok")
 
 
 def _pack_original_units() -> None:
-    """#86：分级扩展包拒绝真人和版权角色，提示只描述原创角色。"""
-    pack = _rated_pack()
-    for fields in (
-        {"reference": "Taylor Swift"},
-        {"reference": "某明星"},
-        {"reference": "《原神》里的角色"},
-        {"reference": "@someone"},
-        {"reference": "Hatsune Miku"},
-        {"reference": "我的前女友"},
-        {"scene": "和 Scarlett Johansson 在一起"},
-        {"accessory": "Scarlett Johansson 同款"},
-        {"reference": "celebrity lookalike"},
-    ):
-        _pack_refused(fields, "not_original_character", ("请只描述原创角色",), pack=pack)
+    """#86：分级工具拒绝真人和版权角色，提示只描述原创角色。"""
+    with _Tools("rated_fixture", "naive_rated"):
+        for fields in (
+            {"reference": "Taylor Swift"},
+            {"reference": "某明星"},
+            {"reference": "《原神》里的角色"},
+            {"reference": "@someone"},
+            {"reference": "Hatsune Miku"},
+            {"reference": "我的前女友"},
+            {"scene": "和 Scarlett Johansson 在一起"},
+            {"accessory": "Scarlett Johansson 同款"},
+            {"reference": "celebrity lookalike"},
+        ):
+            _refused("rated_fixture", fields, "not_original_character", ("请只描述原创角色",))
+        for fields in ({"scene": "和 Scarlett Johansson 在一起"}, {"outfit": "《原神》同款"}, {"scene": "某明星"}):
+            _refused("naive_rated", fields, "not_original_character", ("请只描述原创角色",))
     print("pack original units ok")
 
 
+def _adult_code_units() -> None:
+    """#86：经安装（包含代码）装上的 rating=adult 工具，宿主照样守卫：工具代码自称 general、返回越界提示词、抛异常、
+    返回乱写的错误码都没用；装的时候「包含代码」「成人分级」各要单独确认。"""
+    import module_tools
+
+    packs = _packs_module()
+    with _Tools("naive_rated", "naive_general") as root:
+        result = _compose("naive_rated", {"outfit": "evening gown"})
+        if result["rating"] != "adult":
+            fail(f"工具代码谎称 general，宿主没按清单标 adult：{result}")
+        result = _compose("naive_general", {"outfit": "raincoat"})
+        if result["rating"] != "general":
+            fail("普通工具的结果应是 general")
+        _refused("naive_rated", {"trick": "alpha"}, "minor_unsafe")
+        _refused("naive_general", {"trick": "beta"}, "unsafe_content")
+        _refused("naive_general", {"outfit": "nude"}, "unsafe_content")
+        message = _refused("naive_rated", {"trick": "gamma"}, "tool_error")
+        if "secret-detail-86" in message:
+            fail("工具代码的异常细节漏给了用户")
+        _refused("naive_rated", {"trick": "delta"}, "tool_error")
+        from content_guard import GuardError
+        for values in ({"Bad": "x"}, {"age": 3}, {"age": "x" * 2001}):
+            try:
+                module_tools.compose(_tool("naive_rated"), values, {})
+            except GuardError as exc:
+                if exc.code not in ("invalid_field", "invalid_parameter"):
+                    fail(f"坏字段 {list(values)} 错误码不对：{exc.code}")
+            else:
+                fail(f"坏字段 {list(values)} 没被拦下")
+        # 安装确认：少一项、多一项都不装。
+        source = _naive_tool("naive_again", "adult", os.path.join(root, "src2"))
+        info = packs.inspect(source)
+        if info["accept"] != ["code", "rating_adult"] or info["code"] is not True or info["rating"] != "adult" \
+                or not info["target"].endswith(os.path.join("installed", "naive_again")):
+            fail(f"分级 + 代码的包审阅不对：{info}")
+        review = {item["permission"] for item in (info.get("review") or {}).get("permissions", [])}
+        if not {"code", "rating_adult"} <= review:
+            fail(f"审阅里缺「包含代码」「成人分级」两项：{review}")
+        for accept, code in (([], "code_not_accepted"), (["rating_adult"], "code_not_accepted"),
+                             (["code"], "rating_not_accepted"), (["code", "rating_adult", "network"], "permission_not_accepted"),
+                             ("code,rating_adult", "code_not_accepted")):
+            try:
+                packs.install(source, accept)
+            except packs.PackError as exc:
+                if exc.code != code:
+                    fail(f"确认 {accept} 的错误码应是 {code}，得到 {exc.code}")
+            else:
+                fail(f"确认 {accept} 也装上了")
+        if os.path.exists(os.path.join(root, "installed", "naive_again")):
+            fail("没确认的包留下了目录")
+        packs.install(source, ["rating_adult", "code"])
+        with open(os.path.join(root, "installed", "naive_again", ".granted.json"), encoding="utf-8") as handle:
+            grant = json.load(handle)
+        if grant.get("code") is not True or grant.get("rating") != "adult" or not grant.get("digest"):
+            fail(f"授权记录没写代码/分级：{grant}")
+        # 装好以后把清单改成 general：授权绑定的内容变了，工具不能再用。
+        path = os.path.join(root, "installed", "naive_again", "tool.json")
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        data["content"] = {"rating": "general"}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        try:
+            module_tools.compose(_tool("naive_again"), {"outfit": "gown"}, {})
+        except GuardError as exc:
+            if exc.code != "permission_denied":
+                fail(f"装好后改分级的工具错误码不对：{exc.code}")
+        else:
+            fail("装好后把分级改成 general 的工具还能用")
+    print("adult code guarded units ok")
+
+
 def _pack_default_units() -> None:
-    """#86：默认没有扩展包、提示词仍是 SFW；清单里没有成人开关，只有通用的 pack / pack_fields。"""
+    """#86：内置 character_image 是普通（general）module 工具，默认 SFW；清单里没有成人开关，也没有 pack 参数。"""
     import character
 
-    with open(os.path.join(ROOT, "toolpacks", "builtin", "character_image", "tool.json"), encoding="utf-8") as handle:
+    with open(os.path.join(_BUILTIN_CHARACTER, "tool.json"), encoding="utf-8") as handle:
         manifest = json.load(handle)
     props = manifest["parameters"]["properties"]
-    if "adult" in props or "body_detail" in props or "成人模式" in manifest["description"]:
-        fail("character_image 清单里不该再有成人模式")
-    if props.get("pack", {}).get("type") != "string" or props.get("pack_fields", {}).get("type") != "object":
-        fail("character_image 应有可选的 pack / pack_fields")
-    if "pack" in (manifest["parameters"].get("required") or []) or manifest.get("version") != "1.2.0":
-        fail("pack 应是可选；版本仍是 1.2.0")
+    if "adult" in props or "body_detail" in props or "pack" in props or "pack_fields" in props \
+            or "成人模式" in manifest["description"]:
+        fail("character_image 清单里不该再有成人模式或 pack 参数")
+    if manifest.get("entry") != {"kind": "module", "module": "tool.py"} or (manifest.get("content") or {}).get("rating") != "general" \
+            or not (manifest.get("ui") or {}).get("form") or manifest.get("version") != "1.3.0":
+        fail(f"character_image 应是 module 工具（tool.py）、general、带表单、1.3.0：{manifest.get('entry')} {manifest.get('version')}")
     for name in character.EXTRA_FIELDS:
         if name not in props:
             fail(f"character_image 清单缺 #86 字段 {name}")
     base = character.compose({}, {})
-    if base["pack"] or base["rating"] != character.RATING_GENERAL or not base["prompt"].endswith("safe for work"):
+    if base["rating"] != character.RATING_GENERAL or not base["prompt"].endswith("safe for work"):
         fail(f"默认不是 SFW：{base['prompt']}")
     if any(word in base["prompt"] for word in ("nude", "lingerie", "adults clearly over")):
         fail(f"默认提示词里有成人内容：{base['prompt']}")
     if base["used_defaults"] != list(character.FIELDS):
         fail("加了 #86 字段后 used_defaults 不该变")
     view = character.catalog({})
-    if view["pack"] or view["packs"] or any(f["group"] == "pack" for f in view["extra_fields"]):
-        fail("默认表单不该有扩展包")
-    _pack_refused({"body_detail": "toned"}, "invalid_field")
-    _pack_refused({"accessory": "hat"}, "invalid_field")
-    _pack_refused({"outfit": "nude"}, "unsafe_content")
-    _pack_refused({"outfit": "lace_lingerie"}, "unsafe_content")
-    pack = _rated_pack()
-    rated = character.compose({}, {}, pack=pack)
-    if rated["pack"] != "rated_fixture" or rated["rating"] != character.RATING_ADULT \
-            or not rated["prompt"].endswith(_FIXTURE_RATED["prompt_tail"]) or "safe for work" in rated["prompt"]:
-        fail(f"分级扩展包的结果没标 adult 或尾注不对：{rated}")
-    if not character.pack_consent(pack, "分级夹具：画一个原创角色") or character.pack_consent(pack, "画一个红发女骑士角色"):
-        fail("对话里的扩展包确认判断不对")
-    if character.pack_consent(dict(pack, chat_keywords=[]), "分级夹具"):
-        fail("没写 chat_keywords 的扩展包不该能在对话里开")
-    import local_packs
+    if any(f["group"] == "pack" for f in view["extra_fields"]):
+        fail("内置表单不该有扩展字段")
+    for fields, code in (({"body_detail": "toned"}, "invalid_field"), ({"accessory": "hat"}, "invalid_field"),
+                         ({"outfit": "nude"}, "unsafe_content"), ({"outfit": "lace_lingerie"}, "unsafe_content")):
+        _refused("character_image", fields, code)
+    with _Tools("rated_fixture", "general_fixture"):
+        rated = _compose("rated_fixture", {})
+        if rated["rating"] != "adult" or not rated["prompt"].endswith(_FIXTURE_RATED["prompt_tail"]) \
+                or "safe for work" in rated["prompt"]:
+            fail(f"分级工具的结果没标 adult 或尾注不对：{rated}")
+        import content_guard
 
-    general = character.compose({"outfit": "raincoat"}, {}, pack=local_packs.validate(_FIXTURE_GENERAL))
-    if general["rating"] != character.RATING_GENERAL or "yellow raincoat" not in general["prompt"] \
-            or not general["prompt"].endswith("safe for work"):
-        fail(f"普通扩展包应仍是 SFW：{general['prompt']}")
-    # 通用兜底：提示词本身露骨就算成人内容，和扩展包无关。
+        manifest = _tool("rated_fixture").manifest
+        if not content_guard.consent(manifest, "分级夹具：画一个原创角色") or content_guard.consent(manifest, "画一个红发女骑士角色"):
+            fail("对话里的分级工具确认判断不对")
+        if content_guard.consent(dict(manifest, content=dict(manifest["content"], chat_keywords=[])), "分级夹具"):
+            fail("没写 chat_keywords 的分级工具不该能在对话里开")
+        general = _compose("general_fixture", {"outfit": "raincoat"})
+        if general["rating"] != "general" or "yellow raincoat" not in general["prompt"] \
+                or not general["prompt"].endswith("safe for work"):
+            fail(f"普通工具应仍是 SFW：{general['prompt']}")
     if not character.looks_adult("a nude figure") or character.looks_adult(base["prompt"]):
         fail("looks_adult 的通用兜底不对")
     print("pack default units ok")
@@ -7163,33 +7427,31 @@ def _prompt_positions(prompt: str, parts: list[str]) -> list[int]:
 
 def _pack_order_units() -> None:
     """#86：提示词顺序 风格→画质→性别/年龄/体型（扩展字段跟在 after 后）→发型发色瞳色→服装→姿势→摄像机位→光照→背景→尾注。"""
-    import character
-
-    pack = _rated_pack()
-    for use, values, parts in (
-        (None, {"art_style": "watercolor", "gender": "male", "age": "adult", "build": "athletic",
-                "hairstyle": "ponytail", "hair_color": "red", "eye_color": "green", "outfit": "knight_armor",
-                "pose": "sitting", "shot": "upper_body", "angle": "low_angle", "light_type": "neon",
-                "light_direction": "back", "background": "castle"},
-         ["watercolor painting", "best quality", " man", "thirties", "athletic", "ponytail", "red hair", "green eyes",
-          "knight", "sitting", "upper body shot", "low angle", "neon lighting", "backlighting", "castle", "safe for work"]),
-        (pack, {"art_style": "realistic", "age": "mature", "build": "curvy", "accessory": "hat",
-                "hair_color": "red", "outfit": "evening_gown", "pose": "sitting", "shot": "close_up",
-                "light_type": "candle", "light_mood": "romantic", "background": "garden"},
-         ["photorealistic", "best quality", "woman", "mature", "curvy", "wide hat", "red hair", "evening gown",
-          "sitting", "close-up", "candle", "romantic", "rose garden", "fixture tail"]),
-    ):
-        prompt = character.compose(values, {}, pack=use)["prompt"]
-        positions = _prompt_positions(prompt, parts)
-        if positions != sorted(positions):
-            fail(f"提示词顺序不对（pack={bool(use)}）：{prompt}")
-    if "wearing in an elegant" in character.compose({"outfit": "evening_gown"}, {}, pack=pack)["prompt"]:
-        fail("verbatim 的服装不该再加 wearing")
+    with _Tools("rated_fixture"):
+        for tool, values, parts in (
+            ("character_image", {"art_style": "watercolor", "gender": "male", "age": "adult", "build": "athletic",
+                                 "hairstyle": "ponytail", "hair_color": "red", "eye_color": "green", "outfit": "knight_armor",
+                                 "pose": "sitting", "shot": "upper_body", "angle": "low_angle", "light_type": "neon",
+                                 "light_direction": "back", "background": "castle"},
+             ["watercolor painting", "best quality", " man", "thirties", "athletic", "ponytail", "red hair", "green eyes",
+              "knight", "sitting", "upper body shot", "low angle", "neon lighting", "backlighting", "castle", "safe for work"]),
+            ("rated_fixture", {"art_style": "realistic", "age": "mature", "build": "curvy", "accessory": "hat",
+                               "hair_color": "red", "outfit": "evening_gown", "pose": "sitting", "shot": "close_up",
+                               "light_type": "candle", "light_mood": "romantic", "background": "garden"},
+             ["photorealistic", "best quality", "woman", "mature", "curvy", "wide hat", "red hair", "evening gown",
+              "sitting", "close-up", "candle", "romantic", "rose garden", "fixture tail"]),
+        ):
+            prompt = _compose(tool, values)["prompt"]
+            positions = _prompt_positions(prompt, parts)
+            if positions != sorted(positions):
+                fail(f"提示词顺序不对（{tool}）：{prompt}")
+        if "wearing in an elegant" in _compose("rated_fixture", {"outfit": "evening_gown"})["prompt"]:
+            fail("verbatim 的服装不该再加 wearing")
     print("pack order units ok")
 
 
 def _camera_light_units() -> None:
-    """#86：摄像机位和光照字段在内置预设 / 扩展包里都能用，都进提示词；中文标签、自定义文字都行。"""
+    """#86：摄像机位和光照字段在内置工具 / 装上的工具里都能用，都进提示词；中文标签、自定义文字都行。"""
     import character
 
     catalog = character.catalog({})
@@ -7204,249 +7466,21 @@ def _camera_light_units() -> None:
         fail("#86 字段默认应是自动，核心字段仍是 12 个")
     values = {"shot": "特写", "angle": "仰视", "composition": "rule_of_thirds", "light_type": "golden_hour",
               "light_direction": "侧光", "light_mood": "dramatic", "expression": "微笑", "scene": "在雨中撑伞"}
-    for pack in (None, _rated_pack()):
-        result = character.compose(values, {}, pack=pack)
-        prompt = result["prompt"]
-        for part in ("close-up", "low angle", "rule of thirds", "golden hour", "side lighting", "dramatic", "smil", "在雨中撑伞"):
-            if part not in prompt:
-                fail(f"摄像机位/光照/表情/场景没进提示词（pack={bool(pack)}）缺 {part}：{prompt}")
-        if "full body" in prompt:
-            fail(f"选了景别还留着 full body：{prompt}")
-        if "在雨中撑伞" not in result["summary"]:
-            fail("摘要里没有动作/场景")
+    with _Tools("rated_fixture"):
+        for tool in ("character_image", "rated_fixture"):
+            result = _compose(tool, values)
+            prompt = result["prompt"]
+            for part in ("close-up", "low angle", "rule of thirds", "golden hour", "side lighting", "dramatic", "smil", "在雨中撑伞"):
+                if part not in prompt:
+                    fail(f"摄像机位/光照/表情/场景没进提示词（{tool}）缺 {part}：{prompt}")
+            if "full body" in prompt:
+                fail(f"选了景别还留着 full body：{prompt}")
+            if "在雨中撑伞" not in result["summary"]:
+                fail("摘要里没有动作/场景")
     plain = character.compose({}, {})["prompt"]
     if any(word in plain for word in ("lighting", "angle shot", "composition")):
         fail(f"默认（自动）不该加摄像机位/光照：{plain}")
     print("camera light units ok")
-
-
-def _preset_source(pack: dict, extra: dict | None = None, as_zip: bool = False) -> str:
-    """把夹具预设包写到仓库外的临时目录（可选打成 zip），当作“安装工具包”的来源。"""
-    folder = tempfile.mkdtemp(prefix="mas-preset-src-")
-    inner = os.path.join(folder, pack.get("name") or "pack")
-    os.makedirs(inner)
-    with open(os.path.join(inner, "pack.json"), "w", encoding="utf-8") as handle:
-        json.dump(pack, handle, ensure_ascii=False)
-    for name, text in (extra or {}).items():
-        with open(os.path.join(inner, name), "w", encoding="utf-8") as handle:
-            handle.write(text)
-    if not as_zip:
-        return inner
-    path = os.path.join(folder, "pack.zip")
-    with zipfile.ZipFile(path, "w") as archive:
-        for name in os.listdir(inner):
-            archive.write(os.path.join(inner, name), f"{os.path.basename(inner)}/{name}")
-    return path
-
-
-def _preset_home_guard() -> str:
-    import local_packs
-
-    home = local_packs.install_dir()
-    if home != _PRESET_HOME or os.environ.get("MAS_PRESET_PACKS_DIR") != _PRESET_HOME:
-        fail(f"预设包安装目录应是检查用的临时目录，不能是用户真实目录：{home}")
-    appdata = os.environ.get("APPDATA")
-    if appdata and os.path.normcase(os.path.realpath(home)).startswith(os.path.normcase(os.path.realpath(appdata))):
-        fail("检查不该碰用户真实的 %APPDATA%")
-    return home
-
-
-def _preset_clear() -> None:
-    for name in os.listdir(_PRESET_HOME):
-        shutil.rmtree(os.path.join(_PRESET_HOME, name), ignore_errors=True)
-
-
-def _src_cleanup(source: str) -> None:
-    shutil.rmtree(os.path.dirname(source), ignore_errors=True)  # 目录或 zip 都在同一个临时目录里
-
-
-def _preset_install_ok(base: str) -> None:
-    """#86：安装工具包能认出预设包（目录或 zip），没有权限，装进安装目录、只拷数据文件，不用重启就能用。"""
-    home = _preset_home_guard()
-    _preset_clear()
-    source = _preset_source(_FIXTURE_GENERAL, {"README.md": "中性夹具", "run.py": "print('never run')"})
-    try:
-        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
-        info = json.loads(body)
-        if status != 200 or info.get("type") != "preset" or info.get("problems") or info.get("permissions") != [] \
-                or info.get("rating") != "general" or info.get("extends") != "character_image" or not info.get("permission_notes"):
-            fail(f"预设包检查结果不对：{status} {body[:300]}")
-        if any("成人" in w for w in info.get("warnings", [])) or not any("run.py" in w for w in info.get("warnings", [])):
-            fail(f"通用预设包不该有成人警告、应提示忽略非数据文件：{info.get('warnings')}")
-        status, body = request("POST", base + "/api/toolpacks/install", {"source": source})
-        if status != 400 or json.loads(body).get("code") != "permission_not_accepted":
-            fail(f"没确认就不该装：{status} {body[:200]}")
-        if os.listdir(home):
-            fail("没确认时不该写安装目录")
-        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})
-        if status != 200 or json.loads(body)["installed"]["name"] != "general_fixture":
-            fail(f"预设包没装上：{status} {body[:200]}")
-        target = os.path.join(home, "general_fixture")
-        if sorted(os.listdir(target)) != ["README.md", "pack.json"]:
-            fail(f"只该拷 pack.json 和 README：{os.listdir(target)}")
-        status, body = request("GET", base + "/api/tools")
-        listed = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}
-        item = listed.get("general_fixture") or {}
-        if status != 200 or item.get("type") != "preset" or item.get("rating") != "general" \
-                or item.get("extends") != "character_image" or item.get("origin") != "installed":
-            fail(f"工具列表没列出装好的预设包：{body[-400:]}")
-        status, body = request("GET", base + "/api/character")
-        if status != 200 or "general_fixture" not in [p["name"] for p in json.loads(body).get("packs", [])]:
-            fail("装好后不用重启就该在角色定制里出现")
-        status, body = request("POST", base + "/api/character/preview",
-                               {"pack": "general_fixture", "fields": {"outfit": "raincoat"}})
-        if status != 200 or "yellow raincoat" not in json.loads(body)["prompt"]:
-            fail(f"装好的预设包预设没生效：{status} {body[:200]}")
-    finally:
-        _src_cleanup(source)
-    zipped = _preset_source(dict(_FIXTURE_GENERAL, version="0.2.0"), as_zip=True)
-    try:
-        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": zipped})
-        info = json.loads(body)
-        if status != 200 or info.get("type") != "preset" or info.get("upgrade") is None:
-            fail(f"zip 预设包检查不对（应识别为覆盖升级）：{body[:300]}")
-        status, body = request("POST", base + "/api/toolpacks/install", {"source": zipped, "accept_permissions": []})
-        if status != 200:
-            fail(f"zip 预设包没装上：{body[:200]}")
-        import local_packs
-        if local_packs.get("general_fixture").get("version") != "0.2.0" or [n for n in os.listdir(home) if n.startswith(".")]:
-            fail("覆盖安装没换成新版本或留下了临时目录")
-    finally:
-        _src_cleanup(zipped)
-        _preset_clear()
-    print("preset install ok")
-
-
-def _preset_install_rejects_loosening(base: str) -> None:
-    """#86：预设包只能收紧：低于 18 的 min_age、不认识的键、未成年/校服/低龄预设、标 minor、装进仓库，都装不上。"""
-    home = _preset_home_guard()
-    _preset_clear()
-    rated = json.loads(json.dumps(_FIXTURE_RATED))
-    teen_age = json.loads(json.dumps(rated))
-    teen_age["presets"]["replace"]["age"]["options"].append({"key": "teen", "label": "青少年", "prompt": "teenager"})
-    young = json.loads(json.dumps(rated))
-    young["presets"]["replace"]["age"]["options"].append({"key": "young", "label": "十几岁", "prompt": "16 years old"})
-    below_floor = json.loads(json.dumps(rated))
-    below_floor["presets"]["replace"]["age"]["options"].append({"key": "twenty", "label": "二十", "prompt": "20 years old"})
-    school = json.loads(json.dumps(rated))
-    school["presets"]["extend"]["outfit"] = [{"key": "uniform", "label": "制服", "prompt": "school uniform"}]
-    minor_flag = json.loads(json.dumps(_FIXTURE_GENERAL))
-    minor_flag["presets"]["extend"]["outfit"][0]["minor"] = True
-    cases = (
-        (dict(rated, min_age=16), "min_age"),
-        (dict(rated, allow_minors=True), "不认识的键"),
-        (dict(rated, confirm=""), "confirm"),
-        (dict(rated, backends=["remote"]), "不认识的键"),
-        (teen_age, "teen"),
-        (young, "16"),
-        (below_floor, "低于包的年龄下限"),
-        (school, "校服"),
-        (minor_flag, "minor"),
-    )
-    for pack, word in cases:
-        source = _preset_source(pack)
-        try:
-            status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
-            info = json.loads(body)
-            if status != 200 or info.get("type") != "preset" or not any(word in p for p in info.get("problems", [])):
-                fail(f"放宽规则的预设包应被指出（{word}）：{body[:300]}")
-            status, body = request("POST", base + "/api/toolpacks/install",
-                                   {"source": source, "accept_permissions": [], "accept_rating": "adult"})
-            if status != 400 or json.loads(body).get("code") != "invalid_manifest":
-                fail(f"放宽规则的预设包不该装上（{word}）：{status} {body[:200]}")
-            if os.listdir(home):
-                fail(f"装不上的预设包不该写安装目录（{word}）")
-        finally:
-            _src_cleanup(source)
-    inside = tempfile.mkdtemp(prefix="mas-preset-home-", dir=ROOT)
-    source = _preset_source(_FIXTURE_GENERAL)
-    try:
-        os.environ["MAS_PRESET_PACKS_DIR"] = inside
-        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})
-        if status != 400 or "仓库" not in body or os.listdir(inside):
-            fail(f"安装目录在仓库里时应拒绝：{status} {body[:200]}")
-    finally:
-        os.environ["MAS_PRESET_PACKS_DIR"] = _PRESET_HOME
-        shutil.rmtree(inside, ignore_errors=True)
-        _src_cleanup(source)
-    print("preset install rejects loosening ok")
-
-
-def _preset_install_adult_confirm(base: str) -> None:
-    """#86：rating=adult 的预设包：审阅里有分级、年龄下限、仅本机、警告和确认文字；没明确确认（accept_rating=adult）装不上。"""
-    home = _preset_home_guard()
-    _preset_clear()
-    source = _preset_source(_FIXTURE_RATED)
-    try:
-        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
-        info = json.loads(body)
-        if status != 200 or info.get("problems") or info.get("rating") != "adult" or info.get("min_age") != 21 \
-                or not info.get("local_only") or not info.get("confirm") or info.get("permissions") != [] \
-                or not info.get("warnings") or "成人" not in info["warnings"][0] or "本机" not in info["warnings"][0]:
-            fail(f"成人分级预设包的审阅信息不对：{body[:400]}")
-        for extra, code in (({}, "rating_not_accepted"), ({"accept_rating": "general"}, "rating_not_accepted"),
-                            ({"accept_rating": True}, "rating_not_accepted"),
-                            ({"accept_rating": "adult", "accept_permissions": ["network"]}, "permission_not_accepted")):
-            payload = dict({"source": source, "accept_permissions": []}, **extra)
-            status, body = request("POST", base + "/api/toolpacks/install", payload)
-            if status != 400 or json.loads(body).get("code") != code:
-                fail(f"成人分级预设包没确认就不该装（{extra}）：{status} {body[:200]}")
-            if os.listdir(home):
-                fail("没确认时不该写安装目录")
-        status, body = request("POST", base + "/api/toolpacks/install",
-                               {"source": source, "accept_permissions": [], "accept_rating": "adult"})
-        if status != 200:
-            fail(f"明确确认后应能装：{status} {body[:200]}")
-        status, body = request("GET", base + "/api/tools")
-        item = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}.get("rated_fixture") or {}
-        if item.get("rating") != "adult" or item.get("min_age") != 21 or not item.get("local_only"):
-            fail(f"工具列表里成人分级预设包的信息不对：{item}")
-        status, body = request("GET", base + "/api/character?pack=rated_fixture")
-        if status != 200 or json.loads(body)["pack"]["rating"] != "adult":
-            fail("装好的分级包不用重启就该能用")
-        _pack_refused({"age": "teen"}, "minor_unsafe", pack=__import__("local_packs").get("rated_fixture"))
-    finally:
-        _src_cleanup(source)
-        _preset_clear()
-    print("preset install adult confirm ok")
-
-
-def _preset_uninstall(base: str) -> None:
-    """#86：页面上装的预设包能卸载，立刻从角色定制里消失；MAS_LOCAL_TOOLPACKS 里的不归页面管。"""
-    home = _preset_home_guard()
-    _preset_clear()
-    source = _preset_source(_FIXTURE_GENERAL)
-    try:
-        if request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})[0] != 200:
-            fail("卸载用例：没装上")
-        status, body = request("POST", base + "/api/toolpacks/presets/general_fixture/uninstall")
-        if status != 200 or os.path.exists(os.path.join(home, "general_fixture")):
-            fail(f"预设包没卸掉：{status} {body[:200]}")
-        status, body = request("GET", base + "/api/character")
-        if "general_fixture" in [p["name"] for p in json.loads(body).get("packs", [])]:
-            fail("卸载后不用重启就该从角色定制里消失")
-        status, body = request("GET", base + "/api/tools")
-        if json.loads(body).get("preset_packs"):
-            fail("卸载后工具列表不该还有它")
-        status, body = request("POST", base + "/api/toolpacks/presets/general_fixture/uninstall")
-        if status != 404:
-            fail(f"再卸一次应是 404：{status}")
-        with _Packs(_FIXTURE_RATED):
-            status, body = request("POST", base + "/api/toolpacks/presets/rated_fixture/uninstall")
-            if status != 400 or json.loads(body).get("code") != "not_installed_here" \
-                    or __import__("local_packs").get("rated_fixture") is None:
-                fail(f"MAS_LOCAL_TOOLPACKS 里的包不该被页面卸载：{status} {body[:200]}")
-            status, body = request("GET", base + "/api/tools")
-            item = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}.get("rated_fixture") or {}
-            if item.get("origin") != "env":
-                fail(f"环境变量目录里的包应标成 env：{item}")
-        status, body = _post_with_origin(base, "/api/toolpacks/presets/general_fixture/uninstall", "http://evil.example")
-        if status != 403:
-            fail(f"跨站卸载应被拒：{status}")
-    finally:
-        _src_cleanup(source)
-        _preset_clear()
-    print("preset uninstall ok")
 
 
 def _post_with_origin(base: str, path: str, origin: str):
@@ -7459,98 +7493,303 @@ def _post_with_origin(base: str, path: str, origin: str):
         return exc.code, exc.read().decode("utf-8")
 
 
-PRESET_INSTALL_CASES = {
-    "install_ok": _preset_install_ok,
-    "rejects_loosening": _preset_install_rejects_loosening,
-    "adult_requires_confirm": _preset_install_adult_confirm,
-    "uninstall": _preset_uninstall,
+def _install_source(maker: str) -> tuple[str, str]:
+    """夹具源目录（临时）。返回（源目录, 要删的临时根）。"""
+    root = tempfile.mkdtemp(prefix="mas-install-src-")
+    return _fixture_makers()[maker](root), root
+
+
+def _isolated_home():
+    """安装用例用的临时 MAS_TOOLPACKS_DIR（不碰仓库里的 toolpacks/installed，也不碰 %APPDATA%）。"""
+    folder = tempfile.mkdtemp(prefix="mas-install-home-")
+    saved = os.environ.get("MAS_TOOLPACKS_DIR")
+    os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(folder, "installed")
+
+    def restore() -> None:
+        if saved is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved
+        shutil.rmtree(folder, ignore_errors=True)
+    return os.path.join(folder, "installed"), restore
+
+
+def _install_ok(base: str) -> None:
+    """#86：在页面上装一个表单工具：审阅写明包含代码和安装位置；勾选后装进工具目录，表单里马上能用，不用重启。"""
+    home, restore = _isolated_home()
+    source, temp = _install_source("general_fixture")
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+        info = json.loads(body)
+        if status != 200 or info.get("problems") or info.get("code") is not True or info.get("accept") != ["code"] \
+                or info.get("rating") != "general" or info.get("target") != os.path.join(home, "general_fixture") \
+                or not (info.get("ui") or {}).get("form"):
+            fail(f"表单工具审阅不对：{status} {body[:400]}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})
+        if status != 400 or json.loads(body).get("code") != "code_not_accepted":
+            fail(f"没确认「包含代码」也装上了：{status} {body}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": ["code"]})
+        if status != 200:
+            fail(f"表单工具安装失败：{status} {body}")
+        if not os.path.isfile(os.path.join(home, "general_fixture", "tool.py")):
+            fail("表单工具没有复制进工具目录")
+        listing = json.loads(request("GET", base + "/api/tools")[1])
+        forms = {item["name"]: item for item in listing.get("form_tools", [])}
+        if "general_fixture" not in forms or "character_image" not in forms:
+            fail(f"/api/tools 的 form_tools 没列出装上的工具：{sorted(forms)}")
+        status, body = request("GET", base + "/api/tools/general_fixture/catalog")
+        outfits = {o["key"] for f in json.loads(body).get("fields", []) if f["name"] == "outfit" for o in f["options"]}
+        if status != 200 or "raincoat" not in outfits:
+            fail(f"装上的表单工具目录不对：{status} {body[:200]}")
+    finally:
+        restore()
+        shutil.rmtree(temp, ignore_errors=True)
+    print("form tool install ok")
+
+
+def _install_legacy_rejected(base: str) -> None:
+    """#86：旧的预设包（pack.json）不再支持：检查和安装都给出说明，不装任何东西。"""
+    home, restore = _isolated_home()
+    temp = tempfile.mkdtemp(prefix="mas-legacy-")
+    try:
+        folder = os.path.join(temp, "old_pack")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "pack.json"), "w", encoding="utf-8") as handle:
+            json.dump({"name": "old_pack", "extends": "character_image", "rating": "general", "presets": {}}, handle)
+        zipped = os.path.join(temp, "old_pack.zip")
+        with zipfile.ZipFile(zipped, "w") as archive:
+            archive.write(os.path.join(folder, "pack.json"), "old_pack/pack.json")
+        for source in (folder, zipped):
+            for path, payload in (("/api/toolpacks/inspect", {"source": source}),
+                                  ("/api/toolpacks/install", {"source": source, "accept_permissions": []})):
+                status, body = request("POST", base + path, payload)
+                if status != 400 or json.loads(body).get("code") != "preset_pack_unsupported" or "tool.json" not in body:
+                    fail(f"旧预设包 {path} 没被拒绝：{status} {body}")
+        if os.path.exists(home) and os.listdir(home):
+            fail(f"旧预设包留下了文件：{os.listdir(home)}")
+        listing = json.loads(request("GET", base + "/api/tools")[1])
+        if "preset_packs" in listing:
+            fail("/api/tools 不该再有 preset_packs")
+    finally:
+        restore()
+        shutil.rmtree(temp, ignore_errors=True)
+    print("legacy preset pack rejected ok")
+
+
+def _install_adult_confirm(base: str) -> None:
+    """#86：rating=adult 的工具：审阅里同时有「包含代码」和「成人分级」（年龄下限、仅本机、确认文字）；各自要明确确认。"""
+    home, restore = _isolated_home()
+    source, temp = _install_source("rated_fixture")
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+        info = json.loads(body)
+        review = {item["permission"]: item for item in (info.get("review") or {}).get("permissions", [])}
+        if status != 200 or info.get("rating") != "adult" or info.get("min_age") != 21 or info.get("code") is not True \
+                or info.get("accept") != ["code", "rating_adult"] or not info.get("confirm") \
+                or set(review) != {"code", "rating_adult"} or "本机" not in review["rating_adult"]["effect"]:
+            fail(f"成人分级工具的审阅不对：{status} {body[:500]}")
+        for accept, code in (([], "code_not_accepted"), (["code"], "rating_not_accepted"),
+                             (["rating_adult"], "code_not_accepted"), (["code", "rating_adult", "network"], "permission_not_accepted")):
+            status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": accept})
+            if status != 400 or json.loads(body).get("code") != code:
+                fail(f"确认 {accept} 应是 {code}：{status} {body}")
+        if os.path.exists(os.path.join(home, "rated_fixture")):
+            fail("没确认的成人分级工具留下了目录")
+        status, body = request("POST", base + "/api/toolpacks/install",
+                               {"source": source, "accept_permissions": ["code", "rating_adult"]})
+        if status != 200:
+            fail(f"确认后还是装不上：{status} {body}")
+        forms = {item["name"]: item for item in json.loads(request("GET", base + "/api/tools")[1]).get("form_tools", [])}
+        item = forms.get("rated_fixture") or {}
+        if item.get("rating") != "adult" or not item.get("local_only") or not item.get("confirm"):
+            fail(f"装上的成人分级工具简介不对：{item}")
+    finally:
+        restore()
+        shutil.rmtree(temp, ignore_errors=True)
+    print("adult tool install confirm ok")
+
+
+def _install_uninstall(base: str) -> None:
+    """#86：卸载装上的表单工具：立刻从表单消失；内置的卸不掉；跨站请求拒绝。"""
+    home, restore = _isolated_home()
+    source, temp = _install_source("general_fixture")
+    try:
+        if request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": ["code"]})[0] != 200:
+            fail("安装失败")
+        status, body = _post_with_origin(base, "/api/toolpacks/general_fixture/uninstall", "http://evil.example")
+        if status != 403 or not os.path.isdir(os.path.join(home, "general_fixture")):
+            fail(f"跨站卸载没被拒绝：{status} {body}")
+        status, body = request("POST", base + "/api/toolpacks/general_fixture/uninstall")
+        if status != 200 or os.path.exists(os.path.join(home, "general_fixture")):
+            fail(f"卸载失败：{status} {body}")
+        forms = {item["name"] for item in json.loads(request("GET", base + "/api/tools")[1]).get("form_tools", [])}
+        if "general_fixture" in forms or request("GET", base + "/api/tools/general_fixture/catalog")[0] != 404:
+            fail("卸载后表单工具还在")
+        status, body = request("POST", base + "/api/toolpacks/character_image/uninstall")
+        if status != 400 or "character_image" not in {i["name"] for i in json.loads(request("GET", base + "/api/tools")[1])["form_tools"]}:
+            fail(f"内置表单工具不该能卸载：{status} {body}")
+    finally:
+        restore()
+        shutil.rmtree(temp, ignore_errors=True)
+    print("form tool uninstall ok")
+
+
+def _install_git_clean(base: str) -> None:
+    """#86：不设 MAS_TOOLPACKS_DIR 时装进仓库的 toolpacks/installed/（.gitignore 里）：git status 不变。
+    用一个唯一名字的中性夹具，装完立刻卸载并删掉；只有这个用例碰真实的安装目录。"""
+    if not os.path.isdir(os.path.join(ROOT, ".git")) and not os.path.isfile(os.path.join(ROOT, ".git")):
+        print("git clean install skipped（不是 git 仓库）")
+        return
+    import secrets as _secrets
+
+    def porcelain() -> str:
+        done = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=all"],
+                              capture_output=True, text=True, encoding="utf-8", timeout=60)
+        if done.returncode != 0:
+            fail(f"git status 失败：{done.stderr[:200]}")
+        return done.stdout
+
+    name = "gitclean_" + _secrets.token_hex(4)
+    spec = dict(_FIXTURE_GENERAL, name=name, label="仓库干净夹具")
+    temp = tempfile.mkdtemp(prefix="mas-gitclean-")
+    real_home = os.path.join(ROOT, "toolpacks", "installed")
+    existed = os.path.isdir(real_home)
+    saved = os.environ.pop("MAS_TOOLPACKS_DIR", None)
+    try:
+        source = _engine_tool(spec, temp)
+        before = porcelain()
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+        if status != 200 or json.loads(body).get("target") != os.path.join(real_home, name):
+            fail(f"默认安装位置应是仓库的 toolpacks/installed：{body[:300]}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": ["code"]})
+        if status != 200 or not os.path.isfile(os.path.join(real_home, name, "tool.py")):
+            fail(f"没装进 toolpacks/installed：{status} {body[:300]}")
+        after = porcelain()
+        if after != before:
+            fail(f"安装以后 git status 变了：{sorted(set(after.splitlines()) ^ set(before.splitlines()))[:5]}")
+        status, body = request("POST", base + f"/api/toolpacks/{name}/uninstall")
+        if status != 200 or os.path.exists(os.path.join(real_home, name)):
+            fail(f"git 用例的夹具没卸干净：{status} {body}")
+    finally:
+        shutil.rmtree(os.path.join(real_home, name), ignore_errors=True)
+        if not existed:
+            shutil.rmtree(real_home, ignore_errors=True)
+        if saved is not None:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved
+        shutil.rmtree(temp, ignore_errors=True)
+    print("git clean install ok")
+
+
+TOOL_INSTALL_CASES = {
+    "install_ok": _install_ok,
+    "legacy_rejected": _install_legacy_rejected,
+    "adult_requires_confirm": _install_adult_confirm,
+    "uninstall": _install_uninstall,
+    "git_clean": _install_git_clean,
 }
 
 
-def _preset_install_cases(base: str, case: str | None = None) -> None:
-    if case is not None and case not in PRESET_INSTALL_CASES:
-        fail(f"没有这个预设包安装用例：{case}")
-    for name, run in PRESET_INSTALL_CASES.items():
+def _tool_install_cases(base: str, case: str | None = None) -> None:
+    if case is not None and case not in TOOL_INSTALL_CASES:
+        fail(f"没有这个表单工具安装用例：{case}")
+    for name, run in TOOL_INSTALL_CASES.items():
         if case is None or name == case:
             run(base)
 
 
 PACK_UNITS = {
     "discover": _pack_discover_units,
+    "path_escape": _path_escape_units,
     "minor": _pack_minor_units,
     "school": _pack_school_units,
     "original": _pack_original_units,
+    "adult_code": _adult_code_units,
     "default_sfw": _pack_default_units,
     "order": _pack_order_units,
     "camera_light": _camera_light_units,
 }
 
 
-def _pack_form_cases(base: str, provider, box: ComfyState, directory: str) -> None:
-    """#86 表单 + 扩展包：列出本机包、要确认、分级包只许本机、结果标 adult、本地资源能按分级筛。"""
-    box.set_mode("ok")
+def _tool_form(base: str, session_id: str, name: str, payload: dict, timeout: float = 15):
+    return read_sse(site_port(base), f"/api/sessions/{session_id}/tools/{name}/run", payload, timeout=timeout)
+
+
+def _catalog_route_cases(base: str) -> None:
+    """#86：通用路由 /api/tools/<name>/catalog|preview；旧的 /api/character* 是 character_image 的别名。"""
+    status, body = request("GET", base + "/api/tools/character_image/catalog")
+    generic = json.loads(body)
+    if status != 200 or generic.get("tool") != "character_image" or len(generic.get("fields", [])) != 12 \
+            or generic.get("rating") != "general" or generic.get("title") != "定制角色":
+        fail(f"/api/tools/character_image/catalog 不对：{status} {body[:300]}")
     status, body = request("GET", base + "/api/character")
-    if status != 200 or json.loads(body).get("packs"):
-        fail(f"没有扩展包时 /api/character 不该列出扩展包：{body[:200]}")
-    if request("GET", base + "/api/character?pack=rated_fixture")[0] != 404:
-        fail("不存在的扩展包应是 404")
-    with _Packs(_FIXTURE_RATED, _FIXTURE_GENERAL):
-        status, body = request("GET", base + "/api/character")
-        listed = {p["name"]: p for p in json.loads(body).get("packs", [])}
-        if status != 200 or set(listed) != {"rated_fixture", "general_fixture"} or not listed["rated_fixture"]["local_only"]:
-            fail(f"/api/character 没列出本机扩展包：{body[:300]}")
-        if "options" in json.dumps(listed) or "evening_gown" in json.dumps(listed):
-            fail("扩展包简介里不该带预设内容")
-        status, body = request("GET", base + "/api/character?pack=rated_fixture")
+    legacy = json.loads(body)
+    if status != 200 or legacy.get("fields") != generic.get("fields") or legacy.get("defaults") != generic.get("defaults"):
+        fail("/api/character 应等于通用 catalog")
+    status, body = request("POST", base + "/api/tools/character_image/preview", {"fields": {"hair_color": "红发"}})
+    if status != 200 or "red hair" not in json.loads(body).get("prompt", ""):
+        fail(f"通用 preview 不对：{status} {body[:200]}")
+    for path, code in (("/api/tools/nope_tool/catalog", 404), ("/api/tools/generate_image/catalog", 404),
+                       ("/api/tools/dice_roll/catalog", 404), ("/api/tools/..%2Fx/catalog", 404)):
+        if request("GET", base + path)[0] != code:
+            fail(f"{path} 应是 {code}")
+    status, body = request("POST", base + "/api/tools/character_image/preview", {"fields": {"accessory": "hat"}})
+    if status != 400:
+        fail("内置工具不该认别的工具的字段")
+    print("generic catalog route ok")
+
+
+def _pack_form_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#86 通用表单：分级工具要确认、只许本机、结果标 adult、本地资源能按分级筛；普通工具照常。"""
+    box.set_mode("ok")
+    _catalog_route_cases(base)
+    with _Tools("rated_fixture", "general_fixture"):
+        status, body = request("GET", base + "/api/tools/rated_fixture/catalog")
         catalog = json.loads(body)
         outfits = {o["key"] for f in catalog.get("fields", []) if f["name"] == "outfit" for o in f["options"]}
         backgrounds = {o["key"] for f in catalog.get("fields", []) if f["name"] == "background" for o in f["options"]}
         extra = {f["name"]: f["group"] for f in catalog.get("extra_fields", [])}
-        if status != 200 or (catalog.get("pack") or {}).get("name") != "rated_fixture" or outfits != {"evening_gown", "trench"} \
+        if status != 200 or catalog.get("tool") != "rated_fixture" or catalog.get("rating") != "adult" \
+                or not catalog.get("local_only") or outfits != {"evening_gown", "trench"} \
                 or "garden" not in backgrounds or "classroom" in backgrounds or extra.get("accessory") != "pack":
-            fail(f"/api/character?pack=rated_fixture 不对：{status} {sorted(outfits)} {sorted(backgrounds)} {extra}")
-        status, body = request("POST", base + "/api/character/preview", {"fields": {"outfit": "evening_gown", "accessory": "帽子"}, "pack": "rated_fixture"})
+            fail(f"/api/tools/rated_fixture/catalog 不对：{status} {sorted(outfits)} {sorted(backgrounds)} {extra}")
+        status, body = request("POST", base + "/api/tools/rated_fixture/preview", {"fields": {"outfit": "evening_gown", "accessory": "帽子"}})
         if status != 200 or "evening gown" not in json.loads(body)["prompt"] or "wide hat" not in json.loads(body)["prompt"]:
-            fail(f"扩展包预览不对：{status} {body}")
-        status, body = request("POST", base + "/api/character/preview", {"fields": {"outfit": "school_uniform"}, "pack": "rated_fixture"})
+            fail(f"分级工具预览不对：{status} {body}")
+        status, body = request("POST", base + "/api/tools/rated_fixture/preview", {"fields": {"outfit": "school_uniform"}})
         if status != 400 or json.loads(body).get("code") != "minor_unsafe":
-            fail(f"扩展包预览没拦校服：{status} {body}")
-        status, body = request("POST", base + "/api/character/preview", {"fields": {"accessory": "hat"}})
-        if status != 400:
-            fail("不选扩展包时不该认扩展字段")
+            fail(f"分级工具预览没拦校服：{status} {body}")
 
         session_id = _fresh_session(base)
-        form = {"fields": {"outfit": "evening_gown", "background": "garden", "light_type": "candle", "accessory": "hat"},
-                "pack": "rated_fixture"}
+        form = {"fields": {"outfit": "evening_gown", "background": "garden", "light_type": "candle", "accessory": "hat"}}
         before = len(box.prompts)
-        status, raw, _ = _character_form(base, session_id, form)
-        if status != 400 or "pack_confirm_required" not in raw:
-            fail(f"扩展包没确认也出图了：{status} {raw[:200]}")
-        status, raw, _ = _character_form(base, session_id, dict(form, pack="nope", pack_confirmed=True))
-        if status != 400 or "pack_not_found" not in raw:
-            fail(f"不存在的扩展包也接受了：{status} {raw[:200]}")
-        status, raw, _ = _character_form(base, session_id, dict(form, pack_confirmed=True, backend="remote"))
-        if status != 400 or "nsfw_backend_not_allowed" not in raw or "条款" not in raw:
-            fail(f"分级扩展包 + 第三方没拒绝：{status} {raw[:200]}")
-        status, raw, _ = _character_form(base, session_id, dict(form, fields={"age": "17岁"}, pack_confirmed=True))
+        status, raw, _ = _tool_form(base, session_id, "rated_fixture", form)
+        if status != 400 or "confirm_required" not in raw:
+            fail(f"分级工具没确认也出图了：{status} {raw[:200]}")
+        status, raw, _ = _tool_form(base, session_id, "rated_fixture", dict(form, confirmed="yes"))
+        if status != 400 or "confirm_required" not in raw:
+            fail("confirmed 只认 true")
+        status, raw, _ = _tool_form(base, session_id, "nope_tool", dict(form, confirmed=True))
+        if status != 404:
+            fail(f"不存在的工具也接受了：{status} {raw[:200]}")
+        status, raw, _ = _tool_form(base, session_id, "rated_fixture", dict(form, fields={"age": "17岁"}, confirmed=True))
         if status != 400 or "minor_unsafe" not in raw:
-            fail(f"扩展包表单没拦未成年：{status} {raw[:200]}")
+            fail(f"分级工具表单没拦未成年：{status} {raw[:200]}")
         if len(box.prompts) != before:
-            fail("被拒绝的扩展包表单提交了 ComfyUI")
+            fail("被拒绝的分级工具表单提交了 ComfyUI")
 
-        status, raw, events = _character_form(base, session_id, dict(form, pack_confirmed=True, count=1))
+        status, raw, events = _tool_form(base, session_id, "rated_fixture", dict(form, confirmed=True, count=1))
         if status != 200 or events[-1].get("type") != "message.completed" or len(box.prompts) != before + 1:
-            fail(f"扩展包本机出图没完成：{status} {[e.get('type') for e in events]}")
+            fail(f"分级工具本机出图没完成：{status} {[e.get('type') for e in events]}")
         submitted = json.dumps(box.prompts[-1])
         for part in ("evening gown", "rose garden", "candle", "wide hat", "fixture tail"):
             if part not in submitted:
-                fail(f"扩展包提示词缺 {part}")
+                fail(f"分级工具提示词缺 {part}")
         artifacts = [e for e in events if e.get("type") == "artifact"]
         if len(artifacts) != 1 or artifacts[0].get("rating") != "adult":
-            fail(f"分级扩展包出图事件没标 rating=adult：{artifacts}")
+            fail(f"分级工具出图事件没标 rating=adult：{artifacts}")
         stored = json.loads(request("GET", base + f"/api/sessions/{session_id}")[1])
         if "分级夹具" not in stored["messages"][0]["text"]:
-            fail("聊天记录里没写扩展包名")
+            fail("聊天记录里没写工具名")
         rated_items = json.loads(request("GET", base + f"/api/resources?session={session_id}&rating=adult")[1])["items"]
         if len(rated_items) != 1 or rated_items[0].get("rating") != "adult" or not str(rated_items[0].get("file_name", "")).startswith("adult_"):
             fail(f"本地资源里分级图没标出来或文件名没加 adult 前缀：{rated_items}")
@@ -7560,14 +7799,14 @@ def _pack_form_cases(base: str, provider, box: ComfyState, directory: str) -> No
         if request("GET", base + "/api/resources?rating=x")[0] != 400:
             fail("坏的 rating 筛选没拒绝")
 
-        # 普通扩展包：不用确认，可以第三方出图（这里只看本机），结果仍是 general。
+        # 普通工具：不用确认，结果是 general。
         session_id = _fresh_session(base)
-        status, raw, events = _character_form(base, session_id, {"fields": {"outfit": "raincoat"}, "pack": "general_fixture"})
+        status, raw, events = _tool_form(base, session_id, "general_fixture", {"fields": {"outfit": "raincoat"}})
         artifacts = [e for e in events if e.get("type") == "artifact"]
         if status != 200 or len(artifacts) != 1 or artifacts[0].get("rating") == "adult" or "yellow raincoat" not in json.dumps(box.prompts[-1]):
-            fail(f"普通扩展包表单不对：{status} {raw[:200]}")
+            fail(f"普通工具表单不对：{status} {raw[:200]}")
 
-    # SFW 表单照旧：结果标 general，不加前缀。
+    # SFW 表单照旧（旧路由是别名）：结果标 general，不加前缀。
     session_id = _fresh_session(base)
     status, raw, events = _character_form(base, session_id, {"fields": {"hair_color": "红发", "shot": "upper_body"}})
     artifacts = [e for e in events if e.get("type") == "artifact"]
@@ -7581,90 +7820,122 @@ def _pack_form_cases(base: str, provider, box: ComfyState, directory: str) -> No
     print("pack form ok")
 
 
-def _pack_chat_cases(base: str, provider, box: ComfyState, directory: str) -> None:
-    """#86 对话：同一句说出扩展包关键词才可用；分级内容发第三方会被拦并记出站。"""
-    box.set_mode("ok")
-    provider.mode = "character"
-    provider.character_args = {"pack": "rated_fixture", "outfit": "trench", "light_type": "烛光", "shot": "半身",
-                               "pack_fields": {"accessory": "围巾"}}
+def _with_remote_image(extra: dict | None = None):
     saved = {name: os.environ.get(name) for name in ("MAS_IMAGE_API_BASE", "MAS_IMAGE_API_KEY", "MAS_IMAGE_API_MODEL")}
-    packs = _Packs(_FIXTURE_RATED)
-    packs.__enter__()
-    try:
-        session_id = _fresh_session(base)
-        before, sent = len(box.prompts), len(provider.requests)
-        events = _speak(base, session_id, "画一个穿风衣的女性角色", timeout=15)
-        blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
-        if "pack_confirm_required" not in blob or len(box.prompts) != before or _assistant_text(events) != "不能这样画":
-            fail(f"没明确提到扩展包时模型填 pack 应被拒：{_assistant_text(events)} {blob[-300:]}")
-        if "rated_fixture" not in json.dumps(provider.requests[sent:], ensure_ascii=False):
-            fail("系统提示里没列出对话可用的扩展包")
+    os.environ["MAS_IMAGE_API_BASE"] = "http://127.0.0.1:9/v1"
+    os.environ["MAS_IMAGE_API_KEY"] = "sk-fake-character-86"
+    os.environ["MAS_IMAGE_API_MODEL"] = "fake-image-1"
 
-        session_id = _fresh_session(base)
-        events = _speak(base, session_id, "分级夹具：画一个穿风衣的原创女性角色", timeout=15)
-        if _assistant_text(events) != "好了" or len(box.prompts) != before + 1:
-            fail(f"明确提到扩展包的对话没出图：{_assistant_text(events)}")
-        submitted = json.dumps(box.prompts[-1])
-        for part in ("trench coat", "candle", "upper body shot", "silk scarf", "fixture tail"):
-            if part not in submitted:
-                fail(f"对话扩展包提示词缺 {part}：{submitted[:400]}")
-        artifacts = [e for e in events if e.get("type") == "artifact"]
-        if not artifacts or artifacts[-1].get("rating") != "adult":
-            fail(f"对话分级图没标 rating=adult：{artifacts}")
-
-        provider.character_args = {"pack": "rated_fixture", "age": "少女"}
-        session_id = _fresh_session(base)
-        sent = len(provider.requests)
-        events = _speak(base, session_id, "分级夹具：画一个少女角色", timeout=15)
-        if "minor_unsafe" not in json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False) or len(box.prompts) != before + 1:
-            fail(f"对话扩展包没拦未成年：{len(box.prompts) - before} {_assistant_text(events)}")
-
-        provider.character_args = {"pack": "rated_fixture", "pack_fields": {"age": "17岁"}}
-        session_id = _fresh_session(base)
-        sent = len(provider.requests)
-        events = _speak(base, session_id, "分级夹具：画一个角色", timeout=15)
-        if "invalid_field" not in json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False) or len(box.prompts) != before + 1:
-            fail("pack_fields 里不该能覆盖内置字段")
-
-        os.environ["MAS_IMAGE_API_BASE"] = "http://127.0.0.1:9/v1"
-        os.environ["MAS_IMAGE_API_KEY"] = "sk-fake-character-86"
-        os.environ["MAS_IMAGE_API_MODEL"] = "fake-image-1"
-        provider.character_args = {"pack": "rated_fixture", "outfit": "evening_gown"}
-        provider.character_backend = "remote"
-        session_id = _fresh_session(base)
-        sent = len(provider.requests)
-        events = _speak(base, session_id, "分级夹具：画一个穿晚礼服的原创角色，用第三方出图", timeout=20)
-        blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
-        if "nsfw_backend_not_allowed" not in blob or len(box.prompts) != before + 1:
-            fail(f"分级内容发第三方没被拦：{blob[-400:]}")
-        if "sk-fake-character-86" in blob:
-            fail("事件里出现了第三方 key")
-        blocked = [item for item in _egress_since(base, events, ("sk-fake-character-86",))
-                   if item.get("reason_code") == "nsfw_backend_not_allowed"]
-        if not blocked:
-            fail("分级内容发第三方没有记出站拦截")
-    finally:
-        packs.__exit__(None, None, None)
-        provider.mode = "ok"
-        provider.character_args = None
-        provider.character_backend = None
+    def restore() -> None:
         for name, value in saved.items():
             if value is None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+    return restore
+
+
+def _adult_remote_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#86：宿主拒绝把任何 rating=adult 工具的内容发给第三方出图（表单和对话都一样），记出站拦截，不泄露 key。
+    用的是自己不做任何检查的工具代码：拒绝来自宿主。"""
+    box.set_mode("ok")
+    restore = _with_remote_image()
+    try:
+        with _Tools("naive_rated"):
+            session_id = _fresh_session(base)
+            before = len(box.prompts)
+            status, raw, events = _tool_form(base, session_id, "naive_rated",
+                                             {"fields": {"outfit": "evening gown"}, "confirmed": True, "backend": "remote"})
+            if status != 400 or "nsfw_backend_not_allowed" not in raw or "条款" not in raw or "sk-fake-character-86" in raw:
+                fail(f"分级工具 + 第三方（表单）没拒绝：{status} {raw[:300]}")
+            if len(box.prompts) != before:
+                fail("被拒绝的第三方请求提交了 ComfyUI")
+            status, body = request("GET", base + "/api/egress?limit=20")
+            if status == 200 and "nsfw_backend_not_allowed" not in body:
+                fail("表单发第三方没有记出站拦截")
+            # 对话：用户说了关键词也只能本机。
+            provider.mode = "character"
+            provider.character_tool = "naive_rated"
+            provider.character_args = {"outfit": "evening gown"}
+            provider.character_backend = "remote"
+            session_id = _fresh_session(base)
+            sent = len(provider.requests)
+            events = _speak(base, session_id, "朴素分级：画一个穿晚礼服的原创角色，用第三方出图", timeout=20)
+            blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
+            if "nsfw_backend_not_allowed" not in blob or len(box.prompts) != before:
+                fail(f"分级内容（对话）发第三方没被拦：{blob[-400:]}")
+            if "sk-fake-character-86" in blob:
+                fail("事件里出现了第三方 key")
+            blocked = [item for item in _egress_since(base, events, ("sk-fake-character-86",))
+                       if item.get("reason_code") == "nsfw_backend_not_allowed"]
+            if not blocked:
+                fail("分级内容发第三方没有记出站拦截")
+    finally:
+        restore()
+        provider.mode = "ok"
+        provider.character_tool = None
+        provider.character_args = None
+        provider.character_backend = None
+    print("adult remote refused ok")
+
+
+def _pack_chat_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#86 对话：分级工具要用户同一句说出清单里的关键词才可用；宿主照样查字段。"""
+    box.set_mode("ok")
+    provider.mode = "character"
+    provider.character_tool = "rated_fixture"
+    provider.character_args = {"outfit": "trench", "light_type": "烛光", "shot": "半身", "accessory": "围巾"}
+    try:
+        with _Tools("rated_fixture"):
+            session_id = _fresh_session(base)
+            before, sent = len(box.prompts), len(provider.requests)
+            events = _speak(base, session_id, "画一个穿风衣的女性角色", timeout=15)
+            blob = json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False)
+            if "confirm_required" not in blob or len(box.prompts) != before or _assistant_text(events) != "不能这样画":
+                fail(f"没明确提到关键词时模型调分级工具应被拒：{_assistant_text(events)} {blob[-300:]}")
+            if "rated_fixture" not in json.dumps(provider.requests[sent:], ensure_ascii=False):
+                fail("给模型的工具里没有装上的表单工具")
+
+            session_id = _fresh_session(base)
+            events = _speak(base, session_id, "分级夹具：画一个穿风衣的原创女性角色", timeout=15)
+            if _assistant_text(events) != "好了" or len(box.prompts) != before + 1:
+                fail(f"明确提到关键词的对话没出图：{_assistant_text(events)}")
+            submitted = json.dumps(box.prompts[-1])
+            for part in ("trench coat", "candle", "upper body shot", "silk scarf", "fixture tail"):
+                if part not in submitted:
+                    fail(f"对话分级工具提示词缺 {part}：{submitted[:400]}")
+            artifacts = [e for e in events if e.get("type") == "artifact"]
+            if not artifacts or artifacts[-1].get("rating") != "adult":
+                fail(f"对话分级图没标 rating=adult：{artifacts}")
+            if "fixture tail" in json.dumps(provider.requests[sent:], ensure_ascii=False):
+                fail("分级工具的提示词不该回给对话模型")
+
+            provider.character_args = {"age": "少女"}
+            session_id = _fresh_session(base)
+            sent = len(provider.requests)
+            events = _speak(base, session_id, "分级夹具：画一个少女角色", timeout=15)
+            if "minor_unsafe" not in json.dumps(events, ensure_ascii=False) + json.dumps(provider.requests[sent:], ensure_ascii=False) or len(box.prompts) != before + 1:
+                fail(f"对话分级工具没拦未成年：{len(box.prompts) - before} {_assistant_text(events)}")
+    finally:
+        provider.mode = "ok"
+        provider.character_tool = None
+        provider.character_args = None
+        provider.character_backend = None
     print("pack chat ok")
 
 
 def _pack_character_cases(base: str, provider, box: ComfyState, directory: str, case: str | None = None) -> None:
-    """#86 本机扩展包口子全部用例；case 只跑一组（evals 用）。"""
+    """#86 表单工具全部用例；case 只跑一组（evals 用）。"""
     cases = dict(PACK_UNITS)
     cases["form"] = lambda: _pack_form_cases(base, provider, box, directory)
+    cases["catalog_route"] = lambda: _catalog_route_cases(base)
     cases["chat"] = lambda: _pack_chat_cases(base, provider, box, directory)
+    cases["adult_remote"] = lambda: _adult_remote_cases(base, provider, box, directory)
     if case is None:
-        cases["install"] = lambda: _preset_install_cases(base)
+        cases["install"] = lambda: _tool_install_cases(base)
+        cases.pop("catalog_route")  # form 里已经跑过
     if case is not None and case not in cases:
-        fail(f"没有这个扩展包用例：{case}")
+        fail(f"没有这个表单工具用例：{case}")
     for name, run in cases.items():
         if case is None or name == case:
             run()

@@ -1,7 +1,7 @@
-// 定制角色图片（issue #53，#86）。字段 → 预设或自定义文字；预览是本机拼出的提示词；生成走 /api/sessions/<id>/character。
-// #86：每个字段是「可搜索下拉 + 自定义输入」（input + datalist：输入能筛选预设，也能直接写自己的描述）；
-// 加了摄像机位、光照、表情、动作/场景。本机扩展包（仓库外的 pack.json）默认不选；选了要在弹窗里确认，
-// 分级（rating=adult）的扩展包只能本机 ComfyUI 出图。本机没有扩展包时整行不显示。
+// 表单工具（issue #53，#86）：通用表单，字段来自 /api/tools/<name>/catalog，预览走 /preview，
+// 生成走 /api/sessions/<id>/tools/<name>/run。默认是内置的 character_image；装了别的表单工具（ui.form=true）
+// 时顶部出现工具切换。每个字段是「可搜索下拉 + 自定义输入」。分级工具（rating=adult）切换时要弹窗确认，
+// 只能本机 ComfyUI 出图（宿主强制）。
 (() => {
   const dialog = document.querySelector("#character");
   const box = document.querySelector("#char-fields");
@@ -9,14 +9,16 @@
   const preview = document.querySelector("#char-preview");
   const note = document.querySelector("#char-note");
   const count = document.querySelector("#char-count");
-  const packRow = document.querySelector("#char-pack-row");
-  const packSelect = document.querySelector("#char-pack");
+  const toolRow = document.querySelector("#char-tools");
+  const title = document.querySelector("#character-title");
   const packNote = document.querySelector("#char-pack-note");
   const backendSelect = document.querySelector("#char-backend");
-  const GROUP_LABELS = { camera: "摄像机位", light: "光照", detail: "细节", pack: "扩展包" };
+  const GROUP_LABELS = { camera: "摄像机位", light: "光照", detail: "细节", pack: "更多" };
   let catalog = null;
-  let pack = null; // 当前扩展包简介（来自 catalog.packs），null = 内置预设。
-  let packConfirmed = false;
+  const DEFAULT_TOOL = "character_image";
+  let tools = []; // /api/tools 的 form_tools
+  let tool = null; // 当前表单工具简介
+  let confirmed = false;
   let controls = {};
   let timer = null;
   let listSeq = 0;
@@ -135,7 +137,7 @@
 
   async function refresh() {
     try {
-      const result = await call("POST", "/api/character/preview", { fields: fields(), pack: pack ? pack.name : "" });
+      const result = await call("POST", `/api/tools/${encodeURIComponent(tool.name)}/preview`, { fields: fields() });
       preview.textContent = result.prompt;
       say("");
       return true;
@@ -147,50 +149,51 @@
   }
 
   async function load() {
-    const path = pack ? `/api/character?pack=${encodeURIComponent(pack.name)}` : "/api/character";
-    catalog = await call("GET", path);
+    catalog = await call("GET", `/api/tools/${encodeURIComponent(tool.name)}/catalog`);
     build();
     reset();
-    fillPacks();
   }
 
   function rated() {
-    return Boolean(pack && pack.rating === "adult");
+    return Boolean(tool && tool.rating === "adult");
   }
 
-  function fillPacks() {
-    const packs = catalog.packs || [];
-    packRow.hidden = packs.length === 0;
-    const keep = pack ? pack.name : "";
-    packSelect.replaceChildren(new Option("内置预设", ""));
-    for (const item of packs) {
-      const tag = item.rating === "adult" ? "（分级，仅本机）" : "";
-      packSelect.append(new Option(`${item.label}${tag}`, item.name));
+  function fillTools() {
+    toolRow.replaceChildren();
+    const usable = tools.filter((item) => !item.unavailable);
+    toolRow.hidden = usable.length < 2;
+    for (const item of usable) {
+      const button = el("button", item.name === tool.name ? "" : "ghost",
+        item.rating === "adult" ? `${item.title}（${item.label || "成人"}，仅本机）` : item.title);
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", item.name === tool.name ? "true" : "false");
+      button.addEventListener("click", () => chooseTool(item.name));
+      toolRow.append(button);
     }
-    packSelect.value = keep;
   }
 
-  function syncPack() {
-    packSelect.value = pack ? pack.name : "";
-    packNote.hidden = !pack;
-    packNote.textContent = pack ? `已开启“${pack.label}”${rated() ? "：只用本机 ComfyUI 出图，结果标记为成人内容（rating: adult）。" : "。"}` : "";
+  function syncTool() {
+    title.textContent = tool.title ? `${tool.title}图片` : "定制角色图片";
+    packNote.hidden = !rated();
+    packNote.textContent = rated()
+      ? `已开启“${tool.label}”：只用本机 ComfyUI 出图，结果标记为成人内容（rating: adult）。`
+      : "";
     dialog.classList.toggle("rated", rated());
     for (const option of backendSelect.options) {
       if (option.value === "remote") option.disabled = rated();
     }
     if (rated()) backendSelect.value = "local";
+    fillTools();
   }
 
-  async function choosePack() {
-    const name = packSelect.value;
-    const next = (catalog.packs || []).find((item) => item.name === name) || null;
-    if (next && next.confirm && !window.confirm(next.confirm)) {
-      packSelect.value = pack ? pack.name : "";
-      return;
-    }
-    pack = next;
-    packConfirmed = Boolean(next);
-    syncPack();
+  async function chooseTool(name) {
+    const next = tools.find((item) => item.name === name);
+    if (!next || next.name === tool.name) return;
+    if (next.rating === "adult" && !window.confirm(next.confirm || `开启“${next.label}”？`)) return;
+    tool = next;
+    confirmed = next.rating === "adult";
+    syncTool();
     try {
       await load();
     } catch (error) {
@@ -200,9 +203,16 @@
 
   async function open() {
     say("");
-    pack = null; // 每次打开都回到内置预设（SFW）。
-    packConfirmed = false;
-    syncPack();
+    try {
+      const listing = await call("GET", "/api/tools");
+      tools = listing.form_tools || [];
+    } catch (error) {
+      tools = [];
+    }
+    // 每次打开都回到内置的通用工具。
+    tool = tools.find((item) => item.name === DEFAULT_TOOL) || { name: DEFAULT_TOOL, title: "定制角色", rating: "general" };
+    confirmed = false;
+    syncTool();
     try {
       await load();
     } catch (error) {
@@ -220,7 +230,7 @@
       return;
     }
     if (rated() && backendSelect.value !== "local") {
-      say(`“${pack.label}”只能用本机 ComfyUI 出图。`);
+      say(`“${tool.label}”只能用本机 ComfyUI 出图。`);
       return;
     }
     if (!(await refresh())) return;
@@ -231,22 +241,19 @@
       backend: backendSelect.value,
       privacy: document.querySelector("#char-privacy").value,
     };
-    if (pack) {
-      body.pack = pack.name;
-      body.pack_confirmed = packConfirmed;
-    }
+    if (rated()) body.confirmed = confirmed;
     dialog.close();
     const where = body.backend === "local" ? "本机 ComfyUI" : "第三方出图";
-    const mode = pack ? `${pack.label}，` : "";
+    const mode = rated() ? `${tool.label}，` : "";
+    const name = tool.title || "定制角色";
     const label = body.privacy === "local"
-      ? `定制角色出图（${mode}本地提示词，${n} 张，${where}）`
-      : `定制角色出图（${mode}${n} 张，${where}）`;
-    if (typeof window.sendCharacter === "function") await window.sendCharacter(body, label);
+      ? `${name}出图（${mode}本地提示词，${n} 张，${where}）`
+      : `${name}出图（${mode}${n} 张，${where}）`;
+    if (typeof window.sendCharacter === "function") await window.sendCharacter(body, label, tool.name);
   }
 
   document.querySelector("#open-character").addEventListener("click", open);
   document.querySelector("#char-close").addEventListener("click", () => dialog.close());
   document.querySelector("#char-reset").addEventListener("click", reset);
   document.querySelector("#char-generate").addEventListener("click", generate);
-  packSelect.addEventListener("change", choosePack);
 })();

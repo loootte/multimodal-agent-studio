@@ -3,7 +3,15 @@
 目录：
 - toolpacks/builtin/<name>/tool.json   内置工具，随仓库发布。
 - toolpacks/backends/<name>.json       共享后端（例如 ComfyUI），工具在 requires.backends 里引用。
-- toolpacks/installed/<name>/          用户安装的工具包（可用 MAS_TOOLPACKS_DIR 改位置）。
+- toolpacks/installed/<name>/          用户安装的工具包（.gitignore 忽略；可用 MAS_TOOLPACKS_DIR 改位置，测试用）。
+  安装 = 把包目录原样复制进来（加一份授权记录 .granted.json），不改仓库里任何受版本控制的文件。
+
+entry.kind（#86）：
+- host    内置工具，宿主代码执行（名单 HOST_TOOLS）。
+- python  call(arguments, config)；内置在 poc/tools/internal/，第三方在沙箱子进程里跑。
+- module  表单工具：代码是工具目录里的 .py（契约见 docs/tool-code-contract.md：catalog / preview / run），
+          内置的在宿主进程里跑（受信任），第三方的在沙箱子进程里跑。content.rating=adult 的工具不管代码写了什么，
+          宿主的 content_guard 都会在调用前后强制检查。
 
 清单字段见 docs/tool-packs.md。这里负责：读清单、校验、发现、安装、卸载、导出。
 配置值和密钥不在包里：它们存在数据目录的 tools.json，导出时不会带走。
@@ -31,8 +39,7 @@ BACKENDS = os.path.join(PACKS, "backends")
 SCHEMA = "mas.tool/1"
 BACKEND_SCHEMA = "mas.backend/1"
 MANIFEST = "tool.json"
-PRESET_MANIFEST = "pack.json"  # #86：预设包（mas.local_pack/1，纯数据），由 apps/web/local_packs.py 校验和安装
-PRESET_SCHEMA = "mas.local_pack/1"
+LEGACY_PRESET = "pack.json"  # #86 早期的预设包（只有 pack.json）：已不再支持，安装时给出说明
 GRANTS = ".granted.json"
 PERMISSIONS = ("read_local_content", "network", "write_files", "send_local_to_model")
 CONFIRM = ("always", "never", "by_args")
@@ -42,7 +49,14 @@ PARAMETER_SOURCES = ("comfyui.styles",)
 _NAME = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _FIELDS = {"schema", "name", "version", "description", "order", "parameters", "mutating", "confirm",
-           "confirm_args", "entry", "config", "requires", "permissions", "parameter_sources", "mcp"}
+           "confirm_args", "entry", "config", "requires", "permissions", "parameter_sources", "mcp",
+           "ui", "content"}
+ENTRY_KINDS = ("python", "host", "module")
+RATINGS = ("general", "adult")
+# 「包含代码」：入口是 python/module，或包里带任何可执行的文件。安装时要单独勾选确认。
+CODE_SUFFIXES = (".py", ".pyc", ".pyd", ".pyw", ".so", ".dll", ".exe", ".bat", ".cmd", ".ps1", ".sh", ".js")
+ACCEPT_CODE = "code"
+ACCEPT_ADULT = "rating_adult"
 
 # 内置工具名单（12.D #60）：只有这些名字能用 entry.kind=host 或仓库里的 python 模块，在宿主进程里跑。
 # 值是这个工具实际要用的权限：运行时二次核对「清单声明 ⊇ 实际需要」，清单少声明了就 permission_denied。
@@ -159,8 +173,8 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
         if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
             problems.append("confirm=by_args 时 confirm_args 必须是非空的参数名列表。")
     entry = data.get("entry")
-    if not isinstance(entry, dict) or entry.get("kind") not in ("python", "host"):
-        problems.append("entry.kind 只能是 python 或 host。")
+    if not isinstance(entry, dict) or entry.get("kind") not in ENTRY_KINDS:
+        problems.append("entry.kind 只能是 python、host 或 module。")
     elif entry["kind"] == "host" and not builtin:
         problems.append("只有内置工具可以用 entry.kind=host。")
     elif entry["kind"] == "host" and data.get("name") not in HOST_TOOLS:
@@ -168,14 +182,19 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif entry["kind"] == "python" and builtin and (
             data.get("name") not in BUILTIN_PYTHON or not str(entry.get("module") or "").startswith(BUILTIN_MODULES)):
         problems.append(f"内置 python 工具只限名单（packs.BUILTIN_PYTHON），模块要在 {BUILTIN_MODULES} 下。")
-    elif entry["kind"] == "python":
+    elif entry["kind"] == "module" and builtin and data.get("name") not in HOST_TOOLS:
+        problems.append("内置 module 工具只限内置工具名单（packs.HOST_TOOLS）。")
+    elif entry["kind"] in ("python", "module"):
         module = entry.get("module")
         if not isinstance(module, str) or not module.endswith(".py"):
             problems.append("entry.module 必须是 .py 文件。")
-        elif not builtin and (os.path.isabs(module) or ".." in module.replace("\\", "/").split("/")):
-            problems.append("entry.module 必须是包内的相对路径。")
+        elif (not builtin or entry["kind"] == "module") and not _relative_inside(module):
+            problems.append("entry.module 必须是工具目录里的相对路径（不能是绝对路径，不能有 ..）。")
     if entry and isinstance(entry, dict) and entry.get("kind") == "python" and params is None and not builtin:
         problems.append("第三方工具必须声明 parameters。")
+    kind = entry.get("kind") if isinstance(entry, dict) else None
+    problems.extend(_ui_problems(data.get("ui"), kind))
+    problems.extend(_content_problems(data.get("content"), kind))
     config = data.get("config", [])
     if not isinstance(config, list):
         problems.append("config 必须是列表。")
@@ -197,6 +216,95 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif perms.get("send_local_to_model"):
         problems.append("send_local_to_model 必须是 false：本地内容不能交给第三方模型。")
     return problems
+
+
+def _relative_inside(module: str) -> bool:
+    parts = module.replace("\\", "/").split("/")
+    return bool(module) and not os.path.isabs(module) and not module.startswith(("/", "\\")) \
+        and ":" not in module and ".." not in parts
+
+
+def _ui_problems(ui, kind) -> list[str]:
+    """ui：网页上的通用表单（#86）。只给 entry.kind=module 的工具。"""
+    if ui is None:
+        return []
+    if kind != "module":
+        return ["ui 只能用在 entry.kind=module 的工具上。"]
+    if not isinstance(ui, dict) or set(ui) - {"form", "preview", "title", "run_label"}:
+        return ["ui 只能有 form、preview、title、run_label。"]
+    out = []
+    for key in ("form", "preview"):
+        if key in ui and not isinstance(ui[key], bool):
+            out.append(f"ui.{key} 必须是 true/false。")
+    for key in ("title", "run_label"):
+        if key in ui and (not isinstance(ui[key], str) or not ui[key].strip() or len(ui[key]) > 40):
+            out.append(f"ui.{key} 必须是 1-40 字的文字。")
+    return out
+
+
+def _content_problems(content, kind) -> list[str]:
+    """content：工具产出的内容分级（#86）。rating=adult 只能本机出图，安装和每次使用都要明确确认。"""
+    if content is None:
+        return []
+    if kind != "module":
+        return ["content 只能用在 entry.kind=module 的工具上。"]
+    if not isinstance(content, dict) or set(content) - {"rating", "min_age", "label", "confirm", "chat_keywords"}:
+        return ["content 只能有 rating、min_age、label、confirm、chat_keywords。"]
+    out = []
+    rating = content.get("rating", "general")
+    if rating not in RATINGS:
+        out.append(f"content.rating 只能是 {'、'.join(RATINGS)}。")
+    if "label" in content and (not isinstance(content["label"], str) or not content["label"].strip() or len(content["label"]) > 20):
+        out.append("content.label 必须是 1-20 字的文字。")
+    if "confirm" in content and (not isinstance(content["confirm"], str) or len(content["confirm"]) > 1000):
+        out.append("content.confirm 必须是 1000 字以内的文字。")
+    words = content.get("chat_keywords", [])
+    if not isinstance(words, list) or len(words) > 32 or not all(isinstance(w, str) and 2 <= len(w.strip()) <= 20 for w in words):
+        out.append("content.chat_keywords 必须是最多 32 个、每个 2-20 字的词。")
+    if rating == "adult":
+        age = content.get("min_age")
+        if not isinstance(age, int) or isinstance(age, bool) or not 18 <= age <= 99:
+            out.append("rating=adult 要写 min_age（18 到 99 的整数）。")
+        if not str(content.get("confirm") or "").strip():
+            out.append("rating=adult 要写 confirm（开启前给用户看的确认文字）。")
+        if not str(content.get("label") or "").strip():
+            out.append("rating=adult 要写 label（例如「成人模式」）。")
+    elif "min_age" in content and (not isinstance(content["min_age"], int) or isinstance(content["min_age"], bool)
+                                    or not 0 <= content["min_age"] <= 99):
+        out.append("content.min_age 必须是 0 到 99 的整数。")
+    return out
+
+
+def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
+    """入口代码必须是工具目录里真实存在的文件（解开符号链接以后也还在目录里）。
+    内置 python 工具的代码在 poc/tools/internal/（仓库里受审查），不按工具目录查。"""
+    entry = data.get("entry") or {}
+    if entry.get("kind") not in ("python", "module") or (builtin and entry.get("kind") == "python"):
+        return None
+    root = os.path.realpath(folder)
+    module = os.path.realpath(os.path.join(root, entry["module"]))
+    if os.path.normcase(os.path.commonpath([root, module])) != os.path.normcase(root) or module == root:
+        return "entry.module 指向工具目录外面。"
+    if not os.path.isfile(module):
+        return "entry.module 指向的文件不在工具目录里。"
+    return None
+
+
+def has_code(folder: str, data: dict) -> bool:
+    if ((data.get("entry") or {}).get("kind")) in ("python", "module"):
+        return True
+    for _base, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        if any(f.lower().endswith(CODE_SUFFIXES) for f in files):
+            return True
+    return False
+
+
+def rating(data: dict) -> str:
+    content = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(content, dict):
+        return "general"
+    return content.get("rating") or "general"
 
 
 def _sensitive(data, *, builtin: bool = False) -> bool:
@@ -296,10 +404,19 @@ class Pack:
 
     def module_path(self) -> str | None:
         entry = self.manifest["entry"]
-        if entry["kind"] != "python":
+        if entry["kind"] not in ("python", "module"):
             return None
-        base = ROOT if self.builtin else self.folder
+        # 内置 python 工具的模块在 poc/tools/internal/（相对仓库根）；module 工具的代码一律在自己的工具目录里。
+        base = ROOT if (self.builtin and entry["kind"] == "python") else self.folder
         return os.path.normpath(os.path.join(base, entry["module"]))
+
+    @property
+    def rating(self) -> str:
+        return rating(self.manifest)
+
+    @property
+    def content(self) -> dict:
+        return dict(self.manifest.get("content") or {})
 
 
 def pack_digest(folder: str) -> str:
@@ -354,6 +471,9 @@ def _scan(folder: str, builtin: bool) -> list[Pack]:
             raise PackError("invalid_manifest", f"{entry}：{'；'.join(problems)}", problems)
         if data["name"] != entry:
             raise PackError("invalid_manifest", f"{entry}：目录名要和 name 一致。")
+        problem = entry_problem(os.path.join(folder, entry), data, builtin)
+        if problem:
+            raise PackError("invalid_manifest", f"{entry}：{problem}", [problem])
         packs.append(Pack(data, os.path.join(folder, entry), builtin))
     return packs
 
@@ -436,13 +556,27 @@ def authorize(pack: Pack) -> dict | None:
     return None
 
 
-def review(data: dict) -> dict:
-    """安装前的权限审阅：每个权限的白话说明和风险，加上沙箱会怎样限制它。"""
-    wanted = sorted(k for k, v in (data.get("permissions") or {}).items() if v is True and k in PERMISSIONS)
+def review(data: dict, code: bool = False) -> dict:
+    """安装前的权限审阅：每个权限的白话说明和风险，加上沙箱会怎样限制它。
+    #86：包含代码、成人分级也各是一项，要单独勾选（permission 分别是 code / rating_adult）。"""
+    perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+    wanted = sorted(k for k, v in perms.items() if v is True and k in PERMISSIONS)
     items = []
     for key in wanted:
         label, risk, effect = PERMISSION_REVIEW[key]
         items.append({"permission": key, "label": label, "risk": risk, "effect": effect})
+    if code:
+        module = ((data.get("entry") or {}).get("module")) or "（包里的 .py 文件）"
+        items.append({"permission": ACCEPT_CODE, "label": "包含代码", "risk": "high",
+                      "effect": f"会运行包里的 Python 代码（{module}）。第三方代码只在沙箱子进程里跑，"
+                                "但它能决定这个工具产出的文字；只装你信任来源的包。"})
+    if rating(data) == "adult":
+        content = data.get("content") or {}
+        items.append({"permission": ACCEPT_ADULT, "label": f"成人分级（{content.get('label') or 'adult'}）", "risk": "high",
+                      "effect": f"这个工具会产出成人内容（{content.get('min_age')} 岁以上）。只能用本机 ComfyUI 出图，"
+                                "结果标记为成人内容；每次使用还要再确认。宿主强制：不能画未成年或像未成年的角色、"
+                                "校服/学生、幼态体型，不能参考真人或版权角色，不能发给第三方出图服务。"
+                                + (" 作者说明：" + str(content.get("confirm")) if content.get("confirm") else "")})
     denied = [PERMISSION_REVIEW[k][0] for k in PERMISSIONS if k not in wanted and k != "send_local_to_model"]
     out = {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
     # 12.E：联网 / 读本地内容的包每次调用都弹确认，同一轮里也不复用上一次的同意。
@@ -525,8 +659,12 @@ def resolve_parameters(pack: Pack) -> dict | None:
 
 # ---------- 安装 / 卸载 / 导出 ----------
 
-def _unpack(source: str, manifest: str = MANIFEST) -> tuple[str, str | None]:
-    """source 是目录或 .zip。返回（包目录, 需要清理的临时目录）。manifest 是要找的清单文件名。"""
+LEGACY_TEXT = "预设包（pack.json）已不再支持：请改成工具包（tool.json + 工具目录里的 .py，见 docs/tool-code-contract.md）。"
+
+
+def _unpack(source: str) -> tuple[str, str | None]:
+    """source 是目录或 .zip。返回（包目录, 需要清理的临时目录）。"""
+    manifest = MANIFEST
     if os.path.isdir(source):
         return source, None
     if os.path.isfile(source) and source.lower().endswith(".zip"):
@@ -549,29 +687,13 @@ def _unpack(source: str, manifest: str = MANIFEST) -> tuple[str, str | None]:
         inner = [d for d in os.listdir(temp) if os.path.isfile(os.path.join(temp, d, manifest))]
         if len(inner) == 1:
             return os.path.join(temp, inner[0]), temp
+        legacy = os.path.isfile(os.path.join(temp, LEGACY_PRESET)) or any(
+            os.path.isfile(os.path.join(temp, d, LEGACY_PRESET)) for d in os.listdir(temp))
         shutil.rmtree(temp, ignore_errors=True)
+        if legacy:
+            raise PackError("preset_pack_unsupported", LEGACY_TEXT)
         raise PackError("invalid_package", f"压缩包里找不到 {manifest}。")
     raise PackError("invalid_package", "要给一个工具包目录或 .zip 文件。")
-
-
-def source_kind(source: str) -> str:
-    """安装入口先分类：有 tool.json 的是工具包（"tool"）；只有 pack.json 且 schema 是 mas.local_pack/1 的是
-    预设包（"preset"，纯数据，交给 apps/web/local_packs.py）。都不是就当工具包，让 inspect 报具体问题。"""
-    try:
-        folder, temp = _unpack(source, PRESET_MANIFEST)
-    except PackError:
-        return "tool"
-    try:
-        if os.path.isfile(os.path.join(folder, MANIFEST)):
-            return "tool"
-        try:
-            data = _read(os.path.join(folder, PRESET_MANIFEST))
-        except (OSError, ValueError):
-            return "preset"  # 有 pack.json 但读不了：按预设包报错，说得更准
-        return "preset" if isinstance(data, dict) and data.get("schema") == PRESET_SCHEMA else "tool"
-    finally:
-        if temp:
-            shutil.rmtree(temp, ignore_errors=True)
 
 
 def inspect(source: str) -> dict:
@@ -580,22 +702,33 @@ def inspect(source: str) -> dict:
     try:
         path = os.path.join(folder, MANIFEST)
         if not os.path.isfile(path):
-            if os.path.isfile(os.path.join(folder, PRESET_MANIFEST)):
-                raise PackError("preset_pack", "这是预设包（pack.json），要走预设包安装（工具配置 → 安装工具包会自动识别）。")
+            if os.path.isfile(os.path.join(folder, LEGACY_PRESET)):
+                raise PackError("preset_pack_unsupported", LEGACY_TEXT)
             raise PackError("invalid_package", "目录里没有 tool.json。")
         try:
             data = _read(path)
         except ValueError as exc:
             raise PackError("invalid_manifest", f"tool.json 不是合法 JSON：{exc}") from exc
+        if not isinstance(data, dict):
+            raise PackError("invalid_manifest", "清单必须是 JSON 对象。")
         problems = validate_manifest(data)
-        if not problems and data["entry"]["kind"] == "python":
-            module = os.path.normpath(os.path.join(folder, data["entry"]["module"]))
-            if not module.startswith(os.path.abspath(folder)) or not os.path.isfile(module):
-                problems.append("entry.module 指向的文件不在包里。")
+        if not problems:
+            problem = entry_problem(folder, data)
+            if problem:
+                problems.append(problem)
+        permissions = sorted(k for k, v in (data.get("permissions") or {}).items() if v is True) \
+            if isinstance(data, dict) and isinstance(data.get("permissions"), dict) else []
+        code = isinstance(data, dict) and has_code(folder, data)
+        level = rating(data) if isinstance(data, dict) else "general"
+        content = data.get("content") if isinstance(data, dict) and isinstance(data.get("content"), dict) else {}
+        accept = sorted(permissions + ([ACCEPT_CODE] if code else []) + ([ACCEPT_ADULT] if level == "adult" else []))
         summary = {"name": data.get("name"), "version": data.get("version"), "description": data.get("description"),
-                   "permissions": sorted(k for k, v in (data.get("permissions") or {}).items() if v is True),
+                   "permissions": permissions, "code": code, "rating": level,
+                   "min_age": content.get("min_age"), "label": content.get("label"), "confirm": content.get("confirm"),
+                   "accept": accept, "ui": data.get("ui") if isinstance(data.get("ui"), dict) else {},
+                   "target": os.path.join(installed_dir(), str(data.get("name") or "")),
                    "requires": data.get("requires") or {}, "problems": problems,
-                   "review": review(data) if isinstance(data, dict) else None}
+                   "review": review(data, code=code) if isinstance(data, dict) else None}
         if not problems:
             if find(data["name"]) is not None and not os.path.isdir(os.path.join(installed_dir(), data["name"])):
                 summary["problems"] = problems = ["和内置工具重名。"]
@@ -611,13 +744,23 @@ def inspect(source: str) -> dict:
 
 
 def install(source: str, accept_permissions) -> dict:
-    """装到 installed_dir()。accept_permissions 必须正好列出清单要的权限。"""
+    """复制到 installed_dir()（默认仓库的 toolpacks/installed/，已被 .gitignore 忽略）。
+    accept_permissions 必须正好列出 inspect 给的 accept：清单要的权限，加上 "code"（包里有代码）
+    和 "rating_adult"（content.rating=adult）。少一项、多一项都不装。"""
     summary = inspect(source)
     if summary["problems"]:
         raise PackError("invalid_manifest", "工具包不合格：" + "；".join(summary["problems"]), summary["problems"])
-    wanted = summary["permissions"]
-    if not isinstance(accept_permissions, list) or sorted(set(accept_permissions)) != wanted:
-        raise PackError("permission_not_accepted", f"安装前要确认权限：{'、'.join(wanted) or '无'}。")
+    wanted = summary["accept"]
+    given = sorted(set(accept_permissions)) if isinstance(accept_permissions, list) else None
+    if given != wanted:
+        given = given or []
+        if summary["code"] and ACCEPT_CODE not in given:
+            raise PackError("code_not_accepted", "这个工具包含代码（.py），安装前要勾选确认「包含代码」。")
+        if summary["rating"] == "adult" and ACCEPT_ADULT not in given:
+            raise PackError("rating_not_accepted",
+                            f"这个工具声明了成人分级（rating=adult，{summary.get('min_age')} 岁以上），安装前要勾选确认。")
+        perms = summary["permissions"]
+        raise PackError("permission_not_accepted", f"安装前要确认权限：{'、'.join(perms) or '无'}。")
     folder, temp = _unpack(source)
     try:
         target = os.path.join(installed_dir(), summary["name"])
@@ -625,8 +768,8 @@ def install(source: str, accept_permissions) -> dict:
         staging = target + ".installing"
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(folder, staging, ignore=_export_ignore)
-        record = {"schema": GRANT_SCHEMA, "permissions": wanted, "version": summary["version"],
-                  "digest": pack_digest(staging)}
+        record = {"schema": GRANT_SCHEMA, "permissions": summary["permissions"], "version": summary["version"],
+                  "code": summary["code"], "rating": summary["rating"], "digest": pack_digest(staging)}
         with open(os.path.join(staging, GRANTS), "w", encoding="utf-8") as handle:
             json.dump(record, handle)
         shutil.rmtree(target, ignore_errors=True)
@@ -682,4 +825,7 @@ def summary(pack: Pack) -> dict:
         "configurable": bool(m.get("config")),
         "sandbox": "host" if pack.builtin else "subprocess",
         "grant": pack.grant_state(),
+        "rating": pack.rating,
+        "form": bool((m.get("ui") or {}).get("form")),
+        "code": m["entry"]["kind"] in ("python", "module") and not pack.builtin,
     }

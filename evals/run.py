@@ -449,23 +449,24 @@ def run_character(h: Harness, task: dict, live: bool) -> dict:
     return {"paths": ["form", "form_local", "chat"]}
 
 
-def run_character_pack(h: Harness, task: dict, live: bool) -> dict:
-    """#86：本机扩展包口子 / 摄像机位 / 光照：发现与校验、分级守卫（未成年、校服、原创）、默认 SFW、顺序、
-    表单确认+本机+分级、对话关键词+第三方拦截。用的是临时目录里的中性夹具包，仓库里没有扩展包内容。"""
+def run_form_tool(h: Harness, task: dict, live: bool) -> dict:
+    """#86：表单工具（entry.kind=module，代码是工具目录里的 .py）：发现、路径越界、宿主分级守卫（未成年、校服、原创、
+    工具代码自称 general 也没用）、默认 SFW、顺序、摄像机位/光照、通用路由、表单确认+本机+分级、对话关键词、第三方拦截。
+    用的是临时目录里的中性夹具，仓库里没有成人内容。"""
     try:
         check._pack_character_cases(h.base, h.provider, h.box, h.directory, task["case"])
     except SystemExit as exc:
-        raise Failed(str(exc) or "扩展包检查失败") from exc
+        raise Failed(str(exc) or "表单工具检查失败") from exc
     return {"case": task["case"]}
 
 
-def run_preset_pack_install(h: Harness, task: dict, live: bool) -> dict:
-    """#86：经“安装工具包”装预设包（pack.json）：识别、只收紧、成人分级要明确确认、卸载；不用重启。
-    中性夹具；安装目录是 check 设好的临时目录（MAS_PRESET_PACKS_DIR），不碰用户真实的 %APPDATA%。"""
+def run_form_tool_install(h: Harness, task: dict, live: bool) -> dict:
+    """#86：经“安装工具包”装表单工具：包含代码要确认、成人分级再单独确认、旧预设包（pack.json）拒绝、卸载、
+    默认装进仓库的 toolpacks/installed/ 后 git status 不变。安装目录是 check 设好的临时 MAS_TOOLPACKS_DIR（git_clean 例外，用完即删）。"""
     try:
-        check._preset_install_cases(h.base, task["case"])
+        check._tool_install_cases(h.base, task["case"])
     except SystemExit as exc:
-        raise Failed(str(exc) or "预设包安装检查失败") from exc
+        raise Failed(str(exc) or "表单工具安装检查失败") from exc
     return {"case": task["case"]}
 
 
@@ -847,7 +848,7 @@ def run_sandbox(h: Harness, task: dict, live: bool) -> dict:
         status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": check.PROBE})
         review = json.loads(body).get("review") or {}
         expect(status == 200 and review.get("mode") == "subprocess" and review.get("sandbox"), f"安装前没有权限审阅：{body[:200]}")
-        status, body = check.request("POST", h.base + "/api/toolpacks/install", {"source": check.PROBE, "accept_permissions": []})
+        status, body = check.request("POST", h.base + "/api/toolpacks/install", {"source": check.PROBE, "accept_permissions": ["code"]})
         expect(status == 200, f"装探针失败：{status} {body[:200]}")
         if case == "env":
             os.environ["OPENAI_API_KEY"] = check.SECRET
@@ -933,7 +934,7 @@ def run_confirm_policy(h: Harness, task: dict, live: bool) -> dict:
                 problems = json.loads(body).get("problems") or []
                 expect(any("confirm=always" in item for item in problems), f"{confirm}：检查没有拒绝：{problems}")
                 status, body = check.request("POST", h.base + "/api/toolpacks/install",
-                                             {"source": target, "accept_permissions": ["network"]})
+                                             {"source": target, "accept_permissions": ["code", "network"]})
                 expect(status != 200 and json.loads(body).get("code") == "invalid_manifest", f"{confirm}：装上了：{status} {body[:200]}")
                 expect(not os.path.exists(os.path.join(folder, manifest["name"])), f"{confirm}：被拒的包留在了安装目录")
                 results[confirm] = "invalid_manifest"
@@ -956,7 +957,7 @@ def run_confirm_policy(h: Harness, task: dict, live: bool) -> dict:
             review = json.loads(body).get("review") or {}
             expect(review.get("confirm_every_call"), f"审阅没有说明每次调用都确认：{body[:200]}")
             status, body = check.request("POST", h.base + "/api/toolpacks/install",
-                                         {"source": target, "accept_permissions": ["network"]})
+                                         {"source": target, "accept_permissions": ["code", "network"]})
             expect(status == 200, f"装探针失败：{status} {body[:200]}")
             session_id = check._fresh_session(h.base)
             h.provider.mode = "probe"
@@ -1247,8 +1248,8 @@ RUNNERS = {
     "skill_mining": run_skill_mining,
     "image_skill": run_image_skill,
     "character": run_character,
-    "character_pack": run_character_pack,
-    "preset_pack_install": run_preset_pack_install,
+    "form_tool": run_form_tool,
+    "form_tool_install": run_form_tool_install,
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,
