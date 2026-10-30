@@ -1054,6 +1054,19 @@ def _tool_policy_route(handler, method: str, path: str) -> None:
         policy.reset()
         after, warnings = policy.current(), []
     else:
+        # #93 决定 7：新放宽的字段要逐项 acknowledge，缺了就 409、不保存（界面确认后带上重发）。
+        candidate, _ = policy.normalize(body.get("policy") if isinstance(body.get("policy"), dict) else {})
+        wanted = policy.newly_relaxed(before, candidate)
+        given = body.get("acknowledge") if isinstance(body.get("acknowledge"), list) else []
+        missing = [f for f in wanted if f not in given]
+        if missing:
+            from services.tools.packs import POLICY_RELAX_TEXT
+
+            _send_json(handler, 409, {"code": "acknowledge_required",
+                                      "message": "这次修改放宽了工具安全策略，要逐项确认后再保存：" + "、".join(missing) + "。",
+                                      "fields": missing,
+                                      "texts": {f: POLICY_RELAX_TEXT.get(f.split(".", 1)[1], "") for f in missing}})
+            return
         try:
             after, warnings = policy.save(body.get("policy"))
         except policy.PolicyError as exc:

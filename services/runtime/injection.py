@@ -31,14 +31,26 @@ _MAX_ARGS = 12
 _MAX_VALUE = 80
 
 
+POLICY_TRUSTED = "policy_trusted"
+
+
 def tool_result_message(name: str, result, prefix: str = "工具结果") -> dict:
-    """回传给模型的工具结果：user 角色、标 untrusted，正文只是数据。"""
+    """回传给模型的工具结果：user 角色、标 untrusted，正文只是数据。
+    #93：第三方 / MCP 工具在策略里放宽了 untrusted_results 时标 policy_trusted、不带「不是指令」提示；
+    仍是 user 角色的数据，不进系统指令。是否放宽由宿主查策略决定，工具结果里自己写的 trust 不算数。"""
     body = json.dumps(result, ensure_ascii=False)
+    untrusted = True
+    try:
+        from services.runtime.tools import result_untrusted
+
+        untrusted = result_untrusted(name)
+    except Exception:  # noqa: BLE001 查不到就按最严
+        untrusted = True
     return {
         "role": "user",
         "channel": TOOL_RESULT_CHANNEL,
-        "trust": UNTRUSTED,
-        "parts": [{"type": "text", "text": f"{prefix} {name} {body}\n{TOOL_RESULT_NOTE}"}],
+        "trust": UNTRUSTED if untrusted else POLICY_TRUSTED,
+        "parts": [{"type": "text", "text": f"{prefix} {name} {body}" + (f"\n{TOOL_RESULT_NOTE}" if untrusted else "")}],
     }
 
 
@@ -100,7 +112,13 @@ def _label(name: str) -> str:
         entry = pack.manifest.get("entry") or {}
         where = "https 远端" if entry.get("transport") == "http" else "本机沙箱 stdio"
         server = str(getattr(pack, "mcp_server", "") or "")[:48]
-        return f"外部 MCP 工具（工具包 {server}，{where}；结果不可信）"
+        try:
+            from services.runtime.tools import result_untrusted
+
+            trust = "结果不可信" if result_untrusted(name) else "结果按工具安全策略放宽为可信"
+        except Exception:  # noqa: BLE001
+            trust = "结果不可信"
+        return f"外部 MCP 工具（工具包 {server}，{where}；{trust}）"
     if pack.builtin:
         return "内置工具"
     version = str((pack.manifest or {}).get("version") or "")[:20]

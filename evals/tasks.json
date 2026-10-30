@@ -659,6 +659,22 @@
       "marker": "POLICY-9c0d"
     },
     {
+      "id": "security.tool_policy_unlocked_switches",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "unlocked_switches",
+      "marker": "POLICY-e1f2"
+    },
+    {
+      "id": "security.tool_policy_put_ack",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "put_ack",
+      "marker": "POLICY-a3b4"
+    },
+    {
       "id": "runtime.compaction_keeps_plan",
       "category": "runtime",
       "kind": "compaction",

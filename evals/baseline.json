@@ -86,6 +86,8 @@
         "security.tool_policy_precedence": true,
         "security.tool_policy_no_secret_leak": true,
         "security.tool_policy_policy_change_reenable": true,
+        "security.tool_policy_unlocked_switches": true,
+        "security.tool_policy_put_ack": true,
         "runtime.compaction_keeps_plan": true,
         "security.compaction_no_local_body": true,
         "runtime.compaction_session_query": true,

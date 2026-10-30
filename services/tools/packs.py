@@ -484,6 +484,12 @@ def policy_review(data: dict) -> dict:
     effective = policy.resolve(name)
     out = {"relaxations": [], "problems": [], "items": []}
     if entry.get("kind") != "mcp":
+        # 普通第三方包：只有 untrusted_results / sensitive_confirm_every_call 对它起作用（工具名就是包名）。
+        perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+        relaxable = _sensitive(data) and perms.get("read_local_content") is not True
+        out["relaxations"] = policy.relaxations(policy.resolve(name, name), mcp=False, sensitive_relaxable=relaxable)
+        for key in out["relaxations"]:
+            out["items"].append({"field": key, "text": POLICY_RELAX_TEXT[key]})
         return out
     transport = entry.get("transport")
     command = mcp_command(data)
@@ -512,6 +518,10 @@ POLICY_RELAX_TEXT = {
     "http_private": "策略允许连局域网地址（10.x、172.16-31.x、192.168.x 等），局域网里的设备和服务能被连到。",
     "auth": "策略给这个包配置了认证头。密钥从环境变量或本机钥匙串取，只在发请求时带上，不落盘、不进日志和审计、不给模型。",
     "params_allow": "策略从参数名黑名单里放行了一些名字（如 text、path）。本地正文的出站检测照样生效。",
+    "untrusted_results": "策略不再把这个工具的结果标为不可信：结果里写的「指令」更容易影响模型。本地正文的出站检测照样生效。",
+    "schema_reauth": "策略允许 MCP server 改了工具说明或参数后照样调用，不用重新启用（新参数照样过黑名单）。",
+    "mcp_confirm_every_call": "策略允许 MCP 远端工具在一轮对话里确认一次后复用，不再每次都弹确认卡。",
+    "sensitive_confirm_every_call": "策略允许这个联网工具在一轮对话里确认一次后复用，不再每次都弹确认卡（读本地内容的工具不受影响）。",
 }
 
 
@@ -833,12 +843,18 @@ def review(data: dict, code: bool = False, panel: list | None = None) -> dict:
                           "risk": "high",
                           "effect": f"会在本机运行 {entry.get('command')} {' '.join(entry.get('args') or [])}"
                                     "（工具安全策略放行的命令）。它不在 12.D 沙箱里：能读写你能读写的文件、能自己联网。"})
-        if out["policy"]["relaxations"]:
-            items.append({"permission": ACCEPT_POLICY, "label": "工具安全策略的放宽项", "risk": "high",
-                          "effect": "工具安全策略对这个包放宽了：" + "、".join(out["policy"]["relaxations"])
-                                    + "。改策略以后已启用的远端工具要重新启用。"})
         if entry.get("transport") == "http":
             out["mode"] = "host_http"
+    else:
+        out["policy"] = policy_review(data)
+    for key in ("sensitive_confirm_every_call", "mcp_confirm_every_call"):
+        if key in out["policy"]["relaxations"]:
+            out["confirm_every_call"] = False  # 一轮确认一次（第一次照样确认）
+    if out["policy"]["relaxations"]:
+        items.append({"permission": ACCEPT_POLICY, "label": "工具安全策略的放宽项", "risk": "high",
+                      "effect": "工具安全策略对这个包放宽了：" + "、".join(out["policy"]["relaxations"])
+                                + "。" + "；".join(i["text"] for i in out["policy"]["items"])
+                                + ("。改策略以后已启用的远端工具要重新启用。" if entry.get("kind") == "mcp" else "。")})
     return out
 
 
@@ -994,7 +1010,7 @@ def inspect(source: str) -> dict:
         content = data.get("content") if isinstance(data, dict) and isinstance(data.get("content"), dict) else {}
         accept = sorted(permissions + ([ACCEPT_CODE] if code else []) + ([ACCEPT_ADULT] if level == "adult" else []))
         policy_info = {"relaxations": [], "problems": []}
-        if isinstance(data, dict) and not problems and (data.get("entry") or {}).get("kind") == "mcp":
+        if isinstance(data, dict) and not problems:
             policy_info = policy_review(data)
             if mcp_command(data):
                 accept = sorted(accept + [ACCEPT_COMMAND])

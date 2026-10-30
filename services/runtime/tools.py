@@ -88,11 +88,42 @@ def confirm_every_call(name: str) -> bool:
     from services.tools import packs
 
     pack = packs.find_tool(name)
-    if packs.is_mcp(pack):  # 14.A：远端工具做什么宿主看不见，一律每次确认
-        return True
     if pack is not None and packs.policy_confirm_always(pack):  # #93：策略把确认收紧成每次都问
         return True
-    return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
+    if packs.is_mcp(pack):  # 14.A：远端工具做什么宿主看不见，默认每次确认
+        return _switch(pack, name, "mcp_confirm_every_call")  # #93：策略可以放宽成一轮确认一次
+    if not (pack is not None and not pack.builtin and packs.sensitive(pack)):
+        return False
+    # #93：联网的第三方包可以放宽成一轮确认一次；读本地内容的包（含读本地 + 联网的高危组合）不开放，
+    # 否则同一轮里后续调用能不经确认把别的本地内容带出本机。
+    if (pack.manifest.get("permissions") or {}).get("read_local_content") is True:
+        return True
+    return _switch(pack, name, "sensitive_confirm_every_call")
+
+
+def _switch(pack, name: str, key: str) -> bool:
+    """策略开关的生效值（默认 True = 最严）。读策略出错就按最严。"""
+    try:
+        from services.tools import policy
+
+        return policy.resolve(getattr(pack, "mcp_server", None) or pack.name, name)[key] is not False
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def result_untrusted(name: str) -> bool:
+    """#93：工具结果回传给模型时要不要标 untrusted。内置工具和查不到的一律标；
+    第三方 / MCP 工具看策略 untrusted_results（默认 true）。"""
+    _ensure()
+    try:
+        from services.tools import packs
+
+        pack = packs.find_tool(name)
+    except Exception:  # noqa: BLE001
+        return True
+    if pack is None or pack.builtin:
+        return True
+    return _switch(pack, name, "untrusted_results")
 
 
 def egress_preview(name: str, arguments=None) -> dict:

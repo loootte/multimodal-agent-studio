@@ -15,6 +15,11 @@
 - params_block      额外加进黑名单的参数名。global / packs / tools。
 - confirm           manifest（按清单）| always（每次都确认）。只能收紧。global / packs / tools。
 - result_max_chars  MCP 结果回给模型的最大字数（500–16000，默认 16000）。只能收紧。global / packs / tools。
+- untrusted_results*            false = 第三方 / MCP 工具结果不再标 untrusted、不带「不是指令」提示（仍是 user 角色的数据）。默认 true。
+- schema_reauth*                false = MCP 工具说明 / 参数变了不用重新启用（新 schema 仍要过黑名单和结构检查）。默认 true。
+- mcp_confirm_every_call*       false = MCP 远端工具一轮里确认一次后复用（仍至少确认一次）。默认 true。
+- sensitive_confirm_every_call* false = 联网的第三方工具一轮里确认一次后复用；读本地内容的包不受影响。默认 true。
+（这四项 #93 后续由用户决定开放；默认值仍是最严。三层都可写。）
 
 锁定项（LOCKED）：只显示，不能改；写了别的值记 warning 并按锁定值处理。
 """
@@ -37,7 +42,9 @@ MAX_RESULT = 16000
 MIN_RESULT = 500
 ADDRESS_FIELDS = ("http_loopback", "http_link_local", "http_private")
 ADDRESS_CLASS = {"http_loopback": "loopback", "http_link_local": "link_local", "http_private": "private"}
-RELAXING = ("stdio_commands", "http_loopback", "http_link_local", "http_private", "auth", "params_allow")
+# 默认 true（最严），写 false 才是放宽的开关。
+STRICT_SWITCHES = ("untrusted_results", "schema_reauth", "mcp_confirm_every_call", "sensitive_confirm_every_call")
+RELAXING = ("stdio_commands", "http_loopback", "http_link_local", "http_private", "auth", "params_allow") + STRICT_SWITCHES
 DEFAULTS = {
     "stdio_commands": [],
     "http_loopback": False,
@@ -48,6 +55,10 @@ DEFAULTS = {
     "params_block": [],
     "confirm": "manifest",
     "result_max_chars": MAX_RESULT,
+    "untrusted_results": True,
+    "schema_reauth": True,
+    "mcp_confirm_every_call": True,
+    "sensitive_confirm_every_call": True,
 }
 FIELD_LEVELS = {
     "stdio_commands": ("global", "packs"),
@@ -59,18 +70,17 @@ FIELD_LEVELS = {
     "params_block": ("global", "packs", "tools"),
     "confirm": ("global", "packs", "tools"),
     "result_max_chars": ("global", "packs", "tools"),
+    **{key: ("global", "packs", "tools") for key in STRICT_SWITCHES},
 }
 # 底线：不开放配置（显示在设置页上，只读）。要不要开放其中哪一项由用户决定，见 docs/tool-policy.md。
 LOCKED = {
     "local_body_check": ("strict", "出站前检查本地正文（原文、截段、编码变体、本地指纹），命中就在连接前拦下。本地正文不出本机是底线。"),
     "local_bodies_unavailable": ("refuse", "取不到本会话的本地内容登记时，按最严处理，不连接。"),
-    "untrusted_results": ("on", "第三方 / MCP 工具结果一律标为不可信数据交给模型。"),
-    "schema_reauth": ("on", "MCP 工具说明或参数变了，调用前拦下，要重新启用。"),
-    "mcp_confirm_every_call": ("on", "MCP 远端工具每次调用都弹宿主模板确认卡。"),
-    "sensitive_confirm_every_call": ("on", "联网 / 读本地内容的第三方工具每次调用都确认。"),
-    "send_local_to_model": ("forbidden", "第三方工具包不能声明 send_local_to_model。"),
+    "send_local_to_model": ("forbidden", "第三方工具包不能声明 send_local_to_model：开放就等于让本地正文经工具结果发给模型供应商，"
+                                         "碰本地正文不出本机的底线，所以不开放。"),
     "remote_local_prompt_default": ("refuse", "generate_image 把本地提示词发第三方默认拒绝；放宽只能在该工具设置里显式确认。"),
-    "content_guard": ("on", "出图内容审核（services/runtime/content_guard.py）。"),
+    "content_guard": ("on", "出图内容审核（services/runtime/content_guard.py）。它同时保证成人分级内容只在本机 ComfyUI 出图、"
+                            "不发第三方后端；关掉就会让本地提示词出本机，所以不开放。"),
     "loopback_self_port": ("deny", "MCP 永远不能连本程序自己的端口。"),
     "unspecified_unresolved": ("deny", "0.0.0.0 / :: 和解析不了的主机永远拒绝。"),
 }
@@ -149,7 +159,7 @@ def _field(key, value, path, warnings):
     if key == "stdio_commands":
         names = _names(value, COMMAND, path, warnings)
         return names is not None, names
-    if key in ADDRESS_FIELDS:
+    if key in ADDRESS_FIELDS or key in STRICT_SWITCHES:
         if isinstance(value, bool):
             return True, value
         warnings.append(path)
@@ -325,9 +335,17 @@ def resolve(pack: str | None, tool: str | None = None, policy: dict | None = Non
     return out
 
 
-def relaxations(effective: dict, transport: str | None = None, command: str | None = None) -> list[str]:
-    """生效策略里对这个包 / 工具真正起作用的放宽项（字段名）。"""
+def relaxations(effective: dict, transport: str | None = None, command: str | None = None, *,
+                mcp: bool = True, sensitive_relaxable: bool = False) -> list[str]:
+    """生效策略里对这个包 / 工具真正起作用的放宽项（字段名）。
+    mcp=False 是普通第三方包：只看 untrusted_results 和（联网、不读本地内容的包）sensitive_confirm_every_call。"""
     out = []
+    if not mcp:
+        if effective.get("untrusted_results") is False:
+            out.append("untrusted_results")
+        if sensitive_relaxable and effective.get("sensitive_confirm_every_call") is False:
+            out.append("sensitive_confirm_every_call")
+        return out
     if command and command in (effective.get("stdio_commands") or []):
         out.append("stdio_commands")
     if transport in ("http", "stdio"):
@@ -338,6 +356,9 @@ def relaxations(effective: dict, transport: str | None = None, command: str | No
         out.append("auth")
     if effective.get("params_allowed"):
         out.append("params_allow")
+    for key in ("untrusted_results", "schema_reauth", "mcp_confirm_every_call"):
+        if effective.get(key) is False:
+            out.append(key)
     return out
 
 
@@ -506,6 +527,12 @@ def public() -> dict:
             "warnings": warnings}
 
 
+def is_relaxed(key: str, value) -> bool:
+    if key in STRICT_SWITCHES:
+        return value is False
+    return key in RELAXING and value not in (None, [], False)
+
+
 def relaxed_fields(policy: dict) -> list[str]:
     """整份策略里出现的放宽字段名（审计用）。"""
     found = set()
@@ -513,9 +540,24 @@ def relaxed_fields(policy: dict) -> list[str]:
         sections = [policy.get(level) or {}] if level == "global" else list((policy.get(level) or {}).values())
         for body in sections:
             for key in RELAXING:
-                if body.get(key) not in (None, [], False):
+                if is_relaxed(key, body.get(key)):
                     found.add(key)
     return sorted(found)
+
+
+def newly_relaxed(before: dict, after: dict) -> list[str]:
+    """after 比 before 新放宽（或换了放宽取值）的字段路径（level.key，不含包名 / 工具名）。
+    #93 决定 7：写入这些要服务端确认（acknowledge 逐项列出）。收紧和恢复默认不用确认。"""
+    out = set()
+    for level in LEVELS:
+        a = before.get(level) or {}
+        b = after.get(level) or {}
+        pairs = [(a, b)] if level == "global" else [(a.get(n) or {}, b.get(n) or {}) for n in b]
+        for x, y in pairs:
+            for key in RELAXING:
+                if is_relaxed(key, y.get(key)) and y.get(key) != x.get(key):
+                    out.add(f"{level}.{key}")
+    return sorted(out)
 
 
 def changed_fields(before: dict, after: dict) -> list[str]:

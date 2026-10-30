@@ -1636,20 +1636,6 @@ function fillToolPolicy(view, note) {
     : "未配置的项就是最严格的默认值。");
 }
 
-function relaxingIn(policy, relaxing) {
-  const found = new Set();
-  for (const level of ["global", "packs", "tools"]) {
-    const sections = level === "global" ? [policy[level] || {}] : Object.values(policy[level] || {});
-    for (const body of sections) {
-      for (const key of relaxing) {
-        const value = body && body[key];
-        if (value && !(Array.isArray(value) && !value.length)) found.add(key);
-      }
-    }
-  }
-  return [...found];
-}
-
 async function saveToolPolicy() {
   const form = document.querySelector("#settings-form");
   const text = form.elements.policy_json.value.trim();
@@ -1660,11 +1646,25 @@ async function saveToolPolicy() {
     document.querySelector("#tool-policy-hint").textContent = "不是合法的 JSON，没有保存。";
     return;
   }
+  // #93 决定 7：放不放宽由宿主判断。宿主回 409 acknowledge_required 时把放宽字段和说明原样给人看，
+  // 同意了才带 acknowledge 重发；收紧和恢复默认不用确认。
+  const put = (acknowledge) => api("PUT", "/api/tool-policy", acknowledge ? { policy, acknowledge } : { policy });
   try {
-    const current = await api("GET", "/api/tool-policy");
-    const relaxed = relaxingIn(policy, current.relaxing || []);
-    if (relaxed.length && !window.confirm(`这份策略放宽了：${relaxed.join("、")}。放宽会让 MCP 工具能做更多事（启动外部命令、连本机或局域网服务、带认证头）。确定保存？`)) return;
-    const view = await api("PUT", "/api/tool-policy", { policy });
+    let view;
+    try {
+      view = await put(null);
+    } catch (error) {
+      if (error.code !== "acknowledge_required") throw error;
+      const payload = error.payload || {};
+      const fields = payload.fields || [];
+      const texts = payload.texts || {};
+      const lines = fields.map((field) => `· ${field}${texts[field] ? "：" + texts[field] : ""}`);
+      if (!window.confirm(`这份策略放宽了：\n${lines.join("\n")}\n\n放宽会让第三方 / MCP 工具能做更多事，确定保存？`)) {
+        document.querySelector("#tool-policy-hint").textContent = "没有保存：放宽工具安全策略需要你确认。";
+        return;
+      }
+      view = await put(fields);
+    }
     fillToolPolicy(view, (view.changed || []).length ? "已保存。已启用的 MCP 工具如受影响，需要到工具页重新启用。" : "没有变化。");
   } catch (error) {
     document.querySelector("#tool-policy-hint").textContent = error.message || "没能保存。";

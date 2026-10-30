@@ -92,6 +92,8 @@
 | 6.7 | 放宽项（命令、地址类别、认证头、`params_allow`）要显式写进策略，安装时勾 `external_command` / `policy_relaxed`，启用时带 `acknowledge`；记 `security.policy_relaxed`（只有字段名）；改策略后已启用工具变成 `changed`，要重新启用（#93） | 自动：`security.tool_policy_explicit_relax`、`security.tool_policy_policy_change_reenable` |
 | 6.8 | 覆盖优先级 工具 > 包 > 全局 > 默认（#93） | 自动：`security.tool_policy_precedence` |
 | 6.9 | 认证头只从环境变量或钥匙串取值，不写盘、不进日志 / 审计 / 确认卡、不回给模型；策略写接口跨站 403，工具执行期间拒绝；本地正文检查和 `remote_local_prompt` 默认拒绝是锁定项，不能关（#93） | 自动：`security.tool_policy_no_secret_leak`、`apps/web/check.py` 的 `_tool_policy_case` 和跨站用例 |
+| 6.10 | 开放的四个开关（`untrusted_results`、`schema_reauth`、`mcp_confirm_every_call`、`sensitive_confirm_every_call`）默认最严；放宽后 MCP 工具要重新启用并逐项 acknowledge，普通包安装要勾 `policy_relaxed`；读本地内容的包始终每次确认；工具结果自带的 `trust` 不算数；`send_local_to_model` / `content_guard` 仍锁定（#93 决定 6） | 自动：`security.tool_policy_unlocked_switches`、`_check_policy_switches` |
+| 6.11 | `PUT /api/tool-policy` 新放宽的字段要逐项 `acknowledge`，缺了 409 `acknowledge_required` 且不保存、不记放宽；收紧和恢复默认不用确认（#93 决定 7） | 自动：`security.tool_policy_put_ack`、`apps/web/check.py` 的 `_tool_policy_case` |
 
 ## 4. 发布前
 

@@ -280,9 +280,15 @@ def _state(pack, item: dict, record: dict | None) -> str:
         return "blocked"
     if not record:
         return "disabled"
-    if record.get("digest") != item.get("digest"):
+    if _record_policy(record) != policy_digest(pack, item):
         return "changed"
-    return "enabled" if _record_policy(record) == policy_digest(pack, item) else "changed"
+    if record.get("digest") != item.get("digest") and not _schema_relaxed(pack, item):
+        return "changed"  # #93：策略放宽了 schema_reauth 时，没进黑名单的新说明 / 参数照样可用
+    return "enabled"
+
+
+def _schema_relaxed(pack, item: dict | None) -> bool:
+    return effective_policy(pack, item).get("schema_reauth") is False
 
 
 def view(pack) -> dict:
@@ -298,8 +304,8 @@ def view(pack) -> dict:
             reason = blocked_reason(pack, item)
             row["blocked_reason"] = reason
             row["blocked_text"] = BLOCKED_TEXT.get(reason, "")
-        elif state == "changed" and record and record.get("digest") == item.get("digest"):
-            row["changed_reason"] = "policy_changed"  # 说明和参数没变，是工具安全策略变了
+        elif state == "changed" and record and _record_policy(record) != policy_digest(pack, item):
+            row["changed_reason"] = "policy_changed"  # 工具安全策略变了（说明和参数可能也变了）
         if item.get("name"):
             row["relaxations"] = _relaxations(pack, item)
         tools.append(row)
@@ -718,12 +724,17 @@ def call(tool_pack_, arguments: dict) -> dict:
         listed = session.list_tools()
         fresh = project(server.name, listed)
         current = next((t for t in fresh if t.get("remote") == remote), None)
-        if current is None or current.get("digest") != record.get("digest") or blocked_reason(server, current):
+        relaxed = _schema_relaxed(server, {"name": name})
+        drifted = current is not None and current.get("digest") != record.get("digest")
+        if current is None or blocked_reason(server, current) or (drifted and not relaxed):
             _store_cache(server, fresh)
             ticket.failed("reauth_required")
             _security("security.mcp_reauth_required", tool=name, error_code="reauth_required")
             return _failure(name, "reauth_required",
                             "MCP server 上这个工具的说明或参数变了（或已经没有了），没有调用。请在工具包设置里刷新并重新启用。")
+        if drifted:  # 只有 schema_reauth 放宽才会走到这里：更新缓存、记一笔再调用
+            _store_cache(server, fresh)
+            _security("security.mcp_schema_changed", tool=name, relaxed=True)
         if isinstance(session, _Http):
             message["id"] = session._id()
         result = session.call(message, ticket)
@@ -731,11 +742,14 @@ def call(tool_pack_, arguments: dict) -> dict:
         if not ticket.done:
             ticket.failed(exc.code)
         return _failure(name, exc.code, exc.message, executed=None)
-    limit = effective_policy(server, {"name": name})["result_max_chars"]
-    return untrusted_result(name, server.name, result, limit=limit, secrets=getattr(session, "secrets", None))
+    effective = effective_policy(server, {"name": name})
+    return untrusted_result(name, server.name, result, limit=effective["result_max_chars"],
+                            secrets=getattr(session, "secrets", None),
+                            trusted=effective.get("untrusted_results") is False)
 
 
-def untrusted_result(name: str, server: str, result: dict, limit: int = MAX_TEXT, secrets=None) -> dict:
+def untrusted_result(name: str, server: str, result: dict, limit: int = MAX_TEXT, secrets=None,
+                     trusted: bool = False) -> dict:
     """#93：secrets 是这次会话带过的认证值，先从结果里抹掉再交给模型（server 回显也看不到）。"""
     from services.tools import policy
 
@@ -753,7 +767,8 @@ def untrusted_result(name: str, server: str, result: dict, limit: int = MAX_TEXT
             texts.append(text)
         else:
             omitted += 1
-    out = {"ok": not result.get("isError"), "tool": name, "source": "mcp", "trust": "untrusted", "server": server,
+    out = {"ok": not result.get("isError"), "tool": name, "source": "mcp",
+           "trust": "policy_trusted" if trusted else "untrusted", "server": server,
            "content": texts, "omitted": omitted}
     if result.get("isError"):
         out["error"] = {"code": "mcp_tool_error", "message": "MCP 工具报告了错误（内容见 content，不可信）。"}

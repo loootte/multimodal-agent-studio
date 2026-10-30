@@ -5592,13 +5592,25 @@ def _tool_policy_case(base: str) -> None:
     if status != 200 or view["policy"]["global"] or view["policy"]["packs"] or view["warnings"] \
             or view["defaults"]["http_private"] is not False or view["defaults"]["stdio_commands"] != []:
         fail(f"工具安全策略默认值不对：{status} {body[:300]}")
-    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model"):
-        if key not in {item["key"] for item in view["locked"]}:
+    locked = {item["key"] for item in view["locked"]}
+    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model", "content_guard"):
+        if key not in locked:
             fail(f"底线 {key} 没有列成锁定项")
+    for key in ("untrusted_results", "schema_reauth", "mcp_confirm_every_call", "sensitive_confirm_every_call"):
+        if key in locked or view["defaults"].get(key) is not True or key not in view["relaxing"]:
+            fail(f"#93 决定 6：{key} 应该开放成默认最严的开关：{view['defaults'].get(key)}")
+    # #93 决定 7：新放宽的字段没逐项 acknowledge 就 409、不保存
+    payload = {"policy": {"global": {"http_private": "yes", "local_body_check": "off", "result_max_chars": 8000},
+                          "packs": {"mcp_secret_pack": {"http_loopback": True}}}}
+    status, body = request("PUT", base + "/api/tool-policy", payload)
+    refused = json.loads(body or "{}")
+    if status != 409 or refused.get("code") != "acknowledge_required" or refused.get("fields") != ["packs.http_loopback"] \
+            or not (refused.get("texts") or {}).get("packs.http_loopback"):
+        fail(f"放宽工具安全策略没要求确认：{status} {body[:300]}")
+    if json.loads(request("GET", base + "/api/tool-policy")[1])["policy"]["packs"]:
+        fail("409 之后策略被改了")
     mark = _now_mark(base)
-    status, body = request("PUT", base + "/api/tool-policy", {"policy": {
-        "global": {"http_private": "yes", "local_body_check": "off", "result_max_chars": 8000},
-        "packs": {"mcp_secret_pack": {"http_loopback": True}}}})
+    status, body = request("PUT", base + "/api/tool-policy", dict(payload, acknowledge=refused["fields"]))
     view = json.loads(body)
     if status != 200 or "global.http_private" not in view["warnings"] or "global.local_body_check" not in view["warnings"] \
             or "http_private" in view["policy"]["global"] or view["policy"]["global"].get("result_max_chars") != 8000 \
@@ -5612,6 +5624,16 @@ def _tool_policy_case(base: str) -> None:
         fail(f"工具安全策略写入审计不对：{last}")
     if not relaxed or relaxed[-1].get("fields") != ["http_loopback"]:
         fail(f"放宽没记 security.policy_relaxed：{relaxed}")
+    # 已确认过的放宽不变、只收紧别的字段：不用再确认
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": {
+        "global": {"result_max_chars": 4000}, "packs": {"mcp_secret_pack": {"http_loopback": True}}}})
+    if status != 200:
+        fail(f"收紧也要求确认了：{status} {body[:300]}")
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": {
+        "global": {"untrusted_results": False}, "packs": {"mcp_secret_pack": {"http_loopback": True}}},
+        "acknowledge": ["packs.http_loopback"]})
+    if status != 409 or json.loads(body).get("fields") != ["global.untrusted_results"]:
+        fail(f"关掉 untrusted_results 没要求单独确认：{status} {body[:300]}")
     status, body = request("PUT", base + "/api/tool-policy/secret", {"pack": "mcp_secret_pack", "value": "tok-web-1"})
     if status != 409 or json.loads(body).get("code") != "keychain_unavailable" or "tok-web-1" in body:
         fail(f"网页模式写钥匙串密钥的结果不对：{status} {body}")

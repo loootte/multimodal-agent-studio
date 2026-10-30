@@ -1414,7 +1414,11 @@ def run_mcp(h: Harness, task: dict, live: bool) -> dict:
 
 
 def _policy_put(h: Harness, policy_body: dict) -> dict:
+    """像设置页那样写策略：宿主回 409 acknowledge_required 时按它列的字段确认后重发（#93 决定 7）。"""
     status, body = check.request("PUT", h.base + "/api/tool-policy", {"policy": policy_body})
+    if status == 409 and json.loads(body or "{}").get("code") == "acknowledge_required":
+        fields = json.loads(body).get("fields") or []
+        status, body = check.request("PUT", h.base + "/api/tool-policy", {"policy": policy_body, "acknowledge": fields})
     expect(status == 200, f"写工具安全策略失败：{status} {body[:300]}")
     return json.loads(body)
 
@@ -1626,6 +1630,96 @@ def run_tool_policy(h: Harness, task: dict, live: bool) -> dict:
             status, body = enable("mcp_fake", rows[0])
             expect(status == 200 and "mcp_fake__lookup" in _model_tool_names(), f"重新确认后启用失败：{status} {body}")
             detail.update(reenabled=True)
+        elif case == "unlocked_switches":
+            from services.runtime.injection import TOOL_RESULT_NOTE
+
+            info = _policy_pack(h, source, "mcp_fake", _mcp_fake().URL)
+            install(info, ["network"])
+            status, rows = _policy_mcp_rows(h, "mcp_fake", refresh=True)
+            status, body = enable("mcp_fake", rows[0])
+            expect(status == 200, f"启用失败：{status} {body}")
+
+            def run(times: int) -> tuple[list, str]:
+                session_id = check._fresh_session(h.base)
+                sent = len(h.provider.requests)
+                h.provider.mode, h.provider.probe_tool, h.provider.probe, h.provider.probe_times = \
+                    "probe", "mcp_fake__lookup", {"query": "abc"}, times
+                events = check._speak(h.base, session_id, "查一下 abc", timeout=30)
+                h.provider.mode = "ok"
+                expect(_status(events) == "completed", f"状态是 {_status(events)}")
+                asks = [e for e in events if e.get("type") == "tool.confirm"
+                        and (e.get("name") or e.get("tool")) == "mcp_fake__lookup"]
+                return asks, json.dumps([r["body"] for r in h.provider.requests[sent:]], ensure_ascii=False)
+
+            # 默认最严：两次调用各确认一次，结果标不可信、带「不是指令」提示
+            asks, later = run(2)
+            expect(len(asks) == 2, f"默认策略下两次调用应各确认一次，实际 {len(asks)}")
+            expect(marker in later and TOOL_RESULT_NOTE in later and 'untrusted' in later, "默认策略下结果没标不可信")
+            # 本地正文底线仍锁定：写了也不生效，只给 warning，不用确认
+            status, body = check.request("PUT", h.base + "/api/tool-policy", {"policy": {
+                "global": {"send_local_to_model": True, "content_guard": "off"}}})
+            view = json.loads(body)
+            expect(status == 200 and not view["policy"]["global"]
+                   and {"global.send_local_to_model", "global.content_guard"} <= set(view["warnings"]),
+                   f"锁定项被写进了策略：{status} {body[:300]}")
+            locked = {item["key"] for item in view["locked"]}
+            expect({"send_local_to_model", "content_guard"} <= locked and "untrusted_results" not in locked,
+                   f"锁定项列表不对：{sorted(locked)}")
+            # 放宽三个 MCP 开关：已启用的退出工具表，重新启用要逐项确认
+            _policy_put(h, {"packs": {"mcp_fake": {"untrusted_results": False, "mcp_confirm_every_call": False,
+                                                   "schema_reauth": False}}})
+            expect("mcp_fake__lookup" not in _model_tool_names(), "放宽开关后已启用的工具没退出工具表")
+            status, rows = _policy_mcp_rows(h, "mcp_fake")
+            status, body = enable("mcp_fake", rows[0])
+            wanted = set(body.get("fields") or [])
+            expect(status == 409 and {"untrusted_results", "mcp_confirm_every_call", "schema_reauth"} <= wanted,
+                   f"重新启用没要求确认放宽的开关：{status} {body}")
+            status, body = enable("mcp_fake", rows[0], sorted(wanted))
+            expect(status == 200, f"确认后启用失败：{status} {body}")
+            calls = fake.calls.count("tools/call")
+            asks, later = run(2)
+            expect(len(asks) == 1 and fake.calls.count("tools/call") == calls + 2,
+                   f"放宽 mcp_confirm_every_call 后应一轮确认一次：确认 {len(asks)}，调用 {fake.calls.count('tools/call') - calls}")
+            expect(marker in later and TOOL_RESULT_NOTE not in later and 'policy_trusted' in later,
+                   "放宽 untrusted_results 后结果标记不对")
+            # 放宽 schema_reauth：server 改了说明照样调用，记 security.mcp_schema_changed
+            mark = time.time() - 0.01
+            fake.tools[0]["description"] = "查一个词（新版说明）。"
+            calls = fake.calls.count("tools/call")
+            run(1)
+            expect(fake.calls.count("tools/call") == calls + 1, "放宽 schema_reauth 后说明一变就不调用了")
+            expect(any(e.get("kind") == "security.mcp_schema_changed" for e in _telemetry_since(h, mark)),
+                   "说明变了没记 security.mcp_schema_changed")
+            detail.update(strict_confirms=2, relaxed_confirms=len(asks))
+        elif case == "put_ack":
+            url = h.base + "/api/tool-policy"
+            relax = {"global": {"untrusted_results": False}, "packs": {"mcp_fake": {"http_loopback": True}}}
+            mark = time.time() - 0.01
+            status, body = check.request("PUT", url, {"policy": relax})
+            refused = json.loads(body or "{}")
+            expect(status == 409 and refused.get("code") == "acknowledge_required"
+                   and refused.get("fields") == ["global.untrusted_results", "packs.http_loopback"],
+                   f"放宽没要求确认：{status} {body[:300]}")
+            expect(not json.loads(check.request("GET", url)[1])["policy"]["global"], "409 之后策略被改了")
+            status, body = check.request("PUT", url, {"policy": relax, "acknowledge": ["packs.http_loopback"]})
+            expect(status == 409 and json.loads(body).get("fields") == ["global.untrusted_results"],
+                   f"只确认一部分也保存了：{status} {body[:300]}")
+            expect(not any(e.get("kind") == "security.policy_relaxed" for e in _telemetry_since(h, mark)),
+                   "没保存也记了放宽")
+            status, body = check.request("PUT", url, {"policy": relax, "acknowledge": refused["fields"]})
+            expect(status == 200, f"确认后保存失败：{status} {body[:300]}")
+            relaxed = [e for e in _telemetry_since(h, mark) if e.get("kind") == "security.policy_relaxed"]
+            expect(relaxed and relaxed[-1].get("fields") == ["http_loopback", "untrusted_results"]
+                   and "mcp_fake" not in json.dumps(relaxed[-1]), f"放宽审计不对：{relaxed}")
+            tighter = json.loads(json.dumps(relax))
+            tighter["global"]["result_max_chars"] = 2000
+            status, body = check.request("PUT", url, {"policy": tighter})
+            expect(status == 200, f"收紧（已确认的放宽不变）也要求确认：{status} {body[:300]}")
+            status, body = check.request("PUT", url, {"policy": {}})
+            expect(status == 200 and not json.loads(body)["policy"]["global"], f"整体收紧不该要确认：{status}")
+            status, body = check.request("PUT", url, {"reset": True})
+            expect(status == 200, f"恢复默认不该要确认：{status}")
+            detail.update(fields=refused["fields"])
         else:
             raise Failed(f"不认识的策略用例：{case}")
         return detail
