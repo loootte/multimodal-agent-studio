@@ -629,7 +629,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _send_json(handler, 200, view)
             return
         if path == "/api/tools" and method == "GET":
-            _send_json(handler, 200, app.tools.listing())
+            view = app.tools.listing()
+            view["preset_packs"] = local_packs.listing()["preset_packs"]  # #86：装好的预设包（纯数据）
+            _send_json(handler, 200, view)
             return
         if path.startswith("/api/toolpacks"):
             _toolpack_route(handler, app, method, path)
@@ -837,21 +839,45 @@ def _owned_session(app: App, session_id: str) -> dict:
 
 
 def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str) -> None:
-    """工具包：检查 / 安装 / 卸载 / 导出。source 是本机目录或 .zip 路径（服务只听 127.0.0.1）。"""
+    """工具包：检查 / 安装 / 卸载 / 导出。source 是本机目录或 .zip 路径（服务只听 127.0.0.1）。
+    #86：source 里只有 pack.json（schema mas.local_pack/1）的是预设包，交给 local_packs（纯数据，没有权限；
+    rating=adult 要 accept_rating="adult"）。预设包卸载走 /api/toolpacks/presets/<name>/uninstall。"""
     packs = tool_config._packs()
     try:
         if path == "/api/toolpacks/inspect" and method == "POST":
             body = _read_json(handler)
-            _send_json(handler, 200, packs.inspect(str(body.get("source") or "")))
+            source = str(body.get("source") or "")
+            if packs.source_kind(source) == "preset":
+                _send_json(handler, 200, local_packs.inspect(source))
+                return
+            info = packs.inspect(source)
+            info["type"] = "tool"
+            _send_json(handler, 200, info)
             return
         if path == "/api/toolpacks/install" and method == "POST":
             if not _config_write_allowed(handler, "toolpack_install"):
                 return
             body = _read_json(handler)
-            summary = packs.install(str(body.get("source") or ""), body.get("accept_permissions"))
+            source = str(body.get("source") or "")
+            if packs.source_kind(source) == "preset":
+                summary = local_packs.install(source, body.get("accept_permissions"), body.get("accept_rating"))
+                _audit_config_write("presetpack_install", ["rating"] if summary.get("rating") == "adult" else ["pack"])
+                _send_json(handler, 200, {"ok": True, "installed": summary})
+                return
+            summary = packs.install(source, body.get("accept_permissions"))
             _audit_config_write("toolpack_install", ["permissions"])
             _send_json(handler, 200, {"ok": True, "installed": summary})
             return
+        if path.startswith("/api/toolpacks/presets/") and method == "POST":
+            rest = path[len("/api/toolpacks/presets/"):].split("/")
+            if len(rest) == 2 and rest[1] == "uninstall" and rest[0]:
+                if not _config_write_allowed(handler, "presetpack_uninstall"):
+                    return
+                name = urllib.parse.unquote(rest[0])
+                local_packs.uninstall(name)
+                _audit_config_write("presetpack_uninstall", ["pack"])
+                _send_json(handler, 200, {"ok": True, "removed": name})
+                return
         parts = path[len("/api/toolpacks/"):].split("/")
         name = urllib.parse.unquote(parts[0]) if parts and parts[0] else ""
         if name and parts[1:] == ["uninstall"] and method == "POST":
@@ -871,7 +897,7 @@ def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str
             handler.end_headers()
             handler.wfile.write(raw)
             return
-    except packs.PackError as exc:
+    except (packs.PackError, local_packs.InstallError) as exc:
         status = 404 if exc.code == "not_found" else 400
         _send_json(handler, status, exc.payload())
         return

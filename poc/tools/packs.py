@@ -31,6 +31,8 @@ BACKENDS = os.path.join(PACKS, "backends")
 SCHEMA = "mas.tool/1"
 BACKEND_SCHEMA = "mas.backend/1"
 MANIFEST = "tool.json"
+PRESET_MANIFEST = "pack.json"  # #86：预设包（mas.local_pack/1，纯数据），由 apps/web/local_packs.py 校验和安装
+PRESET_SCHEMA = "mas.local_pack/1"
 GRANTS = ".granted.json"
 PERMISSIONS = ("read_local_content", "network", "write_files", "send_local_to_model")
 CONFIRM = ("always", "never", "by_args")
@@ -523,27 +525,53 @@ def resolve_parameters(pack: Pack) -> dict | None:
 
 # ---------- 安装 / 卸载 / 导出 ----------
 
-def _unpack(source: str) -> tuple[str, str | None]:
-    """source 是目录或 .zip。返回（包目录, 需要清理的临时目录）。"""
+def _unpack(source: str, manifest: str = MANIFEST) -> tuple[str, str | None]:
+    """source 是目录或 .zip。返回（包目录, 需要清理的临时目录）。manifest 是要找的清单文件名。"""
     if os.path.isdir(source):
         return source, None
     if os.path.isfile(source) and source.lower().endswith(".zip"):
         temp = tempfile.mkdtemp(prefix="toolpack-")
-        with zipfile.ZipFile(source) as archive:
-            for info in archive.infolist():
-                target = os.path.normpath(os.path.join(temp, info.filename))
-                if not target.startswith(temp + os.sep) and target != temp:
-                    shutil.rmtree(temp, ignore_errors=True)
-                    raise PackError("invalid_package", "压缩包里有越界路径。")
-            archive.extractall(temp)
-        if os.path.isfile(os.path.join(temp, MANIFEST)):
+        try:
+            with zipfile.ZipFile(source) as archive:
+                for info in archive.infolist():
+                    target = os.path.normpath(os.path.join(temp, info.filename))
+                    if not target.startswith(temp + os.sep) and target != temp:
+                        raise PackError("invalid_package", "压缩包里有越界路径。")
+                archive.extractall(temp)
+        except zipfile.BadZipFile as exc:
+            shutil.rmtree(temp, ignore_errors=True)
+            raise PackError("invalid_package", "不是合法的 .zip 文件。") from exc
+        except PackError:
+            shutil.rmtree(temp, ignore_errors=True)
+            raise
+        if os.path.isfile(os.path.join(temp, manifest)):
             return temp, temp
-        inner = [d for d in os.listdir(temp) if os.path.isfile(os.path.join(temp, d, MANIFEST))]
+        inner = [d for d in os.listdir(temp) if os.path.isfile(os.path.join(temp, d, manifest))]
         if len(inner) == 1:
             return os.path.join(temp, inner[0]), temp
         shutil.rmtree(temp, ignore_errors=True)
-        raise PackError("invalid_package", "压缩包里找不到 tool.json。")
+        raise PackError("invalid_package", f"压缩包里找不到 {manifest}。")
     raise PackError("invalid_package", "要给一个工具包目录或 .zip 文件。")
+
+
+def source_kind(source: str) -> str:
+    """安装入口先分类：有 tool.json 的是工具包（"tool"）；只有 pack.json 且 schema 是 mas.local_pack/1 的是
+    预设包（"preset"，纯数据，交给 apps/web/local_packs.py）。都不是就当工具包，让 inspect 报具体问题。"""
+    try:
+        folder, temp = _unpack(source, PRESET_MANIFEST)
+    except PackError:
+        return "tool"
+    try:
+        if os.path.isfile(os.path.join(folder, MANIFEST)):
+            return "tool"
+        try:
+            data = _read(os.path.join(folder, PRESET_MANIFEST))
+        except (OSError, ValueError):
+            return "preset"  # 有 pack.json 但读不了：按预设包报错，说得更准
+        return "preset" if isinstance(data, dict) and data.get("schema") == PRESET_SCHEMA else "tool"
+    finally:
+        if temp:
+            shutil.rmtree(temp, ignore_errors=True)
 
 
 def inspect(source: str) -> dict:
@@ -552,6 +580,8 @@ def inspect(source: str) -> dict:
     try:
         path = os.path.join(folder, MANIFEST)
         if not os.path.isfile(path):
+            if os.path.isfile(os.path.join(folder, PRESET_MANIFEST)):
+                raise PackError("preset_pack", "这是预设包（pack.json），要走预设包安装（工具配置 → 安装工具包会自动识别）。")
             raise PackError("invalid_package", "目录里没有 tool.json。")
         try:
             data = _read(path)

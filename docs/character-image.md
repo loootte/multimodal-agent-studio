@@ -148,8 +148,9 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 **放在哪**（`apps/web/local_packs.py`）：
 
-- 环境变量 `MAS_LOCAL_TOOLPACKS`：一个或多个目录（Windows 用 `;` 隔开）；设成空字符串 = 不加载。
-- 没设时：Windows `%APPDATA%\MAS\toolpacks`，其他系统 `~/.config/mas/toolpacks`。
+- 安装目录：页面上“安装工具包”装进来的预设包放这里。Windows `%APPDATA%\MAS\toolpacks`，其他系统 `~/.config/mas/toolpacks`；环境变量 `MAS_PRESET_PACKS_DIR` 可以换（检查和评测用临时目录，不碰真实目录）。总会被加载。
+- 环境变量 `MAS_LOCAL_TOOLPACKS`：另外再加一个或多个目录（Windows 用 `;` 隔开）；设成空字符串 = 只看安装目录。
+- 没有缓存，每次请求都重新读：装好、卸载、改 pack.json 都不用重启。
 - 每个子目录一个 `pack.json`。目录在仓库里面的一律跳过（防止误提交）；坏包跳过并在 `GET /api/character` 的 `packs_skipped` 里说明原因。
 
 **pack.json**（`schema: mas.local_pack/1`，只读 JSON，不执行任何代码；不认识的键直接拒绝）：
@@ -168,6 +169,31 @@ anime style illustration, character illustration, full body, highly detailed, be
 | `presets.replace` / `extend` / `forbidden` | 整组替换某字段的预设 / 追加预设 / 禁用某些内置键 |
 
 `rating=general` 的包预设里不能有露骨词，尾注仍是 SFW。
+
+### 在页面上安装 / 卸载预设包
+
+“工具配置 → 安装工具包”会自动识别预设包：目录（或 .zip）里只有 `pack.json` 且 `schema` 是 `mas.local_pack/1`，就走预设包流程（`poc/tools/packs.py` 的 `source_kind` 分类，`apps/web/local_packs.py` 的 `inspect` / `install` / `uninstall` 处理）。
+
+1. 打开“工具配置”，展开“安装工具包”，在“本机目录或 .zip 路径”里填预设包目录，例如 `C:\Users\Administrator\mas-local-toolpacks\character_image_adult`，点“检查并安装”。
+2. 出现“预设包审阅”：类型（预设包，纯数据）、扩展的工具（`character_image`）、分级、年龄下限、替换/追加的预设和新字段、对话里能不能用、装到哪。权限一栏是“无”：不执行代码、不联网、不读本地内容、不写文件。
+3. 勾选“我知道它只是预设数据，不要任何权限”。`rating=adult` 的包还会显示红色警告和包自带的确认文字，并多一项“我已成年，确认安装这个成人分级预设包”，也要勾上。全部勾上，“确认并安装预设包”才能点。
+4. 装好后在“预设包（角色定制）”列表里能看到它：类型、分级、扩展哪个工具、来源（已安装 / 来自 MAS_LOCAL_TOOLPACKS）。不用重启，打开“角色定制”，顶部“预设来源”里就有它。
+5. 卸载：在“预设包（角色定制）”列表里点它后面的“卸载”。只能卸载页面上装的；`MAS_LOCAL_TOOLPACKS` 目录里的包要自己移走。
+
+安装时的检查（只收紧，不放宽；不合格就不装、不写任何文件）：
+
+- `pack.json` 的全部校验（不认识的键、`rating=adult` 要 `confirm`、`min_age` ≥ 18 …）；
+- 把包自带的每个预设过一遍分级守卫（`character.audit_pack`）：未成年用词、低于 `min_age` 的年龄、幼态体型、校服/学生、真人或版权角色、标了 `minor` 的预设、`age` 里的 teen/child，都不让装；
+- `MAS_LOCAL_TOOLPACKS` 里已经有同名包、安装目录在仓库里面，都不让装；
+- 只拷 `pack.json` 和 README，别的文件忽略（审阅里会提示）。
+
+接口：
+
+- `POST /api/toolpacks/inspect {source}`：预设包返回 `type: "preset"`、`permissions: []`、`permission_notes`、`rating`、`min_age`、`extends`、`confirm`、`warnings`（成人分级第一条是警告）、`problems`、`target`、`upgrade`（覆盖安装时是旧版本号）。工具包返回 `type: "tool"`，其余不变。
+- `POST /api/toolpacks/install {source, accept_permissions: [], accept_rating?}`：预设包的 `accept_permissions` 必须是空列表；`rating=adult` 还要 `accept_rating: "adult"`，否则 400 `rating_not_accepted`。
+- `POST /api/toolpacks/presets/<name>/uninstall`：只卸安装目录里的；`MAS_LOCAL_TOOLPACKS` 里的返回 400 `not_installed_here`。
+- `GET /api/tools` 多了 `preset_packs`（`type`、`extends`、`rating`、`min_age`、`local_only`、`origin`）。
+- 安装、卸载和 `/api/toolpacks/*` 的其他写操作一样，只接受本机同源请求，并记一条 `security.config_changed`。
 
 **怎么用**：
 
@@ -204,3 +230,4 @@ anime style illustration, character illustration, full body, highly detailed, be
 ### 检查
 
 `apps/web/check.py` 的 `_pack_character_cases`（单元：discover / minor / school / original / default_sfw / order / camera_light；接口：form / chat）。用的是临时目录里的中性夹具包；检查开始时把 `MAS_LOCAL_TOOLPACKS` 设成空，用户自己的扩展包不会混进来。评测 `image.character_pack_*`、`image.character_camera_light_prompt`。
+预设包安装：`_preset_install_cases`（install_ok / rejects_loosening / adult_requires_confirm / uninstall），评测 `image.install_preset_pack_ok`、`image.install_preset_pack_rejects_loosening`、`image.install_preset_pack_adult_requires_confirm`、`image.uninstall_preset_pack`。安装目录在 check 一开始就设成临时目录（`MAS_PRESET_PACKS_DIR`）。

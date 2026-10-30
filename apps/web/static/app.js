@@ -1680,6 +1680,8 @@ document.querySelector("#tool-uninstall").addEventListener("click", uninstallToo
 document.querySelector("#toolpack-install").addEventListener("click", installToolPack);
 document.querySelector("#toolpack-review-accept").addEventListener("click", acceptToolPack);
 document.querySelector("#toolpack-review-cancel").addEventListener("click", closeToolPackReview);
+document.querySelector("#presetpack-review-accept").addEventListener("click", acceptPresetPack);
+document.querySelector("#presetpack-review-cancel").addEventListener("click", closePresetPackReview);
 document.querySelector("#agent-install").addEventListener("click", installAgent);
 (() => {
   const box = document.querySelector("#multi-agent");
@@ -1727,6 +1729,7 @@ function toolOptions(listing) {
 
 async function refreshToolList(selected) {
   const listing = await api("GET", "/api/tools");
+  renderPresetPacks(listing.preset_packs || []);
   const select = document.querySelector("#tool-select");
   select.replaceChildren(...toolOptions(listing));
   const names = [...(listing.tools || []), ...(listing.backends || [])].map((item) => item.name);
@@ -1734,6 +1737,38 @@ async function refreshToolList(selected) {
   if (pick) {
     select.value = pick;
     await loadToolConfig(pick);
+  }
+}
+
+// #86：预设包（pack.json，纯数据）：类型、分级、扩展哪个工具；页面上装的可以卸载。
+function renderPresetPacks(items) {
+  const list = document.querySelector("#presetpack-list");
+  list.replaceChildren();
+  document.querySelector("#presetpack-empty").hidden = items.length > 0;
+  for (const pack of items) {
+    const item = document.createElement("li");
+    const text = document.createElement("span");
+    const rating = pack.rating === "adult" ? `成人分级（${pack.min_age}+，仅本机出图）` : "通用";
+    const origin = pack.origin === "installed" ? "已安装" : "来自 MAS_LOCAL_TOOLPACKS";
+    text.textContent = `${pack.label}（${pack.name}${pack.version ? ` ${pack.version}` : ""}）· 预设包 · 扩展 ${pack.extends} · ${rating} · ${origin}`;
+    item.append(text);
+    if (pack.origin === "installed") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "卸载";
+      remove.addEventListener("click", async () => {
+        if (!window.confirm(`卸载预设包 ${pack.label}（${pack.name}）？角色定制里就不再有这组预设。`)) return;
+        try {
+          await api("POST", `/api/toolpacks/presets/${encodeURIComponent(pack.name)}/uninstall`);
+          await refreshToolList(state.toolView && state.toolView.name);
+          toolNote(`已卸载预设包 ${pack.name}（不用重启）。`);
+        } catch (error) {
+          toolNote(error.message || "卸载失败。");
+        }
+      });
+      item.append(" ", remove);
+    }
+    list.append(item);
   }
 }
 
@@ -2031,9 +2066,15 @@ async function installToolPack() {
   try {
     const info = await api("POST", "/api/toolpacks/inspect", { source });
     if ((info.problems || []).length) {
-      toolNote(`工具包不合格：${info.problems.join("；")}`);
+      toolNote(`${info.type === "preset" ? "预设包" : "工具包"}不合格：${info.problems.join("；")}`);
       return;
     }
+    if (info.type === "preset") {
+      closeToolPackReview();
+      showPresetPackReview(source, info);
+      return;
+    }
+    closePresetPackReview();
     showToolPackReview(source, info);
   } catch (error) {
     toolNote(error.message || "安装失败。");
@@ -2100,6 +2141,90 @@ async function acceptToolPack() {
     closeToolPackReview();
     await refreshToolList(info.name);
     toolNote(`已安装 ${info.name}（在沙箱子进程里运行）。`);
+  } catch (error) {
+    toolNote(error.message || "安装失败。");
+  }
+}
+
+// #86：预设包审阅：没有权限，但要列出类型/分级/扩展的工具；rating=adult 额外警告，要再勾一项明确确认。
+let pendingPresetPack = null;
+
+function showPresetPackReview(source, info) {
+  pendingPresetPack = { source, info };
+  const adult = info.rating === "adult";
+  const section = document.querySelector("#presetpack-review");
+  section.classList.toggle("rated", adult);
+  document.querySelector("#presetpack-review-title").textContent =
+    `预设包审阅：${info.label}（${info.name}${info.version ? ` ${info.version}` : ""}）${info.upgrade !== undefined ? " · 覆盖已装版本" : ""}`;
+  document.querySelector("#presetpack-review-desc").textContent = info.description || "";
+  const facts = [
+    "类型：预设包（mas.local_pack/1，纯数据）",
+    `扩展的工具：${info.extends}`,
+    `分级：${adult ? `成人（rating=adult），年龄下限 ${info.min_age} 岁，只用本机 ComfyUI 出图` : "通用（rating=general）"}`,
+    `替换预设：${(info.replaces || []).join("、") || "无"}；追加预设：${(info.extends_presets || []).join("、") || "无"}；新字段：${(info.fields || []).join("、") || "无"}`,
+    info.chat ? "对话里可用：要在那一句里说出包的关键词才开启" : "对话里不可用：只能在角色定制表单里选",
+    `装到：${info.target}`,
+  ];
+  const fill = (selector, rows) => document.querySelector(selector).replaceChildren(...rows.map((text) => {
+    const row = document.createElement("li");
+    row.textContent = text;
+    return row;
+  }));
+  fill("#presetpack-review-facts", facts);
+  fill("#presetpack-review-perms", info.permission_notes || []);
+  document.querySelector("#presetpack-review-warnings").replaceChildren(...(info.warnings || []).map((text) => {
+    const p = document.createElement("p");
+    p.className = "note";
+    p.textContent = text;
+    return p;
+  }));
+  const confirmText = document.querySelector("#presetpack-review-confirm");
+  confirmText.hidden = !(adult && info.confirm);
+  confirmText.textContent = adult ? info.confirm || "" : "";
+  const accepts = [["data", "我知道它只是预设数据，不要任何权限。"]];
+  if (adult) accepts.push(["adult", "我已成年，确认安装这个成人分级预设包（只在本机出图，结果标记为成人内容）。"]);
+  document.querySelector("#presetpack-review-accepts").replaceChildren(...accepts.map(([value, text]) => {
+    const row = document.createElement("li");
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "presetpack-accept";
+    box.value = value;
+    box.addEventListener("change", syncPresetPackReview);
+    const span = document.createElement("span");
+    span.textContent = ` ${text}`;
+    label.append(box, span);
+    row.append(label);
+    return row;
+  }));
+  section.hidden = false;
+  syncPresetPackReview();
+}
+
+function syncPresetPackReview() {
+  const boxes = [...document.querySelectorAll("#presetpack-review-accepts .presetpack-accept")];
+  document.querySelector("#presetpack-review-accept").disabled = !pendingPresetPack || boxes.some((box) => !box.checked);
+}
+
+function closePresetPackReview() {
+  pendingPresetPack = null;
+  document.querySelector("#presetpack-review").hidden = true;
+}
+
+async function acceptPresetPack() {
+  if (!pendingPresetPack) return;
+  const { source, info } = pendingPresetPack;
+  const boxes = [...document.querySelectorAll("#presetpack-review-accepts .presetpack-accept")];
+  if (boxes.some((box) => !box.checked)) return;
+  const adult = boxes.some((box) => box.value === "adult" && box.checked);
+  const body = { source, accept_permissions: [] };
+  if (adult) body.accept_rating = "adult";
+  try {
+    await api("POST", "/api/toolpacks/install", body);
+    closePresetPackReview();
+    await refreshToolList(state.toolView && state.toolView.name);
+    document.querySelector("#presetpack-box").open = true;
+    toolNote(`已安装预设包 ${info.label}（不用重启）。在“角色定制”顶部的“预设来源”里选它。`);
   } catch (error) {
     toolNote(error.message || "安装失败。");
   }

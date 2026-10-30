@@ -123,6 +123,7 @@
       </div>
       <details id="toolpack-install-box">
         <summary>安装工具包</summary>
+        <p class="hint">也能装角色定制的预设包（只有 pack.json 的目录或 .zip，会自动识别）。</p>
         <label>
           本机目录或 .zip 路径
           <input id="toolpack-source" autocomplete="off" spellcheck="false" placeholder="D:\toolpacks\dice_roll">
@@ -144,7 +145,26 @@
             <button type="button" id="toolpack-review-cancel">取消</button>
           </div>
         </section>
+        <section id="presetpack-review" class="toolpack-review" hidden aria-live="polite">
+          <h4 id="presetpack-review-title">预设包审阅</h4>
+          <p id="presetpack-review-desc" class="hint"></p>
+          <ul id="presetpack-review-facts"></ul>
+          <p class="hint">权限：无。</p>
+          <ul id="presetpack-review-perms"></ul>
+          <div id="presetpack-review-warnings"></div>
+          <pre id="presetpack-review-confirm" class="presetpack-confirm" hidden></pre>
+          <ul id="presetpack-review-accepts"></ul>
+          <div class="dialog-actions">
+            <button type="button" id="presetpack-review-accept" disabled>确认并安装预设包</button>
+            <button type="button" id="presetpack-review-cancel">取消</button>
+          </div>
+        </section>
         <p class="hint">什么样的工具能装、怎么写：<a href="https://github.com/loootte/multimodal-agent-studio/blob/main/docs/tool-pack-guide.md" target="_blank" rel="noopener">工具包编写指南</a></p>
+      </details>
+      <details id="presetpack-box">
+        <summary>预设包（角色定制）</summary>
+        <ul id="presetpack-list" class="agent-list"></ul>
+        <p id="presetpack-empty" class="hint">还没有预设包。在上面“安装工具包”里填预设包目录或 .zip 就能装。</p>
       </details>
       <details id="agent-box">
         <summary>Agent（多智能体）</summary>

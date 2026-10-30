@@ -459,6 +459,16 @@ def run_character_pack(h: Harness, task: dict, live: bool) -> dict:
     return {"case": task["case"]}
 
 
+def run_preset_pack_install(h: Harness, task: dict, live: bool) -> dict:
+    """#86：经“安装工具包”装预设包（pack.json）：识别、只收紧、成人分级要明确确认、卸载；不用重启。
+    中性夹具；安装目录是 check 设好的临时目录（MAS_PRESET_PACKS_DIR），不碰用户真实的 %APPDATA%。"""
+    try:
+        check._preset_install_cases(h.base, task["case"])
+    except SystemExit as exc:
+        raise Failed(str(exc) or "预设包安装检查失败") from exc
+    return {"case": task["case"]}
+
+
 def run_skill_mining(h: Harness, task: dict, live: bool) -> dict:
     """#40：夹具轨迹挖出已知模式；噪声不成候选；无泄漏；skills/ 不变。"""
     from services.meta.mine import Miner
@@ -1238,6 +1248,7 @@ RUNNERS = {
     "image_skill": run_image_skill,
     "character": run_character,
     "character_pack": run_character_pack,
+    "preset_pack_install": run_preset_pack_install,
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,

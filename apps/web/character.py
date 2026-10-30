@@ -368,6 +368,54 @@ def _rated_guard(name: str, raw: str, fields: dict, base_fields: dict, pack: dic
         )
 
 
+def audit_pack(pack: dict) -> list[str]:
+    """安装预设包前（#86）：把包自带的每一个预设过一遍分级守卫的静态部分，有问题就不让装。
+
+    只收紧不放宽：rating=adult 的包不能带未成年 / 低于 min_age / 幼态体型 / 校服学生 / 真人或版权角色的预设，
+    也不能把预设标成 minor。运行时 _rated_guard 照样再拦一次；这里是让坏包在安装时就被挡住、说清原因。
+    """
+    problems: list[str] = []
+    items = []
+    for fname, field in (pack.get("presets", {}).get("replace") or {}).items():
+        items += [(fname, o) for o in field["options"]]
+    for fname, options in (pack.get("presets", {}).get("extend") or {}).items():
+        items += [(fname, o) for o in options]
+    for spec in pack.get("fields") or []:
+        items += [(spec["name"], o) for o in spec["options"]]
+    rated = _rated(pack)
+    min_age = max(int(pack.get("min_age") or 18), 18)
+    for fname, option in items:
+        where = f"{fname}.{option['key']}"
+        if option.get("minor"):
+            problems.append(f"{where} 标了未成年（minor），扩展包不能加未成年预设。")
+            continue
+        if not rated:
+            continue
+        for text in (option["prompt"], option["label"]):
+            lowered = text.lower()
+            hit = _hit(text, _RATED_MINOR_CN) or (_RATED_MINOR_EN.search(lowered) or [None])[0]
+            age = _under_age(text)
+            if hit:
+                problems.append(f"{where} 有未成年用词“{hit}”。")
+            elif age is not None and age < min_age:
+                problems.append(f"{where} 写了 {age} 岁，低于包的年龄下限 {min_age}。")
+            elif _hit(text, _YOUTHFUL_BODY):
+                problems.append(f"{where} 有幼态体型描述“{_hit(text, _YOUTHFUL_BODY)}”。")
+            elif _hit(text, _SCHOOL_WORDS):
+                problems.append(f"{where} 有校服/学生内容“{_hit(text, _SCHOOL_WORDS)}”。")
+            elif any(rule.search(text) for rule in _IP_RULES) or _PERSON_NAME.search(text):
+                problems.append(f"{where} 像在引用真人或版权角色。")
+            else:
+                continue
+            break
+    if rated:
+        teen = [o["key"] for o in (pack.get("presets", {}).get("replace", {}).get("age") or {}).get("options", [])
+                if o["key"] in ("teen", "child")]
+        if teen:
+            problems.append(f"age 预设不能有 {'、'.join(teen)}。")
+    return problems
+
+
 def pack_consent(pack: dict | None, text) -> bool:
     """对话路径：用户这一句里有没有扩展包声明的关键词。包没写关键词 = 对话里不能用（只能走表单）。"""
     if not pack or not pack.get("chat_keywords"):

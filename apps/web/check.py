@@ -27,6 +27,13 @@ WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(WEB_DIR, "..", ".."))
 # #86：本机扩展包只在用户电脑上；检查里默认一个都不加载，免得用户的环境变量混进来。
 os.environ["MAS_LOCAL_TOOLPACKS"] = ""
+# 装预设包的目录也换成临时目录：检查和评测绝不碰用户真实的 %APPDATA%\\MAS\\toolpacks。
+_PRESET_HOME = tempfile.mkdtemp(prefix="mas-preset-home-")
+os.environ["MAS_PRESET_PACKS_DIR"] = _PRESET_HOME
+import atexit  # noqa: E402
+import zipfile  # noqa: E402
+
+atexit.register(shutil.rmtree, _PRESET_HOME, True)
 sys.path.insert(0, WEB_DIR)
 sys.path.insert(0, ROOT)
 
@@ -7213,6 +7220,261 @@ def _camera_light_units() -> None:
     print("camera light units ok")
 
 
+def _preset_source(pack: dict, extra: dict | None = None, as_zip: bool = False) -> str:
+    """把夹具预设包写到仓库外的临时目录（可选打成 zip），当作“安装工具包”的来源。"""
+    folder = tempfile.mkdtemp(prefix="mas-preset-src-")
+    inner = os.path.join(folder, pack.get("name") or "pack")
+    os.makedirs(inner)
+    with open(os.path.join(inner, "pack.json"), "w", encoding="utf-8") as handle:
+        json.dump(pack, handle, ensure_ascii=False)
+    for name, text in (extra or {}).items():
+        with open(os.path.join(inner, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+    if not as_zip:
+        return inner
+    path = os.path.join(folder, "pack.zip")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in os.listdir(inner):
+            archive.write(os.path.join(inner, name), f"{os.path.basename(inner)}/{name}")
+    return path
+
+
+def _preset_home_guard() -> str:
+    import local_packs
+
+    home = local_packs.install_dir()
+    if home != _PRESET_HOME or os.environ.get("MAS_PRESET_PACKS_DIR") != _PRESET_HOME:
+        fail(f"预设包安装目录应是检查用的临时目录，不能是用户真实目录：{home}")
+    appdata = os.environ.get("APPDATA")
+    if appdata and os.path.normcase(os.path.realpath(home)).startswith(os.path.normcase(os.path.realpath(appdata))):
+        fail("检查不该碰用户真实的 %APPDATA%")
+    return home
+
+
+def _preset_clear() -> None:
+    for name in os.listdir(_PRESET_HOME):
+        shutil.rmtree(os.path.join(_PRESET_HOME, name), ignore_errors=True)
+
+
+def _src_cleanup(source: str) -> None:
+    shutil.rmtree(os.path.dirname(source), ignore_errors=True)  # 目录或 zip 都在同一个临时目录里
+
+
+def _preset_install_ok(base: str) -> None:
+    """#86：安装工具包能认出预设包（目录或 zip），没有权限，装进安装目录、只拷数据文件，不用重启就能用。"""
+    home = _preset_home_guard()
+    _preset_clear()
+    source = _preset_source(_FIXTURE_GENERAL, {"README.md": "中性夹具", "run.py": "print('never run')"})
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+        info = json.loads(body)
+        if status != 200 or info.get("type") != "preset" or info.get("problems") or info.get("permissions") != [] \
+                or info.get("rating") != "general" or info.get("extends") != "character_image" or not info.get("permission_notes"):
+            fail(f"预设包检查结果不对：{status} {body[:300]}")
+        if any("成人" in w for w in info.get("warnings", [])) or not any("run.py" in w for w in info.get("warnings", [])):
+            fail(f"通用预设包不该有成人警告、应提示忽略非数据文件：{info.get('warnings')}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source})
+        if status != 400 or json.loads(body).get("code") != "permission_not_accepted":
+            fail(f"没确认就不该装：{status} {body[:200]}")
+        if os.listdir(home):
+            fail("没确认时不该写安装目录")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})
+        if status != 200 or json.loads(body)["installed"]["name"] != "general_fixture":
+            fail(f"预设包没装上：{status} {body[:200]}")
+        target = os.path.join(home, "general_fixture")
+        if sorted(os.listdir(target)) != ["README.md", "pack.json"]:
+            fail(f"只该拷 pack.json 和 README：{os.listdir(target)}")
+        status, body = request("GET", base + "/api/tools")
+        listed = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}
+        item = listed.get("general_fixture") or {}
+        if status != 200 or item.get("type") != "preset" or item.get("rating") != "general" \
+                or item.get("extends") != "character_image" or item.get("origin") != "installed":
+            fail(f"工具列表没列出装好的预设包：{body[-400:]}")
+        status, body = request("GET", base + "/api/character")
+        if status != 200 or "general_fixture" not in [p["name"] for p in json.loads(body).get("packs", [])]:
+            fail("装好后不用重启就该在角色定制里出现")
+        status, body = request("POST", base + "/api/character/preview",
+                               {"pack": "general_fixture", "fields": {"outfit": "raincoat"}})
+        if status != 200 or "yellow raincoat" not in json.loads(body)["prompt"]:
+            fail(f"装好的预设包预设没生效：{status} {body[:200]}")
+    finally:
+        _src_cleanup(source)
+    zipped = _preset_source(dict(_FIXTURE_GENERAL, version="0.2.0"), as_zip=True)
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": zipped})
+        info = json.loads(body)
+        if status != 200 or info.get("type") != "preset" or info.get("upgrade") is None:
+            fail(f"zip 预设包检查不对（应识别为覆盖升级）：{body[:300]}")
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": zipped, "accept_permissions": []})
+        if status != 200:
+            fail(f"zip 预设包没装上：{body[:200]}")
+        import local_packs
+        if local_packs.get("general_fixture").get("version") != "0.2.0" or [n for n in os.listdir(home) if n.startswith(".")]:
+            fail("覆盖安装没换成新版本或留下了临时目录")
+    finally:
+        _src_cleanup(zipped)
+        _preset_clear()
+    print("preset install ok")
+
+
+def _preset_install_rejects_loosening(base: str) -> None:
+    """#86：预设包只能收紧：低于 18 的 min_age、不认识的键、未成年/校服/低龄预设、标 minor、装进仓库，都装不上。"""
+    home = _preset_home_guard()
+    _preset_clear()
+    rated = json.loads(json.dumps(_FIXTURE_RATED))
+    teen_age = json.loads(json.dumps(rated))
+    teen_age["presets"]["replace"]["age"]["options"].append({"key": "teen", "label": "青少年", "prompt": "teenager"})
+    young = json.loads(json.dumps(rated))
+    young["presets"]["replace"]["age"]["options"].append({"key": "young", "label": "十几岁", "prompt": "16 years old"})
+    below_floor = json.loads(json.dumps(rated))
+    below_floor["presets"]["replace"]["age"]["options"].append({"key": "twenty", "label": "二十", "prompt": "20 years old"})
+    school = json.loads(json.dumps(rated))
+    school["presets"]["extend"]["outfit"] = [{"key": "uniform", "label": "制服", "prompt": "school uniform"}]
+    minor_flag = json.loads(json.dumps(_FIXTURE_GENERAL))
+    minor_flag["presets"]["extend"]["outfit"][0]["minor"] = True
+    cases = (
+        (dict(rated, min_age=16), "min_age"),
+        (dict(rated, allow_minors=True), "不认识的键"),
+        (dict(rated, confirm=""), "confirm"),
+        (dict(rated, backends=["remote"]), "不认识的键"),
+        (teen_age, "teen"),
+        (young, "16"),
+        (below_floor, "低于包的年龄下限"),
+        (school, "校服"),
+        (minor_flag, "minor"),
+    )
+    for pack, word in cases:
+        source = _preset_source(pack)
+        try:
+            status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+            info = json.loads(body)
+            if status != 200 or info.get("type") != "preset" or not any(word in p for p in info.get("problems", [])):
+                fail(f"放宽规则的预设包应被指出（{word}）：{body[:300]}")
+            status, body = request("POST", base + "/api/toolpacks/install",
+                                   {"source": source, "accept_permissions": [], "accept_rating": "adult"})
+            if status != 400 or json.loads(body).get("code") != "invalid_manifest":
+                fail(f"放宽规则的预设包不该装上（{word}）：{status} {body[:200]}")
+            if os.listdir(home):
+                fail(f"装不上的预设包不该写安装目录（{word}）")
+        finally:
+            _src_cleanup(source)
+    inside = tempfile.mkdtemp(prefix="mas-preset-home-", dir=ROOT)
+    source = _preset_source(_FIXTURE_GENERAL)
+    try:
+        os.environ["MAS_PRESET_PACKS_DIR"] = inside
+        status, body = request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})
+        if status != 400 or "仓库" not in body or os.listdir(inside):
+            fail(f"安装目录在仓库里时应拒绝：{status} {body[:200]}")
+    finally:
+        os.environ["MAS_PRESET_PACKS_DIR"] = _PRESET_HOME
+        shutil.rmtree(inside, ignore_errors=True)
+        _src_cleanup(source)
+    print("preset install rejects loosening ok")
+
+
+def _preset_install_adult_confirm(base: str) -> None:
+    """#86：rating=adult 的预设包：审阅里有分级、年龄下限、仅本机、警告和确认文字；没明确确认（accept_rating=adult）装不上。"""
+    home = _preset_home_guard()
+    _preset_clear()
+    source = _preset_source(_FIXTURE_RATED)
+    try:
+        status, body = request("POST", base + "/api/toolpacks/inspect", {"source": source})
+        info = json.loads(body)
+        if status != 200 or info.get("problems") or info.get("rating") != "adult" or info.get("min_age") != 21 \
+                or not info.get("local_only") or not info.get("confirm") or info.get("permissions") != [] \
+                or not info.get("warnings") or "成人" not in info["warnings"][0] or "本机" not in info["warnings"][0]:
+            fail(f"成人分级预设包的审阅信息不对：{body[:400]}")
+        for extra, code in (({}, "rating_not_accepted"), ({"accept_rating": "general"}, "rating_not_accepted"),
+                            ({"accept_rating": True}, "rating_not_accepted"),
+                            ({"accept_rating": "adult", "accept_permissions": ["network"]}, "permission_not_accepted")):
+            payload = dict({"source": source, "accept_permissions": []}, **extra)
+            status, body = request("POST", base + "/api/toolpacks/install", payload)
+            if status != 400 or json.loads(body).get("code") != code:
+                fail(f"成人分级预设包没确认就不该装（{extra}）：{status} {body[:200]}")
+            if os.listdir(home):
+                fail("没确认时不该写安装目录")
+        status, body = request("POST", base + "/api/toolpacks/install",
+                               {"source": source, "accept_permissions": [], "accept_rating": "adult"})
+        if status != 200:
+            fail(f"明确确认后应能装：{status} {body[:200]}")
+        status, body = request("GET", base + "/api/tools")
+        item = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}.get("rated_fixture") or {}
+        if item.get("rating") != "adult" or item.get("min_age") != 21 or not item.get("local_only"):
+            fail(f"工具列表里成人分级预设包的信息不对：{item}")
+        status, body = request("GET", base + "/api/character?pack=rated_fixture")
+        if status != 200 or json.loads(body)["pack"]["rating"] != "adult":
+            fail("装好的分级包不用重启就该能用")
+        _pack_refused({"age": "teen"}, "minor_unsafe", pack=__import__("local_packs").get("rated_fixture"))
+    finally:
+        _src_cleanup(source)
+        _preset_clear()
+    print("preset install adult confirm ok")
+
+
+def _preset_uninstall(base: str) -> None:
+    """#86：页面上装的预设包能卸载，立刻从角色定制里消失；MAS_LOCAL_TOOLPACKS 里的不归页面管。"""
+    home = _preset_home_guard()
+    _preset_clear()
+    source = _preset_source(_FIXTURE_GENERAL)
+    try:
+        if request("POST", base + "/api/toolpacks/install", {"source": source, "accept_permissions": []})[0] != 200:
+            fail("卸载用例：没装上")
+        status, body = request("POST", base + "/api/toolpacks/presets/general_fixture/uninstall")
+        if status != 200 or os.path.exists(os.path.join(home, "general_fixture")):
+            fail(f"预设包没卸掉：{status} {body[:200]}")
+        status, body = request("GET", base + "/api/character")
+        if "general_fixture" in [p["name"] for p in json.loads(body).get("packs", [])]:
+            fail("卸载后不用重启就该从角色定制里消失")
+        status, body = request("GET", base + "/api/tools")
+        if json.loads(body).get("preset_packs"):
+            fail("卸载后工具列表不该还有它")
+        status, body = request("POST", base + "/api/toolpacks/presets/general_fixture/uninstall")
+        if status != 404:
+            fail(f"再卸一次应是 404：{status}")
+        with _Packs(_FIXTURE_RATED):
+            status, body = request("POST", base + "/api/toolpacks/presets/rated_fixture/uninstall")
+            if status != 400 or json.loads(body).get("code") != "not_installed_here" \
+                    or __import__("local_packs").get("rated_fixture") is None:
+                fail(f"MAS_LOCAL_TOOLPACKS 里的包不该被页面卸载：{status} {body[:200]}")
+            status, body = request("GET", base + "/api/tools")
+            item = {p["name"]: p for p in json.loads(body).get("preset_packs", [])}.get("rated_fixture") or {}
+            if item.get("origin") != "env":
+                fail(f"环境变量目录里的包应标成 env：{item}")
+        status, body = _post_with_origin(base, "/api/toolpacks/presets/general_fixture/uninstall", "http://evil.example")
+        if status != 403:
+            fail(f"跨站卸载应被拒：{status}")
+    finally:
+        _src_cleanup(source)
+        _preset_clear()
+    print("preset uninstall ok")
+
+
+def _post_with_origin(base: str, path: str, origin: str):
+    req = urllib.request.Request(base + path, data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json", "Origin": origin})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+PRESET_INSTALL_CASES = {
+    "install_ok": _preset_install_ok,
+    "rejects_loosening": _preset_install_rejects_loosening,
+    "adult_requires_confirm": _preset_install_adult_confirm,
+    "uninstall": _preset_uninstall,
+}
+
+
+def _preset_install_cases(base: str, case: str | None = None) -> None:
+    if case is not None and case not in PRESET_INSTALL_CASES:
+        fail(f"没有这个预设包安装用例：{case}")
+    for name, run in PRESET_INSTALL_CASES.items():
+        if case is None or name == case:
+            run(base)
+
+
 PACK_UNITS = {
     "discover": _pack_discover_units,
     "minor": _pack_minor_units,
@@ -7399,6 +7661,8 @@ def _pack_character_cases(base: str, provider, box: ComfyState, directory: str, 
     cases = dict(PACK_UNITS)
     cases["form"] = lambda: _pack_form_cases(base, provider, box, directory)
     cases["chat"] = lambda: _pack_chat_cases(base, provider, box, directory)
+    if case is None:
+        cases["install"] = lambda: _preset_install_cases(base)
     if case is not None and case not in cases:
         fail(f"没有这个扩展包用例：{case}")
     for name, run in cases.items():

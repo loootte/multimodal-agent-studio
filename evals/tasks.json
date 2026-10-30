@@ -353,6 +353,34 @@
       "case": "chat"
     },
     {
+      "id": "image.install_preset_pack_ok",
+      "category": "image",
+      "kind": "preset_pack_install",
+      "fake_only": true,
+      "case": "install_ok"
+    },
+    {
+      "id": "image.install_preset_pack_rejects_loosening",
+      "category": "image",
+      "kind": "preset_pack_install",
+      "fake_only": true,
+      "case": "rejects_loosening"
+    },
+    {
+      "id": "image.install_preset_pack_adult_requires_confirm",
+      "category": "image",
+      "kind": "preset_pack_install",
+      "fake_only": true,
+      "case": "adult_requires_confirm"
+    },
+    {
+      "id": "image.uninstall_preset_pack",
+      "category": "image",
+      "kind": "preset_pack_install",
+      "fake_only": true,
+      "case": "uninstall"
+    },
+    {
       "id": "security.storage_encrypted_at_rest",
       "category": "security",
       "kind": "storage_encryption",

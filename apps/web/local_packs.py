@@ -4,9 +4,11 @@
 仓库只认一个通用的加载口子，不带任何具体内容。
 
 在哪找：
-- 环境变量 MAS_LOCAL_TOOLPACKS（多个目录用 os.pathsep 隔开；设成空字符串 = 不加载任何扩展包）；
-- 没设时：Windows 是 %APPDATA%\\MAS\\toolpacks，其他系统是 ~/.config/mas/toolpacks。
-每个子目录里放一个 pack.json。目录在仓库里面的一律跳过（防止误提交）。
+- 安装目录：工具配置 → 安装工具包装进来的预设包放在这里。默认 Windows 是 %APPDATA%\\MAS\\toolpacks，
+  其他系统是 ~/.config/mas/toolpacks；环境变量 MAS_PRESET_PACKS_DIR 可以换（检查和评测用临时目录）。
+- 环境变量 MAS_LOCAL_TOOLPACKS 里的目录（多个用 os.pathsep 隔开；设成空字符串 = 只看安装目录）。
+每个子目录里放一个 pack.json。目录在仓库里面的一律跳过（防止误提交）。没有缓存，每次请求都重新读，
+所以装好 / 卸载后不用重启。
 
 只读 JSON，不执行任何代码。安全底线在仓库里（character.py 的分级守卫），扩展包只能收紧、不能放宽：
 - rating=adult 的包：必须写 confirm（表单弹窗确认）；年龄下限不低于 18（min_age 可以更高）；
@@ -35,15 +37,29 @@ class PackError(ValueError):
     pass
 
 
-def search_dirs() -> list[str]:
-    raw = os.environ.get("MAS_LOCAL_TOOLPACKS")
-    if raw is not None:
-        return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
+def install_dir() -> str:
+    """安装预设包的目录（也是默认的查找目录）。"""
+    override = os.environ.get("MAS_PRESET_PACKS_DIR")
+    if override and override.strip():
+        return override.strip()
     if os.name == "nt":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
-        return [os.path.join(base, "MAS", "toolpacks")]
+        return os.path.join(base, "MAS", "toolpacks")
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return [os.path.join(base, "mas", "toolpacks")]
+    return os.path.join(base, "mas", "toolpacks")
+
+
+def _same(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def search_dirs() -> list[str]:
+    raw = os.environ.get("MAS_LOCAL_TOOLPACKS") or ""
+    dirs = [part.strip() for part in raw.split(os.pathsep) if part.strip()]
+    home = install_dir()
+    if not any(_same(home, d) for d in dirs):
+        dirs.append(home)
+    return dirs
 
 
 def _inside_repo(path: str) -> bool:
@@ -65,6 +81,8 @@ def discover(host: str = "character_image") -> dict:
             skipped.append({"dir": os.path.basename(root), "reason": "目录在仓库里面，扩展包只能放在仓库外。"})
             continue
         for entry in sorted(os.listdir(root)):
+            if entry.startswith("."):
+                continue  # 安装时的临时目录
             folder = os.path.join(root, entry)
             path = os.path.join(folder, "pack.json")
             if not os.path.isfile(path):
@@ -79,6 +97,7 @@ def discover(host: str = "character_image") -> dict:
             if pack["name"] in packs:
                 skipped.append({"dir": entry, "reason": f"重名：{pack['name']}。"})
                 continue
+            pack["_dir"] = folder
             packs[pack["name"]] = pack
     return {"packs": packs, "skipped": skipped}
 
@@ -220,3 +239,154 @@ def validate(data) -> dict:
         forbidden[fname] = [k.strip() for k in keys]
     pack["presets"] = {"replace": replace, "extend": extend, "forbidden": forbidden}
     return pack
+
+
+# ---------- 安装 / 卸载（工具配置 → 安装工具包，自动识别 pack.json） ----------
+
+INSTALL_FILES = ("pack.json", "README.md", "README.txt")
+NO_PERMISSIONS = ["不执行任何代码（只有 JSON 数据）", "不联网", "不读你的本地内容", "不写文件（只被 MAS 读取）"]
+
+
+class InstallError(Exception):
+    def __init__(self, code: str, message: str, problems: list | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.problems = problems or []
+
+    def payload(self) -> dict:
+        out = {"code": self.code, "message": self.message}
+        if self.problems:
+            out["problems"] = self.problems
+        return out
+
+
+def _packs_module():
+    import tool_config
+    return tool_config._packs()
+
+
+def _open(source: str):
+    packs = _packs_module()
+    try:
+        return packs._unpack(source, packs.PRESET_MANIFEST)
+    except packs.PackError as exc:
+        raise InstallError(exc.code, exc.message) from exc
+
+
+def _origin(pack: dict) -> str:
+    folder = pack.get("_dir") or ""
+    return "installed" if folder and _same(os.path.dirname(folder), install_dir()) else "env"
+
+
+def listing() -> dict:
+    """工具配置里的“预设包”列表：类型、分级、扩展哪个工具、从哪来（安装的可以卸载）。"""
+    found = discover()
+    items = []
+    for pack in found["packs"].values():
+        item = summary(pack)
+        item.update({"type": "preset", "extends": pack["extends"], "version": pack.get("version", ""),
+                     "min_age": pack.get("min_age"), "origin": _origin(pack),
+                     "fields": [f["name"] for f in pack["fields"]]})
+        items.append(item)
+    return {"preset_packs": items, "skipped": found["skipped"], "install_dir": install_dir()}
+
+
+def inspect(source: str) -> dict:
+    """安装前看一眼：类型、扩展哪个工具、分级、权限（预设包没有权限）、警告、问题。不抛校验错误，放进 problems。"""
+    import character
+
+    folder, temp = _open(source)
+    try:
+        info = {"type": "preset", "permissions": [], "permission_notes": list(NO_PERMISSIONS),
+                "problems": [], "warnings": [], "target": None}
+        try:
+            pack = load(os.path.join(folder, "pack.json"))
+        except PackError as exc:
+            info["problems"].append(str(exc))
+            return info
+        except OSError as exc:
+            info["problems"].append(f"读不了 pack.json：{type(exc).__name__}。")
+            return info
+        info.update({"name": pack["name"], "label": pack["label"], "version": pack.get("version", ""),
+                     "description": pack.get("description", ""), "extends": pack["extends"],
+                     "rating": pack["rating"], "min_age": pack.get("min_age"), "confirm": pack.get("confirm", ""),
+                     "chat": bool(pack.get("chat_keywords")), "local_only": pack["rating"] == "adult",
+                     "fields": [f["name"] for f in pack["fields"]],
+                     "replaces": sorted(pack["presets"]["replace"]), "extends_presets": sorted(pack["presets"]["extend"])})
+        info["problems"] += character.audit_pack(pack)
+        others = [n for n in os.listdir(folder) if n not in INSTALL_FILES and not n.startswith(".")]
+        if others:
+            info["warnings"].append(f"只装 pack.json 和 README，忽略：{'、'.join(sorted(others)[:10])}。")
+        if pack["rating"] == "adult":
+            info["warnings"].insert(0, f"这是成人分级（rating=adult）预设包：会生成成人内容。只用本机 ComfyUI 出图，"
+                                       f"不会发给第三方；年龄下限 {pack['min_age']} 岁；未成年、校服、幼态体型、真人和版权角色"
+                                       f"一律拒绝；结果标记为成人内容（文件名带 adult_）。要你明确确认才能装。")
+        home = install_dir()
+        target = os.path.join(home, pack["name"])
+        info["target"] = target
+        if _inside_repo(home):
+            info["problems"].append("安装目录在仓库里面；预设包只能装在仓库外（检查 MAS_PRESET_PACKS_DIR）。")
+        existing = discover()["packs"].get(pack["name"])
+        if existing is not None:
+            if _origin(existing) == "env":
+                info["problems"].append(f"MAS_LOCAL_TOOLPACKS 目录里已经有同名预设包 {pack['name']}；先把那份移走或改环境变量。")
+            else:
+                info["upgrade"] = existing.get("version", "")
+        return info
+    finally:
+        if temp:
+            import shutil
+            shutil.rmtree(temp, ignore_errors=True)
+
+
+def install(source: str, accept_permissions, accept_rating=None) -> dict:
+    """装到 install_dir()/<name>。accept_permissions 必须是空列表（预设包不要权限）；rating=adult 还要 accept_rating="adult"。"""
+    import shutil
+
+    info = inspect(source)
+    if info["problems"]:
+        raise InstallError("invalid_manifest", "预设包不合格：" + "；".join(info["problems"]), info["problems"])
+    if accept_permissions is None or (isinstance(accept_permissions, list) and accept_permissions):
+        raise InstallError("permission_not_accepted", "预设包不要任何权限；安装前要确认（accept_permissions 为空列表）。")
+    if not isinstance(accept_permissions, list):
+        raise InstallError("permission_not_accepted", "accept_permissions 要是列表。")
+    if info["rating"] == "adult" and accept_rating != "adult":
+        raise InstallError("rating_not_accepted", "这是成人分级预设包，安装前要明确确认（accept_rating=adult）。")
+    folder, temp = _open(source)
+    try:
+        home = install_dir()
+        os.makedirs(home, exist_ok=True)
+        if _inside_repo(home):
+            raise InstallError("invalid_target", "安装目录在仓库里面；预设包只能装在仓库外。")
+        target = os.path.join(home, info["name"])
+        staging = os.path.join(home, "." + info["name"] + ".installing")
+        shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging)
+        for name in INSTALL_FILES:
+            if os.path.isfile(os.path.join(folder, name)):
+                shutil.copyfile(os.path.join(folder, name), os.path.join(staging, name))
+        load(os.path.join(staging, "pack.json"))  # 拷过去的再校验一遍
+        old = os.path.join(home, "." + info["name"] + ".old")
+        shutil.rmtree(old, ignore_errors=True)
+        if os.path.isdir(target):
+            os.replace(target, old)
+        os.replace(staging, target)
+        shutil.rmtree(old, ignore_errors=True)
+    finally:
+        if temp:
+            shutil.rmtree(temp, ignore_errors=True)
+    info["target"] = target
+    return info
+
+
+def uninstall(name: str) -> None:
+    """只卸载装在 install_dir() 里的；MAS_LOCAL_TOOLPACKS 目录里的包要自己移走。"""
+    import shutil
+
+    pack = discover()["packs"].get(name) if isinstance(name, str) else None
+    if pack is None:
+        raise InstallError("not_found", "没有这个预设包。")
+    if _origin(pack) != "installed":
+        raise InstallError("not_installed_here", "这个预设包来自 MAS_LOCAL_TOOLPACKS 目录，不是在页面上装的；要停用请把它移走或改环境变量。")
+    shutil.rmtree(pack["_dir"])
