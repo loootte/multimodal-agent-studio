@@ -206,6 +206,12 @@ def rollback(data_dir: str, purge: bool) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows 控制台默认 GBK；统一 UTF-8 输出，父进程按 UTF-8 读。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(description="系统钥匙串迁移 / 回退（13.B）")
     parser.add_argument("--data-dir", default=None, help="默认桌面版数据目录")
     sub = parser.add_subparsers(dest="command", required=True)

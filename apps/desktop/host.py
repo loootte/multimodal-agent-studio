@@ -47,9 +47,45 @@ def new_token() -> str:
     return os.urandom(TOKEN_BYTES).hex()
 
 
+def _win_pid_alive(pid: int) -> bool:
+    """Windows：OpenProcess + GetExitCodeProcess。
+
+    不能用 os.kill(pid, 0)：Windows 上它会直接 TerminateProcess（退出码 0），既会误杀活进程，
+    对已退出但句柄还没释放的进程又会报 PermissionError 而被误判为“还活着”。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # 拒绝访问说明进程存在（别的用户 / 更高权限）；其它错误一般是 pid 不存在
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            return _win_pid_alive(pid)
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -57,21 +93,23 @@ def pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
-        # Windows：pid 不存在时常是 OSError
-        if sys.platform == "win32":
-            try:
-                import ctypes
-
-                handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-                if handle:
-                    ctypes.windll.kernel32.CloseHandle(handle)
-                    return True
-                return False
-            except Exception:
-                return False
         return False
-    else:
-        return True
+    return True
+
+
+def utf8_child_env(env: dict | None = None) -> dict:
+    """子进程统一 UTF-8 输出（Windows 默认 GBK 会让读 UTF-8 的父进程解码失败）。"""
+    env = dict(os.environ if env is None else env)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+def force_utf8_stdio() -> None:
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def _lock_holder_alive(data: dict) -> int | None:
@@ -218,7 +256,7 @@ class Sidecar:
             ready_path,
         ]
         cmd.extend(["--data-dir", self.data_dir])
-        env = os.environ.copy()
+        env = utf8_child_env()
         env["MAS_DESKTOP_TOKEN"] = self.token
         # 13.B：默认落盘加密 + 系统钥匙串；有明文数据就停下给迁移命令（PreflightError），不悄悄转换。
         self.notes = desktop_env.apply_defaults(env)
@@ -305,11 +343,7 @@ class Sidecar:
 
 def main(argv: list[str] | None = None) -> int:
     # Windows 默认 GBK 输出会让读 UTF-8 的父进程解码失败；统一 UTF-8。
-    for _stream in (sys.stdout, sys.stderr):
-        try:
-            _stream.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):
-            pass
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(description="MAS 桌面 sidecar 宿主")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--port", type=int, default=0, help="0 = 挑空闲端口")

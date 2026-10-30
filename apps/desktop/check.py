@@ -35,6 +35,14 @@ import security_checks  # noqa: E402
 import server  # noqa: E402
 
 
+def _child_env() -> dict:
+    """check 拉起的子进程一律 UTF-8 输出（Windows 默认 GBK）。"""
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def fail(message: str) -> None:
     raise SystemExit(message)
 
@@ -222,13 +230,16 @@ def _cli_ready_file() -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_child_env(),
     )
     try:
         deadline = time.time() + 15
         while time.time() < deadline and not ready.is_file():
             if proc.poll() is not None:
-                out = proc.stdout.read if proc.stdout else None
-                fail(f"server 提前退出：{proc.returncode}")
+                out = proc.stdout.read() if proc.stdout else ""
+                fail(f"server 提前退出：{proc.returncode} {out[-300:]}")
             time.sleep(0.05)
         if not ready.is_file():
             fail("ready-file 没写出来")
@@ -276,13 +287,15 @@ def _sidecar_plaintext_refused() -> None:
         fail("预检失败后不该留下进程或锁")
     # 命令行入口：MAS_ERROR 一行 + 退出码 2，给启动器弹窗用。
     proc = subprocess.run([sys.executable, str(DESKTOP_DIR / "host.py"), "--data-dir", data, "--lock-file", str(lock)],
-                          capture_output=True, text=True, encoding="utf-8", timeout=60)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=_child_env(), timeout=60)
     line = next((l for l in proc.stdout.splitlines() if l.startswith("MAS_ERROR ")), "")
     if proc.returncode != 2 or "storage_migration_required" not in line:
         fail(f"host.py 预检失败应输出 MAS_ERROR 并退出 2：{proc.returncode} {proc.stdout[-200:]}")
 
 
 def main() -> None:
+    desktop_host.force_utf8_stdio()
     _web_mode_no_token()
     _token_gate_unit()
     print("token gate ok")
