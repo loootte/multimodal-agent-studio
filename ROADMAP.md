@@ -263,7 +263,7 @@
    - 层：运行时（`loop.py` 按上下文上限设阈值压缩，大工具结果只保留结构字段）。
    - 句柄隔离：不破坏。摘要发出前过 `local_fingerprint`；句柄不展开；`plan_images` 计划、未完成确认和句柄清单固定保留；原始会话留在本机。
    - 验收：超过阈值的长对话能继续，token 下降；压缩前后出图张数不变；阈值以下请求逐字节不变。
-   - 进度：实现在 `issue-79` 分支，见 [docs/context-compaction.md](docs/context-compaction.md)。压缩在 `services/runtime/compaction.py`，默认确定性摘要、不额外调用模型；`session_query` 未做。
+   - 进度：实现在 `issue-79` 分支，见 [docs/context-compaction.md](docs/context-compaction.md)。压缩在 `services/runtime/compaction.py`；默认模型摘要（只发结构字段和句柄，前后都过本地正文检查，命中或失败退回确定性抽取并记审计）；压缩后才出现的 `session_query` 按 `ctx_N` 引用取回原文（兜底手段，本地正文只给句柄）；参数可在设置页配置（`data/context.json`，非法值回退默认）。
 3. [#80](https://github.com/loootte/multimodal-agent-studio/issues/80) **14.C** 通用规划工具：todo / plan 模式 / goal（P1）
    - 层：运行时宿主工具和网页 todo 面板；编排者用 todo 拆分文字和研究任务。
    - 句柄隔离：不破坏。todo 和 goal 文字过指纹；todo 里的数量不算张数，张数仍只由 `plan_images` 决定；不做 Code 模式。

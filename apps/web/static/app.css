@@ -610,3 +610,8 @@ dialog select { font: inherit; padding: 0.35rem; }
 #presetpack-review.rated { border-color: #d1242f; }
 #presetpack-review-warnings .note { margin: 4px 0; }
 #toolpack-review-perms label { display: flex; gap: 6px; align-items: baseline; }
+
+/* 14.B 上下文压缩设置 */
+.context-settings { border: 0; padding: 0; margin: 0; display: grid; gap: 6px; }
+.context-settings label { display: grid; gap: 2px; }
+.context-settings label:has(input[type="checkbox"]) { display: flex; gap: 6px; align-items: center; }

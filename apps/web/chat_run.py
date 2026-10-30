@@ -812,6 +812,7 @@ def _generate_text_turn(
             artifacts=_session_artifacts(app, session_id, session),
             local_bodies=app.sessions.local_bodies(session_id),
             base_url=provider["base_url"],
+            compaction=_compaction_settings(app),
         ):
             flush_traces()
             kind = event.get("type")
@@ -1385,6 +1386,15 @@ def _stage(run, text: str, source: str, rating: str | None = None) -> str:
     if rating:
         staged[handle]["rating"] = rating
     return handle
+
+
+def _compaction_settings(app):
+    """14.B：设置页的压缩配置；没有设置存储（测试替身）时用默认值。"""
+    holder = getattr(app, "context", None)
+    try:
+        return holder.current() if holder is not None else None
+    except Exception:  # 读不到设置不影响对话：用默认值
+        return None
 
 
 def _is_web_tool(name) -> bool:

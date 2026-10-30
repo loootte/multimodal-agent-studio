@@ -92,6 +92,23 @@
       </label>
       <p id="key-hint" class="hint"></p>
       <p id="settings-error" class="note" hidden></p>
+      <h2>上下文压缩</h2>
+      <fieldset id="context-settings" class="context-settings">
+        <label><input type="checkbox" name="ctx_enabled"> 超过阈值时压缩较早的轮次</label>
+        <label>阈值比例（0.1–0.95，上下文上限的几成）<input name="ctx_ratio" type="number" step="0.05" min="0.1" max="0.95"></label>
+        <label>上下文上限（token，留空用模型声明）<input name="ctx_limit" type="number" min="1000" step="1000"></label>
+        <label>原样保留最近几条（2–50）<input name="ctx_keep_tail" type="number" min="2" max="50"></label>
+        <label>工具结果超过多少字才裁剪（80–100000）<input name="ctx_trim_chars" type="number" min="80" max="100000"></label>
+        <label>摘要方式
+          <select name="ctx_summary">
+            <option value="model">模型生成（本地内容只以句柄出现，命中退回确定性抽取）</option>
+            <option value="deterministic">确定性抽取（不调用模型）</option>
+          </select>
+        </label>
+        <label>摘要模型（留空用当前模型）<input name="ctx_summary_model" autocomplete="off" spellcheck="false"></label>
+        <label><input type="checkbox" name="ctx_session_query"> 压缩后允许模型按引用取回原文（session_query）</label>
+      </fieldset>
+      <p id="context-hint" class="hint">非法取值会回退默认值。</p>
       <h2>本地存储</h2>
       <p id="storage-status" class="hint">读取中…</p>
       <p class="hint">加密、迁移、备份和恢复主密钥只走命令行 <code>python apps/web/storage_tool.py</code>，密钥不经过网页。见 docs/storage-encryption.md。</p>
