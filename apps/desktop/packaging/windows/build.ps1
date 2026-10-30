@@ -73,15 +73,15 @@ if ($PythonEmbedZip -and (Test-Path $PythonEmbedZip)) {
 } else {
   $IsSmoke = $true
   Write-Host "No embed zip; smoke runtime shims only (delegate to $srcPy). Do NOT copy bare python.exe."
-  # Only .bat shims + marker. Never Copy-Item python.exe/pythonw.exe — they need python3xx.dll beside them.
+  # Only .bat shims + marker. Never Copy-Item python.exe/pythonw.exe - they need python3xx.dll beside them.
   @"
 @echo off
-REM Smoke runtime shim — rebuild with -PythonEmbedZip for a self-contained install.
+REM Smoke runtime shim - rebuild with -PythonEmbedZip for a self-contained install.
 "$srcPy" %*
 "@ | Set-Content -Path (Join-Path $runtimePy "python.bat") -Encoding ASCII
   @"
 @echo off
-REM Smoke pythonw shim — prefer SourcePython's pythonw.exe when present.
+REM Smoke pythonw shim - prefer SourcePython's pythonw.exe when present.
 "$srcPyw" %*
 "@ | Set-Content -Path (Join-Path $runtimePy "pythonw.bat") -Encoding ASCII
   Set-Content -Path (Join-Path $runtimePy "SMOKE_RUNTIME.txt") -Value "Delegates to $srcPy. Rebuild with -PythonEmbedZip for a self-contained install." -Encoding UTF8
@@ -182,7 +182,7 @@ if (-not $SkipNsis) {
     & makensis "/DVERSION=$Ver" "/DSTAGE=$Stage" $nsis
     Write-Host "NSIS installer built under dist\"
   } else {
-    Write-Warning "makensis not on PATH — skipped installer.exe. Layout above is still usable (portable)."
+    Write-Warning "makensis not on PATH - skipped installer.exe. Layout above is still usable (portable)."
   }
 }
 
