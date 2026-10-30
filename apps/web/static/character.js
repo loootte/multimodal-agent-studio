@@ -1,6 +1,7 @@
 // 定制角色图片（issue #53，#86）。字段 → 预设或自定义文字；预览是本机拼出的提示词；生成走 /api/sessions/<id>/character。
 // #86：每个字段是「可搜索下拉 + 自定义输入」（input + datalist：输入能筛选预设，也能直接写自己的描述）；
-// 加了摄像机位、光照、表情、动作/场景；成人模式默认关，打开要在弹窗里确认，且只能本机 ComfyUI 出图。
+// 加了摄像机位、光照、表情、动作/场景。本机扩展包（仓库外的 pack.json）默认不选；选了要在弹窗里确认，
+// 分级（rating=adult）的扩展包只能本机 ComfyUI 出图。本机没有扩展包时整行不显示。
 (() => {
   const dialog = document.querySelector("#character");
   const box = document.querySelector("#char-fields");
@@ -8,13 +9,14 @@
   const preview = document.querySelector("#char-preview");
   const note = document.querySelector("#char-note");
   const count = document.querySelector("#char-count");
-  const adultBox = document.querySelector("#char-adult");
-  const adultNote = document.querySelector("#char-adult-note");
+  const packRow = document.querySelector("#char-pack-row");
+  const packSelect = document.querySelector("#char-pack");
+  const packNote = document.querySelector("#char-pack-note");
   const backendSelect = document.querySelector("#char-backend");
-  const GROUP_LABELS = { camera: "摄像机位", light: "光照", detail: "细节" };
+  const GROUP_LABELS = { camera: "摄像机位", light: "光照", detail: "细节", pack: "扩展包" };
   let catalog = null;
-  let adult = false;
-  let adultConfirmed = false;
+  let pack = null; // 当前扩展包简介（来自 catalog.packs），null = 内置预设。
+  let packConfirmed = false;
   let controls = {};
   let timer = null;
   let listSeq = 0;
@@ -133,7 +135,7 @@
 
   async function refresh() {
     try {
-      const result = await call("POST", "/api/character/preview", { fields: fields(), adult });
+      const result = await call("POST", "/api/character/preview", { fields: fields(), pack: pack ? pack.name : "" });
       preview.textContent = result.prompt;
       say("");
       return true;
@@ -145,41 +147,50 @@
   }
 
   async function load() {
-    catalog = await call("GET", adult ? "/api/character?adult=1" : "/api/character");
+    const path = pack ? `/api/character?pack=${encodeURIComponent(pack.name)}` : "/api/character";
+    catalog = await call("GET", path);
     build();
     reset();
+    fillPacks();
   }
 
-  function syncAdult() {
-    adultBox.checked = adult;
-    adultNote.hidden = !adult;
-    dialog.classList.toggle("adult", adult);
+  function rated() {
+    return Boolean(pack && pack.rating === "adult");
+  }
+
+  function fillPacks() {
+    const packs = catalog.packs || [];
+    packRow.hidden = packs.length === 0;
+    const keep = pack ? pack.name : "";
+    packSelect.replaceChildren(new Option("内置预设", ""));
+    for (const item of packs) {
+      const tag = item.rating === "adult" ? "（分级，仅本机）" : "";
+      packSelect.append(new Option(`${item.label}${tag}`, item.name));
+    }
+    packSelect.value = keep;
+  }
+
+  function syncPack() {
+    packSelect.value = pack ? pack.name : "";
+    packNote.hidden = !pack;
+    packNote.textContent = pack ? `已开启“${pack.label}”${rated() ? "：只用本机 ComfyUI 出图，结果标记为成人内容（rating: adult）。" : "。"}` : "";
+    dialog.classList.toggle("rated", rated());
     for (const option of backendSelect.options) {
-      if (option.value === "remote") option.disabled = adult;
+      if (option.value === "remote") option.disabled = rated();
     }
-    if (adult) backendSelect.value = "local";
+    if (rated()) backendSelect.value = "local";
   }
 
-  async function toggleAdult() {
-    if (adultBox.checked) {
-      const ok = window.confirm(
-        "开启成人模式？\n\n" +
-          "· 会生成成人/露骨内容，只用本机 ComfyUI 出图，不会发给第三方出图服务；\n" +
-          "· 只画原创的成年角色（20 岁以上），未成年、校服、幼态体型、真人和版权角色一律拒绝；\n" +
-          "· 生成结果会标记为成人内容（rating: adult，文件名带 adult_ 前缀）。\n\n" +
-          "请确认你已成年，并且本机使用合法。",
-      );
-      if (!ok) {
-        adultBox.checked = false;
-        return;
-      }
-      adult = true;
-      adultConfirmed = true;
-    } else {
-      adult = false;
-      adultConfirmed = false;
+  async function choosePack() {
+    const name = packSelect.value;
+    const next = (catalog.packs || []).find((item) => item.name === name) || null;
+    if (next && next.confirm && !window.confirm(next.confirm)) {
+      packSelect.value = pack ? pack.name : "";
+      return;
     }
-    syncAdult();
+    pack = next;
+    packConfirmed = Boolean(next);
+    syncPack();
     try {
       await load();
     } catch (error) {
@@ -189,9 +200,9 @@
 
   async function open() {
     say("");
-    adult = false; // 每次打开都回到默认的 SFW。
-    adultConfirmed = false;
-    syncAdult();
+    pack = null; // 每次打开都回到内置预设（SFW）。
+    packConfirmed = false;
+    syncPack();
     try {
       await load();
     } catch (error) {
@@ -208,8 +219,8 @@
       say("张数要是 1 到 20。");
       return;
     }
-    if (adult && backendSelect.value !== "local") {
-      say("成人模式只能用本机 ComfyUI 出图。");
+    if (rated() && backendSelect.value !== "local") {
+      say(`“${pack.label}”只能用本机 ComfyUI 出图。`);
       return;
     }
     if (!(await refresh())) return;
@@ -220,13 +231,13 @@
       backend: backendSelect.value,
       privacy: document.querySelector("#char-privacy").value,
     };
-    if (adult) {
-      body.adult = true;
-      body.adult_confirmed = adultConfirmed;
+    if (pack) {
+      body.pack = pack.name;
+      body.pack_confirmed = packConfirmed;
     }
     dialog.close();
     const where = body.backend === "local" ? "本机 ComfyUI" : "第三方出图";
-    const mode = adult ? "成人模式，" : "";
+    const mode = pack ? `${pack.label}，` : "";
     const label = body.privacy === "local"
       ? `定制角色出图（${mode}本地提示词，${n} 张，${where}）`
       : `定制角色出图（${mode}${n} 张，${where}）`;
@@ -237,5 +248,5 @@
   document.querySelector("#char-close").addEventListener("click", () => dialog.close());
   document.querySelector("#char-reset").addEventListener("click", reset);
   document.querySelector("#char-generate").addEventListener("click", generate);
-  adultBox.addEventListener("change", toggleAdult);
+  packSelect.addEventListener("change", choosePack);
 })();

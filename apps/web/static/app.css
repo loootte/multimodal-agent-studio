@@ -537,8 +537,9 @@ dialog select { font: inherit; padding: 0.35rem; }
 .char-field input[hidden] { display: none; }
 .char-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.7rem 0 0.3rem; align-items: center; }
 .char-options input[type=number] { width: 4.5rem; }
-.char-adult-toggle { display: flex; gap: 0.4rem; align-items: center; margin: 0.3rem 0 0.5rem; }
-#character.adult .char-adult-toggle { color: #a33; font-weight: 600; }
+.char-pack { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin: 0.3rem 0 0.5rem; }
+.char-pack[hidden] { display: none; }
+#character.rated .char-pack label { color: #a33; font-weight: 600; }
 .char-extra { margin-top: 0.6rem; grid-template-columns: 1fr; }
 .char-group { border: 1px solid #ddd; border-radius: 4px; padding: 0.4rem 0.6rem; display: grid;
   grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }

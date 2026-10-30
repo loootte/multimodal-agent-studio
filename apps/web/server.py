@@ -25,6 +25,7 @@ if WEB_DIR not in sys.path:
     sys.path.insert(0, WEB_DIR)
 
 import character
+import local_packs
 import chat_run
 import desktop_notify
 import image_run
@@ -677,15 +678,28 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
             return
         if path == "/api/character" and method == "GET":
-            # #86：?adult=1 给成人模式的预设（只是目录，不出图；开启要在表单里另外确认）。
-            adult = urllib.parse.parse_qs(parsed.query).get("adult", [""])[0] in ("1", "true")
-            _send_json(handler, 200, character.catalog(chat_run._character_config(app), adult=adult))
+            # #86：?pack=名字 给本机扩展包的预设（只是目录，不出图；开启要在表单里另外确认）。
+            found = local_packs.discover()
+            listed = [local_packs.summary(p) for p in found["packs"].values()]
+            name = urllib.parse.parse_qs(parsed.query).get("pack", [""])[0]
+            pack = found["packs"].get(name) if name else None
+            if name and pack is None:
+                _send_json(handler, 404, {"code": "pack_not_found", "message": "本机没有这个扩展包。"})
+                return
+            view = character.catalog(chat_run._character_config(app), pack=pack, packs=listed)
+            view["packs_skipped"] = found["skipped"]
+            _send_json(handler, 200, view)
             return
         if path == "/api/character/preview" and method == "POST":
             body = _read_json(handler)
+            name = body.get("pack")
+            pack = local_packs.get(name) if name else None
+            if name and pack is None:
+                _send_json(handler, 404, {"code": "pack_not_found", "message": "本机没有这个扩展包。"})
+                return
             try:
                 _send_json(handler, 200, character.compose(body.get("fields") or {}, chat_run._character_config(app),
-                                                           adult=body.get("adult") is True))
+                                                           pack=pack))
             except character.CharacterError as exc:
                 _send_json(handler, 400, exc.public())
             return

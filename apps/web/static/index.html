@@ -197,8 +197,11 @@
     <div id="character-form">
       <h2 id="character-title">定制角色图片</h2>
       <p class="hint">每项可以输入搜索预设，也可以直接写自己的描述；清空就用默认值。默认是一个年轻东亚女性角色（二次元风格）；「参考已有角色」可留空。预设可以在「工具 → character_image」里改。</p>
-      <label class="char-adult-toggle"><input id="char-adult" type="checkbox"> 成人模式（默认关闭，开启需确认；只用本机 ComfyUI）</label>
-      <p id="char-adult-note" class="note" hidden>成人模式已开启：只画原创成年角色（20 岁以上）；未成年、校服、幼态体型、真人或版权角色会被拒绝；结果标记为成人内容。</p>
+      <div id="char-pack-row" class="char-pack" hidden>
+        <label>预设来源 <select id="char-pack"><option value="">内置预设</option></select></label>
+        <span class="hint">本机扩展包放在代码库外，默认不选；选择时会弹确认。</span>
+      </div>
+      <p id="char-pack-note" class="note" hidden></p>
       <div id="char-fields" class="char-fields"></div>
       <div id="char-extra" class="char-fields char-extra"></div>
       <div class="char-options">

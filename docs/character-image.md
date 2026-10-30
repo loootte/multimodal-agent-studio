@@ -121,7 +121,7 @@ anime style illustration, character illustration, full body, highly detailed, be
 - 页面：`apps/web/static/character.js`
 - 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`；评测 `image.character`
 
-## 摄像机位、光照与成人模式（#86）
+## 摄像机位、光照与本机扩展包（#86）
 
 ### 新字段（SFW 也能用）
 
@@ -135,54 +135,72 @@ anime style illustration, character illustration, full body, highly detailed, be
 | 氛围 | `light_mood` | 明亮 / 温暖 / 冷调 / 戏剧性 / 低调暗沉 / 梦幻 / 浪漫 / 神秘 |
 | 表情 | `expression` | 微笑 / 大笑 / 严肃 / 平静 / 害羞 / 自信 … |
 | 动作/场景 | `scene` | 自由文字，例如“在雨中撑伞” |
-| 身体细节 | `body_detail` | 只在成人模式：紧致线条 / 腹肌 / 柔软肉感 / 丰满胸部 / 宽胯 / 晒痕 / 雀斑 / 纹身 / 湿润皮肤 |
 
-这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差；`FIELDS` 仍是十二个核心字段，新字段在 `EXTRA_FIELDS` / `ADULT_FIELDS`。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
+这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差；`FIELDS` 仍是十二个核心字段，新字段在 `EXTRA_FIELDS`。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
 
-提示词顺序：风格 → 画质 → 性别/年龄/人种/体型（成人模式加身体细节）→ 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。
+提示词顺序：风格 → 画质 → 性别/年龄/人种/体型→ 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。扩展包新加的字段紧跟在它声明的 `after` 字段后面。
 
 表单里每个字段是“可搜索下拉 + 自定义输入”：输入能筛选预设（中文标签），也能直接写自己的描述；清空就用默认。提示词预览实时更新。
 
-### 成人模式
+### 本机扩展包（不进代码库）
 
-默认关闭。打开方式：
+代码库里只有通用的 SFW 预设。个人用的预设（包括分级内容）做成**本机扩展包**放在仓库外，代码库只带一个加载口子和一套安全守卫，不带任何扩展包内容。
 
-- **表单**：勾“成人模式”会弹确认框；确认后表单换成成人预设（`GET /api/character?adult=1`），出图后端锁在本机 ComfyUI。提交带 `adult: true, adult_confirmed: true`；没确认返回 400 `adult_confirm_required`。
-- **对话**：模型调 `character_image` 时填 `adult: true`。只有用户**这一句**明确要成人内容（“成人模式”“成人内容”“R18”“18+”“NSFW” 等）才放行，否则工具返回 `adult_confirm_required`。
+**放在哪**（`apps/web/local_packs.py`）：
 
-成人预设在 `toolpacks/builtin/character_image/presets_adult.json`：
+- 环境变量 `MAS_LOCAL_TOOLPACKS`：一个或多个目录（Windows 用 `;` 隔开）；设成空字符串 = 不加载。
+- 没设时：Windows `%APPDATA%\MAS\toolpacks`，其他系统 `~/.config/mas/toolpacks`。
+- 每个子目录一个 `pack.json`。目录在仓库里面的一律跳过（防止误提交）；坏包跳过并在 `GET /api/character` 的 `packs_skipped` 里说明原因。
 
-- 年龄只剩 20 岁以上的四档（青年 / 成年 / 熟龄 / 中年），没有未成年选项；体型去掉“娇小”，加“曲线”。
-- 服装分级：日常 / 内衣 / 情趣 / 半裸 / 全裸 / 特殊；姿势分级：日常 / 暗示 / 开放 / 躺卧 / 互动（互动类写明 adult partner）。
-- 背景加卧室、浴室、酒店；去掉教室。画面风格去掉 Q 版。
-- 预设一律用中性、描述性的英文。
+**pack.json**（`schema: mas.local_pack/1`，只读 JSON，不执行任何代码；不认识的键直接拒绝）：
 
-### 安全规则（成人模式，硬拦，不可配置）
+| 键 | 说明 |
+| --- | --- |
+| `name` / `label` / `version` / `description` | 包名（`[a-z][a-z0-9_]`）、中文名、版本、说明 |
+| `extends` | 目前只能是 `character_image` |
+| `rating` | `general`（默认）或 `adult` |
+| `confirm` | 表单选择这个包时弹的确认文字；`rating=adult` 必填 |
+| `min_age` | 只给 `adult`：年龄下限，默认 18，只能更高 |
+| `prompt_tail` | 只给 `adult`：提示词尾注（默认 `all characters are adults clearly over {min_age} years old, …`） |
+| `chat_keywords` | 对话里用户这一句要出现其中一个词才能开；不写 = 只能在表单里用 |
+| `verbatim` | `["outfit"]`：服装预设自带完整说法，不再加 `wearing` |
+| `fields` | 新字段：`name`、`label`、`after`（跟在哪个核心字段后）、`options`；自动补一个“自动”选项 |
+| `presets.replace` / `extend` / `forbidden` | 整组替换某字段的预设 / 追加预设 / 禁用某些内置键 |
+
+`rating=general` 的包预设里不能有露骨词，尾注仍是 SFW。
+
+**怎么用**：
+
+- **表单**：本机有扩展包时，表单顶部出现“预设来源”下拉（没有就不显示）。选包会弹 `confirm` 确认；`GET /api/character?pack=名字` 换成包的预设。`rating=adult` 的包把出图后端锁在本机 ComfyUI。提交带 `pack`、`pack_confirmed: true`；没确认返回 400 `pack_confirm_required`，包不存在返回 `pack_not_found`。
+- **对话**：有 `chat_keywords` 的包会在系统提示里列出名字。模型调 `character_image` 时填 `pack`（新字段放 `pack_fields`）；只有用户**这一句**说出包的关键词才放行，否则返回 `pack_confirm_required`。`pack_fields` 只能写包自己的新字段。
+
+### 分级守卫（`rating=adult` 的包，代码库里硬拦，扩展包改不了）
 
 | 规则 | 代码 |
 | --- | --- |
-| 年龄低于 18（未成年）或低于 20（成人模式门槛），阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
-| teen / child 预设（按键或中文标签） | `minor_unsafe` |
+| 年龄低于 18（未成年）或低于包的 `min_age`，阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
+| 内置的 teen / child 等未成年预设（按键或中文标签；包自己把它们加回来也一样拦） | `minor_unsafe` |
 | 自定义文字里有 少女、萝莉、正太、小孩、幼女、儿童、学生、loli、shota、child、teen、underage、schoolgirl、petite young 等 | `minor_unsafe` |
 | 校服 / 教室 / 学生类内容 | `minor_unsafe`（说明原因） |
 | 幼态体型：娇小、幼态、平胸幼体等 | `minor_unsafe`（说明原因） |
 | 真人、明星、熟人、版权角色（词表 + 《作品名》、@账号、英文人名规则） | `not_original_character`，“请只描述原创角色” |
-| 成人内容发第三方出图（表单、对话、或提示词本身露骨） | `nsfw_backend_not_allowed`，说明可能违反服务条款；对话路径记一条 `egress.blocked` |
-| 非成人模式写 `body_detail` | `invalid_field` |
+| 分级内容发第三方出图 | `nsfw_backend_not_allowed`，说明可能违反服务条款；对话路径记一条 `egress.blocked` |
 
-成人提示词尾注固定为 `all characters are adults clearly over 20 years old, mature adult features, original character`。
+拒绝原因里用包的 `label`（例如“XX不能画未成年角色”）。
+
+没有扩展包时，#53 的规则照旧：自定义文字露骨一律 `unsafe_content`，未成年角色不能配暴露服装或挑逗姿势。另外有一条和扩展包无关的通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，不许发第三方、结果打 `rating: adult`。
 
 ### 结果标记
 
-成人图出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板多了“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
+分级图（`rating=adult` 的包或通用兜底）出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板有“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
 
 ### 接口变化
 
-- `GET /api/character?adult=1`：成人预设；返回多了 `extra_fields`（每项带 `group`：camera / light / detail）和 `adult`。
-- `POST /api/character/preview`：`{fields, adult?}`。
-- `POST /api/sessions/{id}/character`：多了 `adult`、`adult_confirmed`。
-- `character_image` 工具（1.2.0）：多了九个字符串字段和 `adult` 布尔。
+- `GET /api/character[?pack=名字]`：返回多了 `extra_fields`（每项带 `group`：camera / light / detail / pack）、`pack`（当前包）、`packs`（本机包简介，不含预设内容）、`packs_skipped`。
+- `POST /api/character/preview`：`{fields, pack?}`。
+- `POST /api/sessions/{id}/character`：多了 `pack`、`pack_confirmed`。
+- `character_image` 工具（1.2.0）：多了八个字符串字段、`pack`（字符串）和 `pack_fields`（对象）。
 
 ### 检查
 
-`apps/web/check.py` 的 `_adult_character_cases`（单元：minor / school / original / default_sfw / order / camera_light；接口：form / chat）。评测 `image.character_adult_*`、`image.character_camera_light_prompt`。
+`apps/web/check.py` 的 `_pack_character_cases`（单元：discover / minor / school / original / default_sfw / order / camera_light；接口：form / chat）。用的是临时目录里的中性夹具包；检查开始时把 `MAS_LOCAL_TOOLPACKS` 设成空，用户自己的扩展包不会混进来。评测 `image.character_pack_*`、`image.character_camera_light_prompt`。

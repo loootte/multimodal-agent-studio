@@ -19,6 +19,7 @@ import time
 
 import character
 import image_run
+import local_packs
 import skill_page
 import store
 from packages.contracts.events import (
@@ -75,8 +76,7 @@ SYSTEM = (
     "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
     "用户要画一个角色/人物（说到性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考角色）时，调用 character_image，"
     "只填用户说到的字段，其余用默认值；拿到句柄后再 generate_image（多张先 plan_images）。"
-    "景别/角度/构图、光照、表情、动作场景也是它的字段。只有用户这一句明确要成人内容（如“成人模式”“R18”）时才填 adult=true，"
-    "成人内容只用本机出图（backend 不填）。"
+    "景别/角度/构图、光照、表情、动作场景也是它的字段。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
 _DRAFT_MARKERS = ("提示词", "内容是", "画面是", "画面：", "画面:")
@@ -701,7 +701,7 @@ def _generate_text_turn(
     pushes = {"stalls": 0, "seen": 0, "handle": "", "nudged": False, "tools": 0}
     image_turn = _wants_images("", user_text) or _image_request(user_text)
     open_turn = _open_prompt_request(user_text)
-    # #86：对话里开成人模式要用户这一句明确说要成人内容；只在本机判断，不发给谁。
+    # #86：对话里用本机扩展包要用户这一句说出包声明的关键词；只在本机判断，不发给谁。
     run._turn_text = user_text
 
     def resume(text):
@@ -1398,37 +1398,54 @@ def _execute_character(app, session_id, run, arguments) -> dict:
     """#53：模型从对话里填角色字段（没说的用默认值），拼成提示词登记成本轮句柄（1.1/1.2），再交给 generate_image。"""
     args = dict(arguments) if isinstance(arguments, dict) else {}
     source = args.pop("mode", None) or "model"
-    adult = args.pop("adult", False)
+    pack_name = args.pop("pack", None)
+    pack_fields = args.pop("pack_fields", None) or {}
     if source not in ("chat", "model"):
         return {"ok": False, "tool": "character_image",
                 "error": {"code": "invalid_parameter", "message": "mode 只能是 chat 或 model。"}}
-    if adult not in (True, False):
+    if not isinstance(pack_fields, dict):
         return {"ok": False, "tool": "character_image",
-                "error": {"code": "invalid_parameter", "message": "adult 只能是 true 或 false。"}}
-    if adult and not character.adult_consent(getattr(run, "_turn_text", "")):
-        # #86 规则 5：模型不能自己开成人模式；用户这一句没明确要成人内容就拒绝，默认仍是 SFW。
-        return {"ok": False, "tool": "character_image", "executed": False,
-                "error": {"code": "adult_confirm_required",
-                          "message": "成人模式默认关闭；用户这一句没有明确要求成人内容，不能开启。",
-                          "hint": "不带 adult 重新调用画普通角色；用户要成人内容时请他明确说“成人模式”或“R18”，或在角色表单里打开成人开关。"}}
+                "error": {"code": "invalid_parameter", "message": "pack_fields 要是对象。"}}
+    pack = None
+    if pack_name not in (None, ""):
+        pack = local_packs.get(pack_name)
+        if pack is None:
+            return {"ok": False, "tool": "character_image", "executed": False,
+                    "error": {"code": "pack_not_found", "message": "本机没有这个扩展包。",
+                              "hint": "不带 pack 重新调用画普通角色。"}}
+        if not character.pack_consent(pack, getattr(run, "_turn_text", "")):
+            # #86：模型不能自己开扩展包；用户这一句没提到包的关键词就拒绝，默认仍是内置预设（SFW）。
+            return {"ok": False, "tool": "character_image", "executed": False,
+                    "error": {"code": "pack_confirm_required",
+                              "message": f"“{pack['label']}”默认关闭；用户这一句没有明确要求，不能开启。",
+                              "hint": "不带 pack 重新调用画普通角色；要用扩展包时请用户在这一句里明确说出来，或在角色表单里选择。"}}
+    elif pack_fields:
+        return {"ok": False, "tool": "character_image",
+                "error": {"code": "invalid_parameter", "message": "pack_fields 只能和 pack 一起用。"}}
+    own = {spec["name"] for spec in (pack or {}).get("fields", [])}
+    if set(pack_fields) - own:
+        return {"ok": False, "tool": "character_image",
+                "error": {"code": "invalid_field",
+                          "message": f"pack_fields 里不认识的字段：{'、'.join(sorted(set(pack_fields) - own))}。"}}
     for body in app.sessions.local_bodies(session_id):
-        for value in args.values():
+        for value in list(args.values()) + list(pack_fields.values()):
             if isinstance(value, str) and len(body) >= 8 and (body in value or (len(value) >= 8 and value in body)):
                 return {"ok": False, "tool": "character_image",
                         "error": {"code": "local_content", "message": "字段里有本地内容，只能用它的本地句柄出图。"}}
     try:
-        composed = character.compose(args, _character_config(app), adult=adult)
+        composed = character.compose(dict(args, **pack_fields), _character_config(app), pack=pack)
     except character.CharacterError as exc:
         return {"ok": False, "tool": "character_image", "executed": False, "error": exc.public()}
     rating = composed["rating"]
-    handle = _stage(run, composed["prompt"], source, rating if adult else None)
+    rated = rating == character.RATING_ADULT
+    handle = _stage(run, composed["prompt"], source, rating if rated else None)
     print(f"character {run.run_id} {handle} {source} {len(composed['prompt'])} {rating}", file=sys.stderr)
     out = {"ok": True, "tool": "character_image", "content_handle": handle, "source": source,
            "summary": composed["summary"], "used_defaults": composed["used_defaults"], "prompt": composed["prompt"],
            "rating": rating,
            "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
-    if adult:
-        out["next"] += " 成人内容只能用本机 ComfyUI：backend 不填。"
+    if rated:
+        out["next"] += " 分级内容只能用本机 ComfyUI：backend 不填。"
     return out
 
 
@@ -1452,21 +1469,25 @@ def start_character(app, session_id: str, body) -> Run:
     seed = body.get("seed")
     if seed is not None and not (isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0):
         raise RequestError(400, "invalid_parameter", "seed 要是非负整数。")
-    adult = body.get("adult", False)
-    if adult not in (True, False):
-        raise RequestError(400, "invalid_parameter", "adult 只能是 true 或 false。")
-    if adult and body.get("adult_confirmed") is not True:
-        raise RequestError(400, "adult_confirm_required", "成人模式默认关闭，要先在弹窗里确认开启。")
-    if adult and backend != "local":
-        # #86 规则 4：露骨内容只走本机 ComfyUI。
+    pack = None
+    pack_name = body.get("pack")
+    if pack_name not in (None, ""):
+        pack = local_packs.get(pack_name)
+        if pack is None:
+            raise RequestError(400, "pack_not_found", "本机没有这个扩展包。")
+        if pack.get("confirm") and body.get("pack_confirmed") is not True:
+            raise RequestError(400, "pack_confirm_required", f"“{pack['label']}”默认关闭，要先在弹窗里确认开启。")
+    rated = bool(pack) and pack["rating"] == character.RATING_ADULT
+    if rated and backend != "local":
+        # #86：分级扩展包的内容只走本机 ComfyUI。
         raise RequestError(400, "nsfw_backend_not_allowed",
-                           "成人模式只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
+                           f"“{pack['label']}”只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
     try:
-        composed = character.compose(body.get("fields") or {}, _character_config(app), adult=adult)
+        composed = character.compose(body.get("fields") or {}, _character_config(app), pack=pack)
     except character.CharacterError as exc:
         raise RequestError(400, exc.code, exc.message) from exc
     where = "本机 ComfyUI" if backend == "local" else "第三方出图"
-    mode = "成人模式，" if adult else ""
+    mode = f"{pack['label']}，" if pack else ""
     if privacy == "local":
         text = f"定制角色出图（{mode}本地提示词，{count} 张，{where}）"
     else:
@@ -1488,7 +1509,7 @@ def start_character(app, session_id: str, body) -> Run:
                      message_id=run.message_id, modalities=["text"])
     plan = {"prompt": composed["prompt"], "privacy": privacy, "backend": backend, "count": count,
             "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body,
-            "rating": composed["rating"] if adult else None}
+            "rating": composed["rating"] if rated else None}
     threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
     return run
 
@@ -1697,7 +1718,7 @@ def _bound_prompt(bound) -> str:
 
 def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend,
                     rating=None) -> dict:
-    # #86：成人角色（rating=adult）或提示词本身露骨的都算成人内容：只许本机出图，结果打 rating=adult。
+    # #86：分级扩展包出的角色（rating=adult）或提示词本身露骨的都算成人内容：只许本机出图，结果打 rating=adult。
     if rating != character.RATING_ADULT and character.looks_adult(_bound_prompt(bound)):
         rating = character.RATING_ADULT
     if backend == "remote" and rating == character.RATING_ADULT:
@@ -2464,7 +2485,24 @@ def _model_messages(
         if named:
             system += " 引用：" + " ".join(named)
     system += catalog_suffix()
+    system += _pack_suffix()
     return [{"role": "system", "content": system}, *items]
+
+
+def _pack_suffix() -> str:
+    """#86：本机有对话可用的扩展包时，告诉模型 character_image 的 pack 怎么填。没有扩展包时一个字都不加。"""
+    try:
+        packs = [p for p in local_packs.discover()["packs"].values() if p.get("chat_keywords")]
+    except Exception:  # 扩展包坏了不影响聊天。
+        return ""
+    if not packs:
+        return ""
+    lines = []
+    for pack in packs:
+        rule = "，只能本机出图（backend 不填）" if pack["rating"] == character.RATING_ADULT else ""
+        lines.append(f"{pack['name']}（{pack['label']}{rule}）")
+    return (" 本机扩展包（character_image 的 pack 字段，额外字段放 pack_fields）：" + "；".join(lines)
+            + "。只有用户这一句明确提到时才填 pack。")
 
 
 def _cover_bodies(text: str, bodies: list[tuple[str, str]]) -> str:

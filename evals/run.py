@@ -449,12 +449,13 @@ def run_character(h: Harness, task: dict, live: bool) -> dict:
     return {"paths": ["form", "form_local", "chat"]}
 
 
-def run_character_adult(h: Harness, task: dict, live: bool) -> dict:
-    """#86：成人模式 / 摄像机位 / 光照：未成年、校服、原创、默认 SFW、顺序、表单本机+分级、对话确认+第三方拦截。"""
+def run_character_pack(h: Harness, task: dict, live: bool) -> dict:
+    """#86：本机扩展包口子 / 摄像机位 / 光照：发现与校验、分级守卫（未成年、校服、原创）、默认 SFW、顺序、
+    表单确认+本机+分级、对话关键词+第三方拦截。用的是临时目录里的中性夹具包，仓库里没有扩展包内容。"""
     try:
-        check._adult_character_cases(h.base, h.provider, h.box, h.directory, task["case"])
+        check._pack_character_cases(h.base, h.provider, h.box, h.directory, task["case"])
     except SystemExit as exc:
-        raise Failed(str(exc) or "成人模式检查失败") from exc
+        raise Failed(str(exc) or "扩展包检查失败") from exc
     return {"case": task["case"]}
 
 
@@ -1236,7 +1237,7 @@ RUNNERS = {
     "skill_mining": run_skill_mining,
     "image_skill": run_image_skill,
     "character": run_character,
-    "character_adult": run_character_adult,
+    "character_pack": run_character_pack,
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,

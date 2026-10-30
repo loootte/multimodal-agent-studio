@@ -290,58 +290,65 @@
       "fake_only": true
     },
     {
-      "id": "image.character_adult_minor_refused",
+      "id": "image.character_pack_hook_discover",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
+      "fake_only": true,
+      "case": "discover"
+    },
+    {
+      "id": "image.character_pack_minor_refused",
+      "category": "image",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "minor"
     },
     {
-      "id": "image.character_adult_school_uniform_refused",
+      "id": "image.character_pack_school_uniform_refused",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "school"
     },
     {
-      "id": "image.character_adult_original_only",
+      "id": "image.character_pack_original_only",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "original"
     },
     {
-      "id": "image.character_adult_default_sfw",
+      "id": "image.character_pack_default_sfw",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "default_sfw"
     },
     {
-      "id": "image.character_adult_prompt_order",
+      "id": "image.character_pack_prompt_order",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "order"
     },
     {
       "id": "image.character_camera_light_prompt",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "camera_light"
     },
     {
-      "id": "image.character_adult_form_local_rating",
+      "id": "image.character_pack_form_local_rating",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "form"
     },
     {
-      "id": "image.character_adult_chat_consent_remote_refused",
+      "id": "image.character_pack_chat_consent_remote_refused",
       "category": "image",
-      "kind": "character_adult",
+      "kind": "character_pack",
       "fake_only": true,
       "case": "chat"
     },
