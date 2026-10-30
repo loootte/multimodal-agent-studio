@@ -489,7 +489,42 @@ def _set_desktop_cookie(handler: BaseHTTPRequestHandler, token: str) -> None:
     )
 
 
+_DRAIN_LIMIT = 1 << 20
+
+
+def _discard_unread_body(handler: BaseHTTPRequestHandler) -> None:
+    """路由在读请求体之前就回了错误（404/401/403/415…）时，把没读的请求体读掉。
+
+    不读的话：HTTP/1.1 长连接上剩下的字节会被当成下一个请求行；Windows 上带着未读数据关 socket
+    会发 RST，客户端常在读响应时报 ConnectionAbortedError（WinError 10053）。太大的就不读，直接断开。
+    """
+    if getattr(handler, "_mas_body_read", False):
+        return
+    handler._mas_body_read = True
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except (AttributeError, TypeError, ValueError):
+        length = 0
+    if length <= 0:
+        return
+    if length > _DRAIN_LIMIT:
+        handler.close_connection = True
+        return
+    try:
+        handler.rfile.read(length)
+    except OSError:
+        handler.close_connection = True
+
+
 def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
+    handler._mas_body_read = False
+    try:
+        _dispatch_inner(handler, app, method)
+    finally:
+        _discard_unread_body(handler)
+
+
+def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
     try:
         parsed = urllib.parse.urlparse(handler.path)
         path = parsed.path
@@ -872,6 +907,7 @@ def _read_json(handler: BaseHTTPRequestHandler, max_body: int = _MAX_BODY) -> di
     if length < 0 or length > max_body:
         raise chat_run.RequestError(413, "payload_too_large", "这条请求太长了。")
     raw = handler.rfile.read(length) if length else b""
+    handler._mas_body_read = True
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
