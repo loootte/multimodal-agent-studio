@@ -9,6 +9,7 @@ import time
 import uuid
 
 from packages.contracts.events import (
+    EVENT_CONTEXT_COMPACTED,
     EVENT_MESSAGE_COMPLETED,
     EVENT_MESSAGE_DELTA,
     EVENT_RUN_FAILED,
@@ -23,7 +24,7 @@ from services.gateway import GatewayError, describe, stream as gateway_stream
 from services.gateway.openai_chat import reject_unsupported
 from services.runtime.budget import Budget, Clock
 from services import telemetry
-from services.runtime import injection, trace
+from services.runtime import compaction as context, injection, trace
 from services.runtime.tools import egress_preview, execute_tool, openai_tools, tool_mutates, validate_arguments
 
 
@@ -59,12 +60,17 @@ def _run(
     run_id: str | None = None,
     validate=None,
     choose=None,
+    compaction=None,
 ):
     """产出统一事件。模型文本里说已经执行，不算执行。
 
     choose(messages) 可选：每一步之前返回 {"tool_choice": ..., "note": ...}，用来在运行时层面
     强制这一步调用某个工具（例如多智能体模式下编排者必须先 delegate）。供应商不接受强制时，
     这一步自动退回 auto 重试一次，之后不再强制。
+
+    compaction（14.B #79）：None 用默认（模型 context_limit 的 70%），False 关闭，也可以传 Compaction / dict。
+    估算没超过阈值时请求和以前逐字节一致；超过时裁剪较早的大工具结果、把较早轮次压成摘要，
+    摘要过本地正文检查，命中就退回不压缩。只记 context.compacted（条数、token 数），不记正文。
     """
     req = normalize(request)
     run_id = run_id or new_run_id()
@@ -91,6 +97,10 @@ def _run(
     except GatewayError as exc:
         yield _failed(run_id, exc.code, exc.message)
         return
+    compactor = context.of(compaction)
+    threshold = compactor.threshold(describe(req["model"])) if compactor else None
+    fixed = context.tokens(req.get("system") or "") + context.tokens(
+        json.dumps(req.get("tools") or [], ensure_ascii=False, sort_keys=True))
     forcing = callable(choose)
     while True:
         if cancel is not None and cancel.is_set():
@@ -101,6 +111,10 @@ def _run(
             yield _failed(run_id, "budget_exceeded", reason)
             return
         clock.add_step()
+        if threshold:
+            event = _compact(run_id, messages, compactor, max(0, threshold - fixed), local_bodies)
+            if event:
+                yield event
         step = {
             "model": req["model"],
             "system": req.get("system"),
@@ -199,6 +213,29 @@ def _run(
         clock.started += time.monotonic() - tool_started
         if stopped:
             return
+
+
+def _compact(run_id, messages, compactor, threshold, local_bodies):
+    """超过阈值就就地换成压缩后的消息，返回 context.compacted 事件；没压缩返回 None。"""
+    try:
+        compacted, info = context.compact(messages, compactor, threshold, local_bodies=local_bodies)
+    except Exception as exc:  # 压缩出错不影响这一步：照原样发（网关照常检查）
+        telemetry.record("context.compaction_failed", error_code=type(exc).__name__)
+        return None
+    if info.get("blocked"):
+        # 摘要或裁剪结果里出现本地正文：退回不压缩，记安全事件（只有原因码）。
+        telemetry.record("context.compaction_blocked", error_code=info["blocked"],
+                         messages=info.get("messages_before"), tokens=info.get("tokens_before"))
+        from services.gateway import egress
+
+        egress.security_event(info["blocked"], "chat_completion")
+        return None
+    if compacted is None:
+        return None
+    messages[:] = compacted
+    fields = {key: info.get(key) for key in context.EVENT_FIELDS}
+    telemetry.record(EVENT_CONTEXT_COMPACTED, **fields)
+    return {"type": EVENT_CONTEXT_COMPACTED, "run_id": run_id, **fields}
 
 
 def _asks_confirm(mutating, name, arguments) -> bool:

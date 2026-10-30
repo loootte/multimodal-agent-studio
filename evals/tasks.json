@@ -617,6 +617,21 @@
       "fake_only": true,
       "case": "untrusted_result",
       "marker": "INJECT-MCP-1e2f"
+    },
+    {
+      "id": "runtime.compaction_keeps_plan",
+      "category": "runtime",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "keeps_plan"
+    },
+    {
+      "id": "security.compaction_no_local_body",
+      "category": "security",
+      "kind": "compaction",
+      "fake_only": true,
+      "case": "no_local_body",
+      "marker": "LOCAL-COMPACT-3d9f"
     }
   ]
 }

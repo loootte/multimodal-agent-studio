@@ -1412,6 +1412,163 @@ def run_mcp(h: Harness, task: dict, live: bool) -> dict:
             shutil.rmtree(source, ignore_errors=True)
 
 
+def _compaction_history(turns: int, marker: str = "") -> list:
+    """一段很长的历史：用户问、助手答、带长文本的工具结果（结构字段里有句柄和 artifact_id）。"""
+    from services.runtime import injection
+
+    history = []
+    for index in range(turns):
+        history.append({"role": "user", "parts": [{"type": "text", "text": f"第 {index} 轮：帮我查一下资料 {marker}"}]})
+        history.append({"role": "assistant", "parts": [{"type": "text", "text": "好的，我查一下。" + "说明" * 40}]})
+        history.append(injection.tool_result_message("lookup_demo", {
+            "ok": True, "tool": "lookup_demo", "artifact_id": f"art_{index:08x}",
+            "content_handle": "c_" + f"{index:02x}" * 8, "text": "很长的检索结果。" * 120,
+        }))
+    return history
+
+
+def _compaction_flow(*, history, compaction, local_bodies=None, budget=None, plan=3):
+    """脚本模型：plan_images → plan 张 generate_image → 收尾。宿主状态（计划、已出张数）只在 execute 里。"""
+    import threading
+
+    from services.runtime.loop import new_run_id, run as runtime_run
+
+    replies = [[{"type": "tool.requested", "name": "plan_images", "arguments": {"count": plan}}]]
+    replies += [[{"type": "tool.requested", "name": "generate_image",
+                  "arguments": {"content_handle": "c_" + "ab" * 8}}] for _ in range(plan)]
+    replies += [[{"type": "message.delta", "text": "做完了"}]]
+    import copy
+
+    from services.gateway import registry
+
+    class Snapshot(check._ScriptAdapter):
+        """记下每次请求发出那一刻的副本（运行时会就地改消息列表）。"""
+
+        def stream(self, request, **kwargs):
+            self.calls.append(copy.deepcopy(request))
+            replies = self.replies or []
+            index = len(self.calls) - 1
+            yield from (replies[index] if index < len(replies) else [{"type": "message.delta", "text": "额外一步"}])
+
+    adapter = Snapshot(replies)
+    check._install_script(registry, "eval-compaction", adapter)
+    state = {"plan": 0, "images": 0, "generate_calls": 0}
+
+    def execute(name, arguments):
+        if name == "plan_images":
+            state["plan"] = int(arguments.get("count") or 0)
+            return {"ok": True, "tool": name, "images_total": state["plan"], "images_done": state["images"]}
+        if name == "generate_image":
+            state["generate_calls"] += 1
+            state["images"] += 1  # 一次调用一张
+            return {"ok": True, "tool": name, "artifact_id": "art_" + f"{state['images']:08x}",
+                    "images_done": state["images"], "images_total": state["plan"]}
+        return {"ok": False, "tool": name, "error": {"code": "unknown_tool"}}
+
+    run_id = new_run_id()
+    events = list(runtime_run(
+        {"model": "eval-compaction", "messages": history, "tools": []},
+        api_key=check.SECRET, cancel=threading.Event(), timeout_sec=2, run_id=run_id,
+        execute=execute, mutating=lambda name, arguments=None: False, validate=lambda name, arguments: None,
+        compaction=compaction, local_bodies=local_bodies, budget=budget,
+    ))
+    from services import telemetry
+
+    records = [item for item in telemetry.read(limit=0) if item.get("run_id") == run_id]
+    return events, adapter.calls, state, records
+
+
+def _request_tokens(request) -> int:
+    from services.runtime import compaction
+
+    return compaction.tokens_in(request.get("messages") or [])
+
+
+def run_compaction(h: Harness, task: dict, live: bool) -> dict:
+    """14.B #79：上下文压缩。
+    keeps_plan：超过阈值的长对话压缩后继续跑完，请求 token 明显下降；plan_images 计划和句柄清单固定保留，
+      张数等于计划、每次 generate_image 一张；不压缩时同样的 token 预算会用尽；阈值以下请求逐字节不变；
+    no_local_body：摘要里被塞进本地正文时拦下并记录、退回不压缩，本地正文没进任何请求；事件不带正文。"""
+    from services.runtime.budget import Budget
+    from services.runtime.compaction import Compaction, EVENT_FIELDS, SUMMARY_CHANNEL
+
+    case = task["case"]
+    try:
+        if case == "keeps_plan":
+            history = _compaction_history(12)
+            events, calls, state, records = _compaction_flow(
+                history=history, compaction=Compaction(limit=2000), budget=Budget(steps=12, tokens=3000), plan=4)
+            expect(events[-1].get("type") == "message.completed", f"压缩后没跑完：{events[-1]}")
+            compacted = [e for e in events if e.get("type") == "context.compacted"]
+            expect(compacted, "超过阈值却没有压缩")
+            first, last = _request_tokens(calls[0]), _request_tokens(calls[-1])
+            expect(_request_tokens({"messages": history}) > 2000 * 0.7, "历史不够长，测不到阈值")
+            expect(first < _request_tokens({"messages": history}) * 0.5, "压缩后请求 token 没有明显下降")
+            expect(last <= 2000, f"后续请求仍超上限：{last}")
+            expect(any(e.get("turns_compacted") for e in compacted), "没有把较早轮次压成摘要")
+            expect(state["plan"] == 4 and state["images"] == 4 and state["generate_calls"] == 4,
+                   f"张数不等于计划或一次调用不止一张：{state}")
+            final = calls[-1]["messages"]
+            texts = ["".join(p.get("text") or "" for p in m.get("parts") or []) for m in final]
+            expect(any("工具结果 plan_images" in t and '"images_total": 4' in t for t in texts), "plan_images 计划没有固定保留")
+            summary = [t for t, m in zip(texts, final) if m.get("channel") == SUMMARY_CHANNEL]
+            expect(summary and "c_" + "00" * 8 in summary[0], "摘要里没有句柄清单")
+            expect("很长的检索结果。" * 3 not in "".join(texts), "大工具结果没有裁剪")
+            for event in compacted:
+                extra = set(event) - set(EVENT_FIELDS) - {"type", "run_id"}
+                expect(not extra and all(isinstance(event.get(k), (int, type(None))) for k in EVENT_FIELDS),
+                       f"context.compacted 带了多余字段：{extra}")
+            expect(any(r.get("kind") == "context.compacted" for r in records), "遥测里没有 context.compacted")
+            # 同样预算不压缩会用尽：说明是压缩让长对话跑完的。
+            events_off, _calls, _state, _r = _compaction_flow(
+                history=history, compaction=False, budget=Budget(steps=12, tokens=3000), plan=4)
+            expect(events_off[-1].get("code") == "budget_exceeded", "不压缩时这段对话本该超 token 预算")
+            # 阈值以下：默认压缩开着，请求与关掉压缩时逐字节一致。
+            short = _compaction_history(1)
+            _e1, on, _s1, _r1 = _compaction_flow(history=short, compaction=None)
+            _e2, off, _s2, _r2 = _compaction_flow(history=short, compaction=False)
+            dump = lambda calls: json.dumps(calls, ensure_ascii=False, sort_keys=True)
+            expect(dump(on) == dump(off), "阈值以下请求和不压缩时不一致")
+            expect(not any(e.get("type") == "context.compacted" for e in _e1), "阈值以下不该压缩")
+            return {"tokens_history": _request_tokens({"messages": history}), "tokens_first": first,
+                    "tokens_last": last, "images": state["images"], "compactions": len(compacted)}
+        if case == "no_local_body":
+            marker = task.get("marker", "LOCAL-COMPACT")
+            body = f"这是只留在本机的私密正文 {marker} 不许出本机"
+            history = _compaction_history(12)
+            leaky = Compaction(limit=2000, summarize=lambda messages: "摘要：" + body)
+            events, calls, state, records = _compaction_flow(
+                history=history, compaction=leaky, local_bodies=[body], plan=1)
+            expect(not any(e.get("type") == "context.compacted" for e in events), "带本地正文的摘要被采用了")
+            sent = json.dumps(calls, ensure_ascii=False)
+            expect(marker not in sent and body not in sent, "本地正文进了模型请求")
+            kinds = [r.get("kind") for r in records]
+            expect("context.compaction_blocked" in kinds, "没有记录 context.compaction_blocked")
+            expect(any(r.get("kind") == "security.egress_denied" and r.get("error_code") in
+                       ("local_content", "local_content_encoded", "local_fingerprint") for r in records),
+                   "没有记录安全事件")
+            expect(marker not in json.dumps(records, ensure_ascii=False), "遥测里出现了本地正文")
+            expect(_request_tokens(calls[0]) == _request_tokens({"messages": history}), "被拦后应当退回不压缩")
+            # 编码后的正文同样拦下。
+            import base64
+
+            encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+            sneaky = Compaction(limit=2000, summarize=lambda messages: "摘要 " + encoded)
+            events2, calls2, _s, records2 = _compaction_flow(
+                history=history, compaction=sneaky, local_bodies=[body], plan=1)
+            expect(not any(e.get("type") == "context.compacted" for e in events2), "编码后的本地正文摘要被采用了")
+            expect(encoded not in json.dumps(calls2), "编码后的本地正文进了模型请求")
+            # 默认摘要器（不含本地正文）照常压缩。
+            events3, _c, _s3, _r3 = _compaction_flow(
+                history=history, compaction=Compaction(limit=2000), local_bodies=[body], plan=1)
+            expect(any(e.get("type") == "context.compacted" for e in events3), "正常摘要被误拦")
+            return {"blocked": True, "requests": len(calls)}
+        raise Failed(f"不认识的 compaction 用例：{case}")
+    finally:
+        _restore_gateway()
+
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -1439,6 +1596,7 @@ RUNNERS = {
     "storage_encryption": run_storage_encryption,
     "desktop_token": run_desktop_token,
     "desktop_security": run_desktop_security,
+    "compaction": run_compaction,
 }
 
 

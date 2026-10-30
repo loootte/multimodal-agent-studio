@@ -80,7 +80,9 @@
         "security.mcp_local_content_blocked": true,
         "security.mcp_schema_change_reauth": true,
         "security.mcp_confirm_always": true,
-        "security.mcp_untrusted_result": true
+        "security.mcp_untrusted_result": true,
+        "runtime.compaction_keeps_plan": true,
+        "security.compaction_no_local_body": true
       }
     }
   }
