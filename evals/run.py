@@ -470,6 +470,16 @@ def run_form_tool_install(h: Harness, task: dict, live: bool) -> dict:
     return {"case": task["case"]}
 
 
+def run_tool_ui(h: Harness, task: dict, live: bool) -> dict:
+    """#89：工具自带的网页面板（ui.panel，文件在工具目录 ui/ 里）：/api/tools/<name>/ui/ 路径越界被拒、没声明的文件 404、
+    apps/web/static 里没有角色定制的代码、装上的面板要 ui 权限且在沙箱 iframe 里、面板入口来自 /api/tools 目录。"""
+    try:
+        check._tool_ui_cases(h.base, task["case"])
+    except SystemExit as exc:
+        raise Failed(str(exc) or "工具面板检查失败") from exc
+    return {"case": task["case"]}
+
+
 def run_skill_mining(h: Harness, task: dict, live: bool) -> dict:
     """#40：夹具轨迹挖出已知模式；噪声不成候选；无泄漏；skills/ 不变。"""
     from services.meta.mine import Miner
@@ -1250,6 +1260,7 @@ RUNNERS = {
     "character": run_character,
     "form_tool": run_form_tool,
     "form_tool_install": run_form_tool_install,
+    "tool_ui": run_tool_ui,
     "egress_audit": run_egress_audit,
     "handle_scope": run_handle_scope,
     "egress_hardening": run_egress_hardening,

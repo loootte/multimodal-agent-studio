@@ -24,11 +24,11 @@
 | `mutating` | 是否改外部状态 |
 | `confirm` | `always`、`never` 或 `by_args`（配 `confirm_args`，参数里出现这些键才确认） |
 | `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现；`{"kind": "module", "module": "tool.py"}` 表单工具，按[工具代码契约](tool-code-contract.md)实现 `catalog` / `preview` / `run`（#86）。`module` 必须是工具目录里的 .py 文件，解开符号链接以后也要在目录里 |
-| `ui` | 只给 `module`：`{"form", "preview", "title", "run_label"}`，`form: true` 才出现在网页“定制”表单里 |
+| `ui` | 只给 `module`：`{"form", "preview", "title", "run_label", "panel"}`。`panel` 是工具目录 `ui/` 里自带的网页面板（`{"script": "ui/panel.js", "style": "ui/panel.css", "title", "mount": "dialog"}`），要同时声明 `permissions.ui`，见[工具代码契约 · 网页面板](tool-code-contract.md#网页面板uipanelissue-89) |
 | `content` | 只给 `module`：`{"rating": "general"}` 或 `{"rating": "adult", "min_age", "label", "confirm", "chat_keywords"}`；`adult` 一律受宿主分级守卫约束，见[工具代码契约](tool-code-contract.md#宿主守卫工具代码改不了) |
 | `config` | 配置字段，格式同 #28（`int`、`string`、`secret` 等） |
 | `requires.backends` | 依赖的后端名 |
-| `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`。最后一项必须为 `false` |
+| `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`、`ui`。`send_local_to_model` 必须为 `false`；`ui` 表示带网页面板（安装的面板只在沙箱 iframe 里跑） |
 | `parameter_sources` | 参数枚举的来源，例如 `style ← comfyui.styles` |
 | `mcp` | 保留，未实现 |
 

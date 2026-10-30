@@ -30,6 +30,7 @@ import chat_run
 import desktop_notify
 import image_run
 import resources
+import tool_panels
 import store
 import tool_config
 from packages.artifacts import ArtifactStore
@@ -51,7 +52,7 @@ _RUN_CONTENT = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/content$")
 _RUN_CONFIRM = re.compile(r"^/api/runs/(r_[0-9a-f]{32})/confirm$")
 _ARTIFACT = re.compile(r"^/sessions/(s_[0-9a-f]{32})/artifacts/(art_[0-9a-f]{32})$")
 _STATIC = {
-    "character.js": "text/javascript; charset=utf-8",
+    "panels.js": "text/javascript; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "markdown.js": "text/javascript; charset=utf-8",
     "resources.js": "text/javascript; charset=utf-8",
@@ -646,6 +647,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             if parts[1:] in (["catalog"], ["preview"]):
                 _form_tool_route(handler, app, method, name, parts[1])
                 return
+            if len(parts) > 1 and parts[1] == "ui":  # 工具自带的网页面板（ui.panel）
+                _tool_panel_route(handler, method, name, parts[2:])
+                return
             if name not in tool_config.declarations():  # 工具名或后端名
                 _send_json(handler, 404, {"code": "not_found", "message": "没有这个工具。"})
                 return
@@ -826,6 +830,26 @@ def _owned_session(app: App, session_id: str) -> dict:
     if not app.sessions.belongs_to(session, user["user_id"]):
         raise chat_run.RequestError(404, "not_found", "找不到这个会话。")
     return session
+
+
+def _tool_panel_route(handler: BaseHTTPRequestHandler, method: str, name: str, rest: list) -> None:
+    """GET /api/tools/<name>/ui/<file>：只给清单声明的面板文件，规则见 apps/web/tool_panels.py。"""
+    if method != "GET":
+        _send_json(handler, 405, {"code": "method_not_allowed", "message": "不支持这个方法。"})
+        return
+    try:
+        raw, headers = tool_panels.resolve(name, list(rest))
+    except tool_panels.PanelError as exc:
+        _send_json(handler, exc.status, {"code": exc.code, "message": exc.message})
+        return
+    handler.send_response(200)
+    for key, value in headers.items():
+        handler.send_header(key, value)
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(raw)
 
 
 def _form_tool_route(handler: BaseHTTPRequestHandler, app, method: str, name: str, action: str) -> None:

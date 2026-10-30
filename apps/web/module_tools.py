@@ -53,18 +53,41 @@ def describe(pack) -> dict:
     if info["rating"] == content_guard.RATING_ADULT:
         out.update(label=info["label"], min_age=info["min_age"], confirm=str(info.get("confirm") or ""),
                    local_only=True)
+    panel = panel_info(pack)
+    if panel:
+        out["panel"] = panel
+    return out
+
+
+def panel_info(pack) -> dict | None:
+    """工具自带的网页面板（ui.panel，见 docs/tool-code-contract.md「网页面板」）。
+    只在清单声明了面板、并且 ui 权限生效时给出。内置面板同源加载（script/style）；
+    已安装的面板只能在沙箱 iframe 里跑（frame），它的文件只按纯文本给人看。"""
+    spec = _packs().panel_spec(pack.manifest)
+    if not spec or "ui" not in pack.effective():
+        return None
+    base = f"/api/tools/{pack.name}/"
+    out = {"title": str(spec.get("title") or (pack.manifest.get("ui") or {}).get("title") or pack.name),
+           "mount": spec.get("mount", "dialog"), "isolated": not pack.builtin}
+    if pack.builtin:
+        out["script"] = base + spec["script"]
+        if spec.get("style"):
+            out["style"] = base + spec["style"]
+    else:
+        out["frame"] = base + "ui/frame"
     return out
 
 
 def form_tools() -> list[dict]:
-    """设置/表单里可选的工具：ui.form=true 的 module 工具，不可用的标出原因。"""
+    """设置/表单里可选的工具：ui.form=true 或带面板（ui.panel）的 module 工具，不可用的标出原因。"""
     out = []
     try:
         found = _packs().discover()
     except Exception:
         return out
     for pack in found:
-        if pack.manifest["entry"]["kind"] != "module" or not (pack.manifest.get("ui") or {}).get("form"):
+        ui = pack.manifest.get("ui") or {}
+        if pack.manifest["entry"]["kind"] != "module" or not (ui.get("form") or ui.get("panel")):
             continue
         item = describe(pack)
         problem = _packs().gate(pack)

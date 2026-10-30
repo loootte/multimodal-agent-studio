@@ -158,14 +158,15 @@ async function sendMessage() {
 }
 
 // #53/#86 表单工具：同样的流式回合，只是请求发到 /tools/<name>/run，不经过对话模型。
-async function sendCharacter(body, label, tool) {
+// 工具面板（panels.js）经 window.MASHost.runFormTool 调这里；页面本身不认识任何具体工具。
+async function runFormTool(tool, body, label) {
   if (state.sending) return false;
+  if (!tool) return false;
   if (!state.currentId) await createSession(false);
-  const name = encodeURIComponent(tool || "character_image");
-  await runTurn(`/api/sessions/${state.currentId}/tools/${name}/run`, body, label, []);
+  await runTurn(`/api/sessions/${state.currentId}/tools/${encodeURIComponent(tool)}/run`, body, label, []);
   return true;
 }
-window.sendCharacter = sendCharacter;
+window.MASHost = Object.freeze({ runFormTool });
 
 async function runTurn(url, body, userText, attachments) {
   state.stopped = false;
@@ -2116,7 +2117,8 @@ async function acceptToolPack() {
     closeToolPackReview();
     await refreshToolList(info.name);
     const where = info.code ? "代码在沙箱子进程里运行" : "不含代码";
-    toolNote(`已安装 ${info.name}（${where}${info.ui && info.ui.form ? "；在「定制角色」表单顶部选它" : ""}）。`);
+    toolNote(`已安装 ${info.name}（${where}${info.ui && info.ui.panel ? "；侧栏多了它的面板入口" : ""}）。`);
+    document.dispatchEvent(new Event("mas:tools-changed"));
   } catch (error) {
     toolNote(error.message || "安装失败。");
   }

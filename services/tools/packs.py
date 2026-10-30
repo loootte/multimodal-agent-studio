@@ -42,7 +42,11 @@ BACKEND_SCHEMA = "mas.backend/1"
 MANIFEST = "tool.json"
 LEGACY_PRESET = "pack.json"  # #86 早期的预设包（只有 pack.json）：已不再支持，安装时给出说明
 GRANTS = ".granted.json"
-PERMISSIONS = ("read_local_content", "network", "write_files", "send_local_to_model")
+PERMISSIONS = ("read_local_content", "network", "write_files", "send_local_to_model", "ui")
+# 工具自带的网页面板（ui.panel）：只能是工具目录 ui/ 里的一个 .js 和一个可选的 .css，各不超过 PANEL_MAX_BYTES。
+PANEL_FILE = re.compile(r"^ui/[A-Za-z0-9][A-Za-z0-9_-]{0,47}\.(js|css)$")
+PANEL_MAX_BYTES = 256 * 1024
+PANEL_MOUNTS = ("dialog",)
 CONFIRM = ("always", "never", "by_args")
 FIELD_TYPES = ("string", "int", "enum", "path", "secret")
 BLOCKED_EXTERNAL = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
@@ -90,6 +94,10 @@ PERMISSION_REVIEW = {
     "read_local_content": ("读本地内容", "high",
                            "第三方工具包暂时拿不到本地内容：沙箱禁止它直接读会话和数据目录，句柄接口还没开放给第三方包。"),
     "send_local_to_model": ("把本地内容发给模型", "forbidden", "不允许。"),
+    "ui": ("网页面板", "medium",
+           "会在网页侧栏加一个入口，打开它自带的面板（ui/ 里的脚本和样式）。第三方面板只在隔离的沙箱 iframe 里运行："
+           "拿不到聊天页面、Cookie、本地内容，不能联网，只能经宿主的面板接口读目录、预览提示词和发起出图；"
+           "出图仍然经过宿主的内容检查和确认。"),
 }
 SANDBOX_FACTS = (
     "在单独的子进程里运行，超时会被停止。",
@@ -194,7 +202,7 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     if entry and isinstance(entry, dict) and entry.get("kind") == "python" and params is None and not builtin:
         problems.append("第三方工具必须声明 parameters。")
     kind = entry.get("kind") if isinstance(entry, dict) else None
-    problems.extend(_ui_problems(data.get("ui"), kind))
+    problems.extend(_ui_problems(data.get("ui"), kind, data.get("permissions")))
     problems.extend(_content_problems(data.get("content"), kind))
     config = data.get("config", [])
     if not isinstance(config, list):
@@ -225,15 +233,21 @@ def _relative_inside(module: str) -> bool:
         and ":" not in module and ".." not in parts
 
 
-def _ui_problems(ui, kind) -> list[str]:
-    """ui：网页上的通用表单（#86）。只给 entry.kind=module 的工具。"""
+def _ui_problems(ui, kind, perms=None) -> list[str]:
+    """ui：网页上的通用表单（#86）和工具自带的面板（ui.panel）。只给 entry.kind=module 的工具。
+    声明了 ui.panel 就必须声明 permissions.ui=true（内置也一样），反过来也是。"""
+    wants_ui = isinstance(perms, dict) and perms.get("ui") is True
     if ui is None:
-        return []
+        return ["permissions.ui 只给声明了 ui.panel 的工具。"] if wants_ui else []
     if kind != "module":
         return ["ui 只能用在 entry.kind=module 的工具上。"]
-    if not isinstance(ui, dict) or set(ui) - {"form", "preview", "title", "run_label"}:
-        return ["ui 只能有 form、preview、title、run_label。"]
-    out = []
+    if not isinstance(ui, dict) or set(ui) - {"form", "preview", "title", "run_label", "panel"}:
+        return ["ui 只能有 form、preview、title、run_label、panel。"]
+    out = _panel_problems(ui.get("panel"))
+    if "panel" in ui and not wants_ui:
+        out.append("声明了 ui.panel 就要声明 permissions.ui=true（安装时要单独确认）。")
+    if "panel" not in ui and wants_ui:
+        out.append("permissions.ui 只给声明了 ui.panel 的工具。")
     for key in ("form", "preview"):
         if key in ui and not isinstance(ui[key], bool):
             out.append(f"ui.{key} 必须是 true/false。")
@@ -241,6 +255,68 @@ def _ui_problems(ui, kind) -> list[str]:
         if key in ui and (not isinstance(ui[key], str) or not ui[key].strip() or len(ui[key]) > 40):
             out.append(f"ui.{key} 必须是 1-40 字的文字。")
     return out
+
+
+def _panel_problems(panel) -> list[str]:
+    if panel is None:
+        return []
+    if not isinstance(panel, dict) or set(panel) - {"script", "style", "title", "mount"} or "script" not in panel:
+        return ["ui.panel 只能有 script（必填）、style、title、mount。"]
+    out = []
+    for key, suffix in (("script", ".js"), ("style", ".css")):
+        if key in panel and (not isinstance(panel[key], str) or not PANEL_FILE.match(panel[key])
+                             or not panel[key].endswith(suffix)):
+            out.append(f"ui.panel.{key} 必须是 ui/ 目录里的 {suffix} 文件（形如 ui/panel{suffix}，不能有子目录和 ..）。")
+    if "title" in panel and (not isinstance(panel["title"], str) or not panel["title"].strip() or len(panel["title"]) > 40):
+        out.append("ui.panel.title 必须是 1-40 字的文字。")
+    if panel.get("mount", "dialog") not in PANEL_MOUNTS:
+        out.append(f"ui.panel.mount 只能是 {'、'.join(PANEL_MOUNTS)}。")
+    return out
+
+
+def panel_spec(data: dict) -> dict | None:
+    ui = data.get("ui") if isinstance(data, dict) else None
+    panel = ui.get("panel") if isinstance(ui, dict) else None
+    return panel if isinstance(panel, dict) else None
+
+
+def panel_files(folder: str, data: dict) -> dict:
+    """声明的面板文件：清单里的相对路径 -> 真实路径。只有这几个文件能被网页取到（白名单）。
+    解开符号链接以后必须还在工具目录的 ui/ 里，是普通文件，不超过 PANEL_MAX_BYTES；否则抛 PackError。"""
+    panel = panel_spec(data)
+    if not panel:
+        return {}
+    root = os.path.realpath(os.path.join(folder, "ui"))
+    out = {}
+    for key in ("script", "style"):
+        rel = panel.get(key)
+        if not rel:
+            continue
+        if not isinstance(rel, str) or not PANEL_FILE.match(rel):
+            raise PackError("invalid_manifest", f"ui.panel.{key} 不合格。")
+        path = os.path.realpath(os.path.join(folder, rel))
+        try:
+            inside = os.path.normcase(os.path.commonpath([root, path])) == os.path.normcase(root)
+        except ValueError:
+            inside = False
+        if not inside or path == root:
+            raise PackError("invalid_manifest", f"ui.panel.{key} 指向 ui/ 目录外面。")
+        if not os.path.isfile(path):
+            raise PackError("invalid_manifest", f"ui.panel.{key} 指向的文件不存在：{rel}。")
+        if os.path.getsize(path) > PANEL_MAX_BYTES:
+            raise PackError("invalid_manifest", f"ui.panel.{key} 太大（上限 {PANEL_MAX_BYTES // 1024} KB）。")
+        out[rel] = path
+    return out
+
+
+def panel_listing(folder: str, data: dict) -> list[dict]:
+    """安装审阅里给人看的面板文件：名字、大小、sha256。"""
+    items = []
+    for rel, path in panel_files(folder, data).items():
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        items.append({"file": rel, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    return items
 
 
 def _content_problems(content, kind) -> list[str]:
@@ -282,6 +358,10 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
     entry = data.get("entry") or {}
     if entry.get("kind") not in ("python", "module"):
         return None
+    try:
+        panel_files(folder, data)
+    except PackError as exc:
+        return exc.message
     root = os.path.realpath(folder)
     module = os.path.realpath(os.path.join(root, entry["module"]))
     try:
@@ -560,7 +640,7 @@ def authorize(pack: Pack) -> dict | None:
     return None
 
 
-def review(data: dict, code: bool = False) -> dict:
+def review(data: dict, code: bool = False, panel: list | None = None) -> dict:
     """安装前的权限审阅：每个权限的白话说明和风险，加上沙箱会怎样限制它。
     #86：包含代码、成人分级也各是一项，要单独勾选（permission 分别是 code / rating_adult）。"""
     perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
@@ -568,6 +648,8 @@ def review(data: dict, code: bool = False) -> dict:
     items = []
     for key in wanted:
         label, risk, effect = PERMISSION_REVIEW[key]
+        if key == "ui" and panel:
+            effect += " 面板文件：" + "、".join(f"{p['file']}（{p['bytes']} 字节，sha256 {p['sha256'][:12]}…）" for p in panel) + "。"
         items.append({"permission": key, "label": label, "risk": risk, "effect": effect})
     if code:
         module = ((data.get("entry") or {}).get("module")) or "（包里的 .py 文件）"
@@ -581,7 +663,7 @@ def review(data: dict, code: bool = False) -> dict:
                                 "结果标记为成人内容；每次使用还要再确认。宿主强制：不能画未成年或像未成年的角色、"
                                 "校服/学生、幼态体型，不能参考真人或版权角色，不能发给第三方出图服务。"
                                 + (" 作者说明：" + str(content.get("confirm")) if content.get("confirm") else "")})
-    denied = [PERMISSION_REVIEW[k][0] for k in PERMISSIONS if k not in wanted and k != "send_local_to_model"]
+    denied = [PERMISSION_REVIEW[k][0] for k in PERMISSIONS if k not in wanted and k not in ("send_local_to_model", "ui")]
     out = {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
     # 12.E：联网 / 读本地内容的包每次调用都弹确认，同一轮里也不复用上一次的同意。
     out["confirm_every_call"] = _sensitive(data)
@@ -715,10 +797,13 @@ def inspect(source: str) -> dict:
         if not isinstance(data, dict):
             raise PackError("invalid_manifest", "清单必须是 JSON 对象。")
         problems = validate_manifest(data)
+        panel = []
         if not problems:
             problem = entry_problem(folder, data)
             if problem:
                 problems.append(problem)
+            else:
+                panel = panel_listing(folder, data)
         permissions = sorted(k for k, v in (data.get("permissions") or {}).items() if v is True) \
             if isinstance(data, dict) and isinstance(data.get("permissions"), dict) else []
         code = isinstance(data, dict) and has_code(folder, data)
@@ -731,7 +816,8 @@ def inspect(source: str) -> dict:
                    "accept": accept, "ui": data.get("ui") if isinstance(data.get("ui"), dict) else {},
                    "target": os.path.join(installed_dir(), str(data.get("name") or "")),
                    "requires": data.get("requires") or {}, "problems": problems,
-                   "review": review(data, code=code) if isinstance(data, dict) else None}
+                   "panel": panel,
+                   "review": review(data, code=code, panel=panel) if isinstance(data, dict) else None}
         if not problems:
             if find(data["name"]) is not None and not os.path.isdir(os.path.join(installed_dir(), data["name"])):
                 summary["problems"] = problems = ["和内置工具重名。"]

@@ -3738,6 +3738,7 @@ def _image_cases(base: str, provider, directory: str, app=None) -> None:
         _resources_case(base, provider, directory)
         _character_cases(base, provider, comfy.box, directory)
         _pack_character_cases(base, provider, comfy.box, directory)
+        _tool_ui_cases(base)
         provider.mode = "ok"
     finally:
         comfy.shutdown()
@@ -6807,6 +6808,240 @@ def _desktop_token_unit() -> dict:
     return {"denied": denied, "allowed": ["/api/identity", "/api/storage"]}
 
 
+
+# ---------- 工具自带的网页面板（ui.panel） ----------
+
+_PANEL_STATIC_WORDS = re.compile(r"character|char-|定制角色|sendCharacter")
+
+
+def _raw_get(base: str, path: str, method: str = "GET"):
+    """不经 urllib 规范化路径，原样发请求；返回 (状态, 响应头, 内容)。"""
+    conn = http.client.HTTPConnection("127.0.0.1", site_port(base), timeout=5)
+    try:
+        conn.request(method, path)
+        response = conn.getresponse()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}, response.read()
+    finally:
+        conn.close()
+
+
+def _panel_manifest_units() -> None:
+    packs = _packs_module()
+    good = _naive_manifest("panel_unit", "general")
+    good["ui"]["panel"] = {"script": "ui/panel.js", "style": "ui/panel.css", "title": "面板", "mount": "dialog"}
+    good["permissions"] = {"ui": True}
+    if packs.validate_manifest(good):
+        fail(f"合格的面板清单被拒绝：{packs.validate_manifest(good)}")
+    for script in ("../tool.py", "ui/../tool.js", "/etc/x.js", "C:/x.js", "ui\\x.js", "ui/sub/x.js", "ui/x.py",
+                   "panel.js", "ui/.x.js", "ui/%2e%2e.js"):
+        manifest = json.loads(json.dumps(good))
+        manifest["ui"]["panel"]["script"] = script
+        if not any("ui.panel.script" in p for p in packs.validate_manifest(manifest)):
+            fail(f"面板脚本路径 {script!r} 没被拒绝")
+    no_perm = json.loads(json.dumps(good))
+    no_perm["permissions"] = {}
+    if not any("permissions.ui" in p for p in packs.validate_manifest(no_perm)):
+        fail("声明了面板却没声明 permissions.ui，清单没被拒绝")
+    no_panel = json.loads(json.dumps(good))
+    del no_panel["ui"]["panel"]
+    if not any("permissions.ui" in p for p in packs.validate_manifest(no_panel)):
+        fail("没有面板却声明了 permissions.ui，清单没被拒绝")
+    for patch in ({"mount": "page"}, {"run": "x"}, {"style": "ui/panel.js"}):
+        manifest = json.loads(json.dumps(good))
+        manifest["ui"]["panel"].update(patch)
+        if not packs.validate_manifest(manifest):
+            fail(f"坏面板声明 {patch} 没被拒绝")
+
+
+def _panel_symlink_escape() -> None:
+    """ui/panel.js 是指向工具目录外面的符号链接：检查和安装都要拒绝。不能建符号链接的系统上跳过。"""
+    packs = _packs_module()
+    root = tempfile.mkdtemp(prefix="mas-panel-link-")
+    try:
+        outside = os.path.join(root, "secret.js")
+        with open(outside, "w", encoding="utf-8") as handle:
+            handle.write("secret")
+        manifest = _naive_manifest("panel_link", "general")
+        manifest["ui"]["panel"] = {"script": "ui/panel.js"}
+        manifest["permissions"] = {"ui": True}
+        folder = _naive_tool("panel_link", "general", os.path.join(root, "src"), manifest=manifest)
+        os.makedirs(os.path.join(folder, "ui"))
+        try:
+            os.symlink(outside, os.path.join(folder, "ui", "panel.js"))
+        except (OSError, NotImplementedError):
+            return
+        info = packs.inspect(folder)
+        if not any("ui/ 目录外面" in p for p in info["problems"]):
+            fail(f"指向工具目录外面的面板文件没被拒绝：{info['problems']}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _panel_path_escape(base: str) -> None:
+    _panel_manifest_units()
+    _panel_symlink_escape()
+    secret = open(os.path.join(_BUILTIN_CHARACTER, "tool.py"), "rb").read()[:200]
+    for path in ("/api/tools/character_image/ui/../tool.py", "/api/tools/character_image/ui/..%2Ftool.py",
+                 "/api/tools/character_image/ui/%2e%2e/tool.json", "/api/tools/character_image/ui/ui/../../tool.py",
+                 "/api/tools/character_image/ui/../../../apps/web/server.py", "/api/tools/character_image/ui/..",
+                 "/api/tools/character_image/ui/.%2Fpanel.js", "/api/tools/character_image/ui/%70anel.js",
+                 "/api/tools/character_image/ui/panel.js%00.css", "/api/tools/character_image/ui//panel.js"):
+        status, _headers, raw = _raw_get(base, path)
+        if status != 404 or secret in raw or b"MASPanels" in raw:
+            fail(f"面板路径越界没被拒绝：{path} → {status}")
+    print("tool ui path escape ok")
+
+
+def _panel_undeclared(base: str) -> None:
+    status, headers, raw = _raw_get(base, "/api/tools/character_image/ui/panel.js")
+    if status != 200 or not headers.get("content-type", "").startswith("text/javascript") \
+            or headers.get("x-content-type-options") != "nosniff" or b"MASPanels.define" not in raw:
+        fail(f"内置面板脚本取不到或类型不对：{status} {headers.get('content-type')}")
+    status, headers, _raw = _raw_get(base, "/api/tools/character_image/ui/panel.css")
+    if status != 200 or not headers.get("content-type", "").startswith("text/css"):
+        fail(f"内置面板样式取不到或类型不对：{status} {headers.get('content-type')}")
+    for path in ("/api/tools/character_image/ui/other.js", "/api/tools/character_image/ui/presets.json",
+                 "/api/tools/character_image/ui/tool.py", "/api/tools/character_image/ui/frame",
+                 "/api/tools/character_image/ui/", "/api/tools/no_such_tool/ui/panel.js",
+                 "/api/tools/generate_image/ui/panel.js"):
+        status, _headers, _raw = _raw_get(base, path)
+        if status != 404:
+            fail(f"没声明的面板文件应该 404：{path} → {status}")
+    if _raw_get(base, "/api/tools/character_image/ui/panel.js", "POST")[0] != 405:
+        fail("面板文件接受了 POST")
+    if request("GET", base + "/static/character.js")[0] != 404:
+        fail("/static/character.js 还在")
+    print("tool ui undeclared ok")
+
+
+def _panel_static_clean(base: str) -> None:
+    """apps/web/static 里没有任何角色定制的代码：页面只认通用的面板宿主。"""
+    static = os.path.join(WEB_DIR, "static")
+    for name in sorted(os.listdir(static)):
+        with open(os.path.join(static, name), encoding="utf-8", errors="replace") as handle:
+            hit = _PANEL_STATIC_WORDS.search(handle.read())
+        if hit:
+            fail(f"apps/web/static/{name} 里还有角色定制的代码：{hit.group(0)}")
+    status, page = request("GET", base + "/")
+    if status != 200 or 'id="tool-panels"' not in page or 'id="tool-panel"' not in page \
+            or page.find("/static/panels.js") < page.find("/static/app.js"):
+        fail("聊天页没有通用的工具面板入口，或 panels.js 没在 app.js 后面加载")
+    status, host = request("GET", base + "/static/panels.js")
+    if status != 200 or "MASPanels" not in host or 'setAttribute("sandbox", "allow-scripts")' not in host \
+            or "event.source !== frame.contentWindow" not in host or "form_tools" not in host or "innerHTML" in host:
+        fail("panels.js 不是通用的面板宿主（沙箱 iframe、来源核对、按 form_tools 挂载）")
+    if "session.confirmed" not in host or "local_only" not in host:
+        fail("面板宿主没有自己补分级确认、强制只能本机")
+    script = request("GET", base + "/static/app.js")[1]
+    if "MASHost" not in script or "runFormTool" not in script:
+        fail("app.js 没有给面板用的通用出图入口")
+    print("tool ui static clean ok")
+
+
+def _panel_catalog(base: str) -> None:
+    """面板按目录渲染（静态检查）：只用 api，字段来自 api.catalog()，不自己取接口。"""
+    with open(os.path.join(_BUILTIN_CHARACTER, "ui", "panel.js"), encoding="utf-8") as handle:
+        panel = handle.read()
+    for word in ("MASPanels.define", "api.catalog()", "catalog.fields", "catalog.extra_fields", "catalog.defaults",
+                 "api.preview(", "api.run(", "api.close()"):
+        if word not in panel:
+            fail(f"面板没有按目录渲染：缺 {word}")
+    for word in ("fetch(", "XMLHttpRequest", "innerHTML", "/api/", "document.cookie", "localStorage", "eval("):
+        if word in panel:
+            fail(f"面板自己用了 {word}，应该只经 api")
+    listing = json.loads(request("GET", base + "/api/tools")[1])
+    tool = {item["name"]: item for item in listing.get("form_tools", [])}.get("character_image") or {}
+    panel_info = tool.get("panel") or {}
+    if panel_info.get("script") != "/api/tools/character_image/ui/panel.js" \
+            or panel_info.get("style") != "/api/tools/character_image/ui/panel.css" or panel_info.get("isolated") is not False:
+        fail(f"/api/tools 没给内置面板的描述：{panel_info}")
+    catalog = json.loads(request("GET", base + "/api/tools/character_image/catalog")[1])
+    if not catalog.get("fields") or not isinstance(catalog.get("defaults"), dict) \
+            or any(not {"name", "label", "options"} <= set(f) for f in catalog["fields"]):
+        fail("目录的形状和面板用的不一致（fields/defaults/name/label/options）")
+    print("tool ui panel catalog ok")
+
+
+def _panel_installed(base: str) -> None:
+    """已安装的面板：ui 权限要在安装时单独确认；只在沙箱 iframe 里运行；文件只按纯文本给；包被改过就不给。"""
+    packs = _packs_module()
+    root = tempfile.mkdtemp(prefix="mas-panel-src-")
+    try:
+        folder = _engine_tool(_FIXTURE_GENERAL, root, panel=True)
+        info = packs.inspect(folder)
+        if info["problems"] or "ui" not in info["accept"]:
+            fail(f"带面板的工具检查时没要 ui 权限：{info['accept']} {info['problems']}")
+        item = next((i for i in (info["review"] or {}).get("permissions", []) if i["permission"] == "ui"), None)
+        if not item or "ui/panel.js" not in item["effect"] or "沙箱 iframe" not in item["effect"]:
+            fail(f"安装审阅里没有面板权限和面板文件：{item}")
+        if sorted(p["file"] for p in info.get("panel") or []) != ["ui/panel.css", "ui/panel.js"]:
+            fail(f"检查结果没列出面板文件：{info.get('panel')}")
+        saved = os.environ.get("MAS_TOOLPACKS_DIR")
+        os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(root, "installed")
+        try:
+            try:
+                packs.install(folder, [a for a in info["accept"] if a != "ui"])
+            except packs.PackError as exc:
+                if exc.code != "permission_not_accepted":
+                    fail(f"没确认 ui 权限的错误码不对：{exc.code}")
+            else:
+                fail("没确认 ui 权限也装上了")
+            packs.install(folder, info["accept"])
+            name = _FIXTURE_GENERAL["name"]
+            forms = {i["name"]: i for i in json.loads(request("GET", base + "/api/tools")[1]).get("form_tools", [])}
+            panel_info = (forms.get(name) or {}).get("panel") or {}
+            if panel_info.get("isolated") is not True or panel_info.get("frame") != f"/api/tools/{name}/ui/frame" \
+                    or "script" in panel_info:
+                fail(f"已安装的面板没走沙箱 iframe：{panel_info}")
+            status, headers, raw = _raw_get(base, f"/api/tools/{name}/ui/panel.js")
+            if status != 200 or not headers.get("content-type", "").startswith("text/plain") \
+                    or headers.get("x-content-type-options") != "nosniff":
+                fail(f"第三方面板文件不该按脚本给：{status} {headers.get('content-type')}")
+            status, headers, raw = _raw_get(base, f"/api/tools/{name}/ui/frame")
+            csp = headers.get("content-security-policy", "")
+            if status != 200 or not headers.get("content-type", "").startswith("text/html") \
+                    or "sandbox allow-scripts" not in csp or "default-src 'none'" not in csp or "'sha256-" not in csp \
+                    or "allow-same-origin" in csp or "unsafe-inline" in csp or b"MASPanels" not in raw \
+                    or b"panel-ready" not in raw:
+                fail(f"面板 iframe 文档的 CSP 不够严：{status} {csp}")
+            for path in (f"/api/tools/{name}/ui/../tool.py", f"/api/tools/{name}/ui/presets.json"):
+                if _raw_get(base, path)[0] != 404:
+                    fail(f"已安装的工具给了没声明的文件：{path}")
+            # 装好以后改面板：授权作废，面板不给，入口标为不可用。
+            target = os.path.join(os.environ["MAS_TOOLPACKS_DIR"], name, "ui", "panel.js")
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write("\n// changed\n")
+            if _raw_get(base, f"/api/tools/{name}/ui/frame")[0] != 403 \
+                    or _raw_get(base, f"/api/tools/{name}/ui/panel.js")[0] != 403:
+                fail("装好以后被改过的面板还在给")
+            forms = {i["name"]: i for i in json.loads(request("GET", base + "/api/tools")[1]).get("form_tools", [])}
+            if not (forms.get(name) or {}).get("unavailable"):
+                fail("被改过的面板工具没标成不可用")
+        finally:
+            if saved is None:
+                os.environ.pop("MAS_TOOLPACKS_DIR", None)
+            else:
+                os.environ["MAS_TOOLPACKS_DIR"] = saved
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("tool ui installed permission ok")
+
+
+def _tool_ui_cases(base: str, case: str | None = None) -> None:
+    cases = {
+        "path_escape": lambda: _panel_path_escape(base),
+        "undeclared": lambda: _panel_undeclared(base),
+        "static_clean": lambda: _panel_static_clean(base),
+        "installed_permission": lambda: _panel_installed(base),
+        "panel_catalog": lambda: _panel_catalog(base),
+    }
+    if case is not None:
+        cases[case]()
+        return
+    for run in cases.values():
+        run()
+
+
 def main() -> None:
     self_check()
     print("check ok")
@@ -6959,7 +7194,7 @@ def preview(fields, ctx):
 '''
 
 
-def _engine_tool(spec: dict, parent: str) -> str:
+def _engine_tool(spec: dict, parent: str, panel: bool = False) -> str:
     """用内置 character_image 的代码（tool.py）+ 改过的 presets.json 做一个独立工具包（和成人模式工具包同一种做法）。"""
     import copy
 
@@ -6980,7 +7215,13 @@ def _engine_tool(spec: dict, parent: str) -> str:
         added.append({"name": item["name"], "after": item["after"]})
         tool["parameters"]["properties"][item["name"]] = {"type": "string", "maxLength": 200, "description": item["label"]}
     tool.update(name=spec["name"], version=spec["version"], description=f"夹具：{spec['label']}（测试用）。")
+    # panel=True 时和成人模式工具包一样：带上内置面板的同一份文件（ui/），面板标题换成夹具名，并声明 ui 权限。
+    builtin_panel = tool["ui"]["panel"]
     tool["ui"] = {"form": True, "preview": True, "title": spec["label"]}
+    if panel:
+        tool["ui"]["panel"] = dict(builtin_panel, title=spec["label"])
+    else:
+        tool["permissions"].pop("ui", None)
     content = {"rating": spec["rating"]}
     if spec["rating"] == "adult":
         content.update(min_age=spec["min_age"], label=spec["label"], confirm=spec["confirm"],
@@ -6994,6 +7235,8 @@ def _engine_tool(spec: dict, parent: str) -> str:
         json.dump({"fields": fields, "added": added, "verbatim": spec.get("verbatim") or [],
                    "prompt_tail": spec.get("prompt_tail") or ""}, handle, ensure_ascii=False)
     shutil.copyfile(os.path.join(_BUILTIN_CHARACTER, "tool.py"), os.path.join(folder, "tool.py"))
+    if panel:
+        shutil.copytree(os.path.join(_BUILTIN_CHARACTER, "ui"), os.path.join(folder, "ui"), dirs_exist_ok=True)
     return folder
 
 
@@ -7382,8 +7625,9 @@ def _pack_default_units() -> None:
             or "成人模式" in manifest["description"]:
         fail("character_image 清单里不该再有成人模式或 pack 参数")
     if manifest.get("entry") != {"kind": "module", "module": "tool.py"} or (manifest.get("content") or {}).get("rating") != "general" \
-            or not (manifest.get("ui") or {}).get("form") or manifest.get("version") != "1.3.0":
-        fail(f"character_image 应是 module 工具（tool.py）、general、带表单、1.3.0：{manifest.get('entry')} {manifest.get('version')}")
+            or not (manifest.get("ui") or {}).get("form") or manifest.get("version") != "1.4.0" \
+            or (manifest["ui"].get("panel") or {}).get("script") != "ui/panel.js" or manifest["permissions"].get("ui") is not True:
+        fail(f"character_image 应是 module 工具（tool.py）、general、带表单和面板（ui/panel.js）、1.4.0：{manifest.get('entry')} {manifest.get('version')}")
     for name in character.EXTRA_FIELDS:
         if name not in props:
             fail(f"character_image 清单缺 #86 字段 {name}")
@@ -8040,4 +8284,3 @@ def _character_cases(base: str, provider, box: ComfyState, directory: str) -> No
 
 if __name__ == "__main__":
     main()
-

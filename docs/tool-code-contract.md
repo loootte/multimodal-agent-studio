@@ -11,6 +11,9 @@ my_tool/
   tool.json      清单（schema mas.tool/1）
   tool.py        entry.module 指向的代码；必须在这个目录里（解开符号链接以后也一样）
   presets.json   可选：代码自己读的数据
+  ui/            可选：工具自带的网页面板（ui.panel），只放 .js / .css
+    panel.js
+    panel.css
   README.md      可选
 ```
 
@@ -23,7 +26,7 @@ my_tool/
 | 字段 | 说明 |
 | --- | --- |
 | `entry` | `{"kind": "module", "module": "tool.py"}` |
-| `ui` | 只给 module 工具。`{"form": true, "preview": true, "title": "定制角色", "run_label": "开始出图"}`；`form=true` 才会出现在网页“定制”对话框的工具列表里 |
+| `ui` | 只给 module 工具。`{"form": true, "preview": true, "title": "定制角色", "run_label": "开始出图", "panel": {...}}`；`form=true` 或带 `panel` 的工具会出现在 `GET /api/tools` 的 `form_tools` 里。`panel` 见下面「网页面板」 |
 | `content` | 只给 module 工具。`{"rating": "general"}`（默认）或分级：`{"rating": "adult", "min_age": 18 以上整数, "label": "中文名", "confirm": "开启前弹的确认文字", "chat_keywords": ["…"]}` |
 
 `parameters` 仍是给对话模型的 JSON Schema（字段全是字符串）；`confirm` 一般写 `never`（工具只拼文字，出图还要再经过 `generate_image`）。
@@ -63,6 +66,7 @@ my_tool/
 | 项 | 什么时候出现 | 没勾的错误码 |
 | --- | --- | --- |
 | `code`“包含代码” | 包里有 .py 等代码（任何 python / module 工具） | `code_not_accepted` |
+| `ui`“网页面板” | 清单声明了 `ui.panel`（就是一项普通权限，和 `network` 等一样写在 `permissions`） | `permission_not_accepted` |
 | `rating_adult`“成人分级” | `content.rating=adult`；审阅里写明年龄下限、只能本机出图、确认文字 | `rating_not_accepted` |
 
 `POST /api/toolpacks/inspect` 返回 `code`、`rating`、`min_age`、`label`、`confirm`、`ui`、`target`（装到哪）和 `accept`（要勾的全部项）。授权记录 `.granted.json` 记下代码、分级和包内容摘要；装好后改了任何文件（包括把分级改掉），授权作废，工具不可用（`permission_denied`），要重新安装。
@@ -110,11 +114,60 @@ def preview(fields, ctx):
     return run(fields, ctx)
 ```
 
+## 网页面板（`ui.panel`，issue #89）
+
+工具的前端也放在工具自己的目录里。网页（`apps/web/static/`）只有一个通用的面板宿主 `panels.js`，不含任何具体工具的代码；内置的角色定制面板在 `toolpacks/builtin/character_image/ui/panel.js`、`panel.css`。
+
+清单：
+
+```json
+"ui": {"form": true, "preview": true, "title": "定制角色", "run_label": "开始出图",
+       "panel": {"script": "ui/panel.js", "style": "ui/panel.css", "title": "定制角色", "mount": "dialog"}},
+"permissions": {"ui": true}
+```
+
+- `script` 必填、`style` 可选，都要匹配 `^ui/[A-Za-z0-9][A-Za-z0-9_-]{0,47}\.(js|css)$`（扩展名要对得上），解开符号链接以后必须在工具目录的 `ui/` 里，文件存在，单个不超过 256 KB；否则 `invalid_manifest`。`title` 是侧栏入口的文字，`mount` 目前只有 `dialog`。
+- 声明了 `panel` 就必须声明 `permissions.ui: true`，反过来也一样。安装时审阅里有一项“网页面板”（`ui`），列出面板文件、大小和 sha256，要单独勾选，没勾 `permission_not_accepted`。授权后改了面板文件，授权作废，面板和工具一起不可用。
+
+### 路由 `GET /api/tools/<name>/ui/<file>`
+
+- 只给清单里声明的文件（`script`、`style`）；其他任何路径（没声明的文件、`..`、`%2e%2e`、编码的斜杠、空段、符号链接指出目录）一律 404，不读盘上别的文件。只接受 GET（其他方法 405）。响应带 `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`。
+- 内置工具：`.js` 是 `text/javascript`，`.css` 是 `text/css`，页面同源加载。
+- 已安装工具：文件只按 `text/plain` 给（CSP `sandbox; default-src 'none'`），不能被当作脚本加载；面板只能通过 `GET /api/tools/<name>/ui/frame` 运行。这个文档把宿主的桥 `panel_frame.js`、面板脚本和样式内联进去，响应头 CSP：
+  `sandbox allow-scripts; default-src 'none'; script-src 'sha256-…'; style-src 'sha256-…'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`。
+  只有哈希对得上的这几段能执行；不能联网（`connect-src` 落到 `none`）、不能加载别的文件、不能提交表单。内置工具没有 `frame`（404）。
+
+### 面板接口
+
+面板脚本只做一件事：`MASPanels.define(mount)`。宿主打开面板时调用 `mount(el, api)`，`el` 是给面板的空容器；`mount` 可以返回一个清理函数，关面板时调用。
+
+| `api` | 作用 |
+| --- | --- |
+| `api.tool` | 只读的工具简介：`name`、`title`、`run_label`、`rating`、`label`、`min_age`、`local_only` |
+| `api.catalog()` | → 表单目录（工具 `catalog()` 的结果，已过宿主守卫） |
+| `api.preview(fields)` | → `{prompt, summary, fields, used_defaults, rating}`；拒绝时抛错，`error.code` / `error.field` |
+| `api.run({fields, count, aspect_ratio, backend, privacy, seed?})` | 在当前会话里出图（`count` 1–20）；宿主自己加分级确认标记、强制只能本机、拼对话里的标签，然后关面板 |
+| `api.confirm(text)` | → true / false，宿主弹的确认框 |
+| `api.notify(text)` | 在对话框底部显示一行宿主提示 |
+| `api.close()` | 关面板 |
+| `api.handle.is(value)` | 是不是本地内容句柄 |
+
+面板**拿不到本地内容本身**：接口里没有读资源、读文件、取会话正文的方法，最多看到句柄。面板也不应该自己 `fetch`；内置面板的检查会确认 `panel.js` 里没有 `fetch` 和 `/api/`。
+
+分级工具（`content.rating=adult`）：打开面板前宿主先弹 `content.confirm`，用户确认后才挂载；`api.run` 的 `confirmed` 只来自这次宿主确认，面板传不进来；后端锁在本机。服务端的 `content_guard`、`confirm_required`、`nsfw_backend_not_allowed` 照旧生效，面板绕不过去。
+
+### 为什么内置同源、安装的放沙箱 iframe
+
+- 内置面板是受审查的仓库代码，同源加载最简单，和宿主页面共用样式。
+- 安装的面板是第三方代码。同源跑就能读页面上的对话、本地资源、会话标识，调用任何接口。所以它只在 `<iframe sandbox="allow-scripts">` 里跑：不同源（opaque origin）、没有 Cookie 和存储、不能导航顶层页面、不能弹窗、CSP 禁止联网。它能做的只有经 `postMessage` 调上面这张表里的方法，宿主核对消息来自这个 iframe（`event.source`），只接受白名单里的方法，参数再校验一遍。iframe 的高度由面板报给宿主（`panel-size`）。
+- 面板的文件和工具代码一样计入安装摘要；改了就要重新安装。
+
 ## 通用接口
 
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/tools` | 多了 `form_tools`：`[{name, title, builtin, form, preview, run_label, rating, version, label?, min_age?, confirm?, local_only?, unavailable?}]` |
+| `GET /api/tools` | 多了 `form_tools`：`[{name, title, builtin, form, preview, run_label, rating, version, label?, min_age?, confirm?, local_only?, unavailable?, panel?}]`；`panel` 是 `{title, mount, isolated, script?, style?, frame?}`（内置给 `script`/`style`，安装的给 `frame`） |
+| `GET /api/tools/<name>/ui/<file>`、`/ui/frame` | 面板文件 / 沙箱文档，见上面「网页面板」 |
 | `GET /api/tools/<name>/catalog` | 表单目录（已过守卫）+ 上面的简介 |
 | `POST /api/tools/<name>/preview` | `{fields}` → `{prompt, summary, fields, used_defaults, rating}`；拒绝时 400 + `code` |
 | `POST /api/sessions/<id>/tools/<name>/run` | `{fields, count, aspect_ratio, seed?, backend, privacy, confirmed?}`，返回和发消息相同的事件流 |
@@ -127,5 +180,6 @@ def preview(fields, ctx):
 - 分级守卫：`apps/web/content_guard.py`
 - 清单校验、安装确认、授权：`services/tools/packs.py`（`entry_problem`、`has_code`、`inspect`、`install`）
 - 沙箱里按函数名调用：`services/tools/sandbox.py`、`sandbox_runner.py`（`function` = `call` / `catalog` / `preview` / `run`）
-- 表单和对话：`apps/web/chat_run.py`（`start_form_tool`、`_execute_module_tool`）、`apps/web/static/character.js`
-- 检查：`apps/web/check.py` 的 `_pack_character_cases`、`_tool_install_cases`；评测 `image.form_tool_*`、`image.install_*form_tool*`、`image.install_legacy_preset_pack_rejected`
+- 表单和对话：`apps/web/chat_run.py`（`start_form_tool`、`_execute_module_tool`）
+- 网页面板：`services/tools/packs.py`（`panel_spec`、`panel_files`、`ui` 权限）、`apps/web/tool_panels.py`（`/api/tools/<name>/ui/` 路由、iframe 文档和 CSP）、`apps/web/static/panels.js`（通用宿主、面板接口）、`apps/web/static/panel_frame.js`（iframe 里的桥）。`apps/web/static/` 里没有任何具体工具的代码
+- 检查：`apps/web/check.py` 的 `_pack_character_cases`、`_tool_install_cases`、`_tool_ui_cases`；评测 `image.form_tool_*`、`image.install_*form_tool*`、`image.install_legacy_preset_pack_rejected`、`*.tool_ui_*`

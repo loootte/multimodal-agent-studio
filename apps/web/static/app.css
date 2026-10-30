@@ -530,21 +530,11 @@ dialog select { font: inherit; padding: 0.35rem; }
 .res-preview img, .res-preview video { max-width: 100%; }
 .res-text { white-space: pre-wrap; }
 
-/* #53 定制角色 */
-#character { max-width: 44rem; width: 92vw; }
-.char-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }
-.char-field { display: flex; flex-direction: column; gap: 0.2rem; }
-.char-field input[hidden] { display: none; }
-.char-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.7rem 0 0.3rem; align-items: center; }
-.char-options input[type=number] { width: 4.5rem; }
-.char-pack { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin: 0.3rem 0 0.5rem; }
-.char-pack[hidden] { display: none; }
-#character.rated .char-pack label { color: #a33; font-weight: 600; }
-.char-extra { margin-top: 0.6rem; grid-template-columns: 1fr; }
-.char-group { border: 1px solid #ddd; border-radius: 4px; padding: 0.4rem 0.6rem; display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }
-.char-group legend { font-size: 0.85rem; color: #666; }
-.char-preview { white-space: pre-wrap; background: #f4f4f4; padding: 0.5rem; border-radius: 4px; max-height: 10rem; overflow: auto; font-size: 0.85rem; }
+/* 工具面板（ui.panel）：通用对话框。面板自己的样式在工具目录的 ui/ 里。 */
+.tool-panels { display: flex; flex-direction: column; gap: 0.3rem; }
+.tool-panels:empty { display: none; }
+#tool-panel { max-width: 44rem; width: 92vw; }
+.tool-panel-frame { border: 0; width: 100%; height: 24rem; display: block; }
 
 /* 数据出站时间线（#57）：拦下的行高亮，失败的行弱提示。 */
 .egress {
