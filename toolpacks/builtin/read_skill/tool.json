@@ -22,7 +22,7 @@
   "confirm": "never",
   "entry": {
     "kind": "python",
-    "module": "poc/tools/internal/skill.py"
+    "module": "tool.py"
   },
   "config": [],
   "requires": {

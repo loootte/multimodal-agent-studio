@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tools.api import tool_error
+from services.tools.api import tool_error
 
 
 def check(name: str, parameters: dict, arguments: dict) -> dict | None:

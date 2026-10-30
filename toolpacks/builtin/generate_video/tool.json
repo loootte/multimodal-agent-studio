@@ -9,7 +9,7 @@
   "confirm": "always",
   "entry": {
     "kind": "python",
-    "module": "poc/tools/internal/video.py"
+    "module": "tool.py"
   },
   "config": [],
   "requires": {

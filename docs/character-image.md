@@ -119,10 +119,10 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ## 代码
 
-- 工具：`toolpacks/builtin/character_image/`（`tool.json` 1.3.0、`tool.py`、`presets.json`）。拼提示词的代码就在工具目录的 `tool.py` 里，宿主不再有专门的代码；`apps/web/character.py` 只剩一个转发到 `tool.py` 的兼容壳（旧的 import 还能用）。
+- 工具：`toolpacks/builtin/character_image/`（`tool.json` 1.4.0、`tool.py`、`presets.json`、`ui/`）。拼提示词的代码就在工具目录的 `tool.py` 里，宿主不再有专门的代码；`apps/web/character.py` 只剩一个转发到 `tool.py` 的兼容壳（旧的 import 还能用）。
 - 通用的表单工具调用：`apps/web/module_tools.py`；分级守卫：`apps/web/content_guard.py`
 - 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_module_tool`、`start_form_tool`）
-- 页面：`apps/web/static/character.js`（通用表单，按 `GET /api/tools` 的 `form_tools` 列出可用的表单工具）
+- 页面：面板在工具自己的目录里（`toolpacks/builtin/character_image/ui/panel.js`、`panel.css`，清单 `ui.panel`）；网页只有通用的面板宿主 `apps/web/static/panels.js`，按 `GET /api/tools` 的 `form_tools` 给每个带面板的工具在侧栏加一个入口。见[工具代码契约 · 网页面板](tool-code-contract.md#网页面板uipanelissue-89)
 - 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`、`_pack_character_cases`、`_tool_install_cases`；评测 `image.character*`、`image.form_tool_*`、`image.install_*`
 
 ## 摄像机位、光照与独立工具（#86）
@@ -148,12 +148,12 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ### 独立的工具（不进代码库）
 
-代码库里只有通用的 SFW 工具。个人用的版本（包括分级内容）做成**独立的工具包**：一个工具目录，里面是 `tool.json`（`entry.kind: "module"`、`ui.form: true`、`content.rating`）、`tool.py`（按[工具代码契约](tool-code-contract.md)实现，可以直接复制内置的 `tool.py`）和它自己的 `presets.json`。工具目录放在仓库外，用页面安装：
+代码库里只有通用的 SFW 工具。个人用的版本（包括分级内容）做成**独立的工具包**：一个工具目录，里面是 `tool.json`（`entry.kind: "module"`、`ui.form: true`、`content.rating`）、`tool.py`（按[工具代码契约](tool-code-contract.md)实现，可以直接复制内置的 `tool.py`）、它自己的 `presets.json`，以及可选的 `ui/` 面板（可以直接复制内置的 `ui/panel.js`、`panel.css`，清单里写 `ui.panel` 和 `permissions.ui: true`）。工具目录放在仓库外，用页面安装：
 
 1. 打开“工具配置”，展开“安装工具包”，填工具目录或 .zip 的路径，点“检查并安装”。
-2. 审阅里列出：装到哪（仓库的 `toolpacks/installed/<name>/`，已被 git 忽略）、权限、**包含代码**、`rating=adult` 时的**成人分级**（年龄下限、只能本机出图、确认文字）。
-3. “包含代码”和“成人分级”都要各自勾选，少一项就不装（`code_not_accepted` / `rating_not_accepted`）。
-4. 装好后不用重启：打开“定制”，顶部的工具下拉里就有它。选中分级工具会先弹它的 `content.confirm`，出图后端锁在本机 ComfyUI。
+2. 审阅里列出：装到哪（仓库的 `toolpacks/installed/<name>/`，已被 git 忽略）、权限（带面板时有**网页面板** `ui`）、**包含代码**、`rating=adult` 时的**成人分级**（年龄下限、只能本机出图、确认文字）。
+3. “网页面板”“包含代码”和“成人分级”都要各自勾选，少一项就不装（`permission_not_accepted` / `code_not_accepted` / `rating_not_accepted`）。
+4. 装好后不用重启：侧栏多一个它的面板入口（安装的面板在沙箱 iframe 里跑）。打开分级工具的面板会先弹它的 `content.confirm`，出图后端锁在本机 ComfyUI。
 5. 卸载：在工具列表里点它后面的“卸载”。
 
 安装后的代码只在沙箱子进程里跑；改了包里任何文件，授权作废，要重新安装。只有 `pack.json` 的旧预设包不再支持（`preset_pack_unsupported`），之前的“预设来源”下拉和 `MAS_LOCAL_TOOLPACKS` / `MAS_PRESET_PACKS_DIR` 都已去掉。
@@ -188,5 +188,6 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 - `_pack_character_cases`（评测 `form_tool`）：discover、path_escape_rejected、minor_refused、school_uniform_refused、original_only、adult_code_host_guarded（一个**不做任何检查**的分级工具，证明拦截在宿主）、default_sfw、prompt_order、camera_light_prompt、generic_catalog_route、form_local_rating、chat_consent、adult_remote_refused。
 - `_tool_install_cases`（评测 `form_tool_install`）：install_ok、legacy_preset_pack_rejected、code_and_adult_confirm、uninstall、git_clean（真装进 `toolpacks/installed/` 一个随机名字的中性夹具，前后 `git status` 一致，再卸掉）。
+- `_tool_ui_cases`（评测 `tool_ui`）：path_escape（`/api/tools/<name>/ui/` 越界、编码斜杠、符号链接都 404）、undeclared（没声明的文件 404）、static_clean（`apps/web/static` 里没有角色定制代码）、installed_permission（装的面板要勾 `ui`，只在沙箱 iframe 里跑，文件只给纯文本，改了就不可用）、panel_catalog（面板只经 api、按目录渲染）。
 
 检查开始时把 `MAS_TOOLPACKS_DIR` 设成临时目录，夹具都是临时目录里的中性工具，不碰用户自己装的工具。

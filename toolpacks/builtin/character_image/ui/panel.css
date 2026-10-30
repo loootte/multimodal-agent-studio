@@ -1,0 +1,18 @@
+/* 角色定制面板（character_image 的 ui.panel）。规则都挂在 .char-panel 下面，不影响聊天页别的部分。 */
+.char-panel h2 { margin: 0 0 0.8rem; font-size: 1.25rem; }
+.char-panel .hint { color: #666; font-size: 0.85rem; margin: 0.3rem 0; }
+.char-panel .note { color: #a33; margin: 0.4rem 0; }
+.char-panel .note[hidden] { display: none; }
+.char-panel .char-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }
+.char-panel .char-field { display: flex; flex-direction: column; gap: 0.2rem; margin: 0; }
+.char-panel .char-field input { padding: 0.3rem; }
+.char-panel .char-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.7rem 0 0.3rem; align-items: center; }
+.char-panel .char-options label { display: flex; flex-direction: column; gap: 0.2rem; margin: 0; }
+.char-panel .char-options input[type=number] { width: 4.5rem; }
+.char-panel.rated .char-pack-note { color: #a33; font-weight: 600; }
+.char-panel .char-extra { margin-top: 0.6rem; grid-template-columns: 1fr; }
+.char-panel .char-group { border: 1px solid #ddd; border-radius: 4px; padding: 0.4rem 0.6rem; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.5rem 0.8rem; }
+.char-panel .char-group legend { font-size: 0.85rem; color: #666; }
+.char-panel .char-preview { white-space: pre-wrap; background: #f4f4f4; padding: 0.5rem; border-radius: 4px; max-height: 10rem; overflow: auto; font-size: 0.85rem; }
+.char-panel .dialog-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; margin-top: 0.4rem; }

@@ -28,10 +28,7 @@ def style_names() -> set[str]:
 def image_tools() -> list[dict]:
     """发给第三方的契约。参数里没有正文、字节、路径或文件名。"""
     _ensure_poc()
-    poc_root = os.path.join(ROOT, "poc")
-    if poc_root not in sys.path:
-        sys.path.append(poc_root)
-    from tools.registry import external_contracts
+    from services.tools.registry import external_contracts
 
     return external_contracts()
 
@@ -85,9 +82,6 @@ def generate(session_id: str, arguments: dict, on_event) -> dict:
 
 
 def _remote(arguments: dict) -> dict:
-    poc_root = os.path.join(ROOT, "poc")
-    if poc_root not in sys.path:
-        sys.path.append(poc_root)
     import remote_image
 
     return remote_image.generate(str(arguments.get("prompt") or ""), str(arguments.get("aspect_ratio") or "1:1"))
@@ -95,9 +89,6 @@ def _remote(arguments: dict) -> dict:
 
 def remote_settings() -> dict:
     _ensure_poc()
-    poc_root = os.path.join(ROOT, "poc")
-    if poc_root not in sys.path:
-        sys.path.append(poc_root)
     import remote_image
 
     return remote_image.settings()

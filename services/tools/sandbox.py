@@ -1,7 +1,7 @@
 """第三方工具包降权执行（路线图 12.D #60，ADR 0009）。
 
 内置工具（entry.kind=host 或仓库里的 python 模块）仍在宿主进程里跑，由 services.runtime.tools.authorize 按清单核对权限。
-安装的第三方包一律在子进程里跑（tools/sandbox_runner.py）：
+安装的第三方包一律在子进程里跑（services/tools/sandbox_runner.py）：
 
 - 环境变量只有白名单（ENV_KEEP），用户 shell 里的 API key、令牌一概不继承；工具配置（含密钥）由宿主显式注入。
 - 没授权 network：所有 socket 连接和域名解析被拦（另设 HTTP(S)_PROXY 指向拒绝地址兜底）；

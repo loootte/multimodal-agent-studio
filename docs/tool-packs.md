@@ -24,11 +24,11 @@
 | `mutating` | 是否改外部状态 |
 | `confirm` | `always`、`never` 或 `by_args`（配 `confirm_args`，参数里出现这些键才确认） |
 | `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现；`{"kind": "module", "module": "tool.py"}` 表单工具，按[工具代码契约](tool-code-contract.md)实现 `catalog` / `preview` / `run`（#86）。`module` 必须是工具目录里的 .py 文件，解开符号链接以后也要在目录里 |
-| `ui` | 只给 `module`：`{"form", "preview", "title", "run_label"}`，`form: true` 才出现在网页“定制”表单里 |
+| `ui` | 只给 `module`：`{"form", "preview", "title", "run_label", "panel"}`。`panel` 是工具目录 `ui/` 里自带的网页面板（`{"script": "ui/panel.js", "style": "ui/panel.css", "title", "mount": "dialog"}`），要同时声明 `permissions.ui`，见[工具代码契约 · 网页面板](tool-code-contract.md#网页面板uipanelissue-89) |
 | `content` | 只给 `module`：`{"rating": "general"}` 或 `{"rating": "adult", "min_age", "label", "confirm", "chat_keywords"}`；`adult` 一律受宿主分级守卫约束，见[工具代码契约](tool-code-contract.md#宿主守卫工具代码改不了) |
 | `config` | 配置字段，格式同 #28（`int`、`string`、`secret` 等） |
 | `requires.backends` | 依赖的后端名 |
-| `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`。最后一项必须为 `false` |
+| `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`、`ui`。`send_local_to_model` 必须为 `false`；`ui` 表示带网页面板（安装的面板只在沙箱 iframe 里跑） |
 | `parameter_sources` | 参数枚举的来源，例如 `style ← comfyui.styles` |
 | `mcp` | 保留，未实现 |
 
@@ -68,7 +68,7 @@
 - 数据目录（会话、句柄、配置、审计）不能读、不能列；本地内容只能经句柄接口，而句柄接口目前不开放给第三方包。
 - 环境变量白名单，密钥和配置只经 `config` 显式注入。
 
-**例外：内置工具不进沙箱。** `HOST_TOOLS` 里的宿主工具和 `BUILTIN_PYTHON` 里的 `generate_image` / `generate_video` / `lookup_demo` / `read_skill` 在网页服务进程里运行（模块必须在 `poc/tools/internal/` 下），受名单和授权复核约束。其中出图、出视频要访问**本机或局域网的 ComfyUI**（Windows 上通常是 `http://127.0.0.1:8188`），这是唯一被允许连本机地址的出网，按“本机白名单客户端”处理：它走 12.A 审计（渠道 `comfyui_local`）和 12.C 策略，但不受沙箱限制。第三方包想连本机 ComfyUI 会被拒，请用内置 `generate_image`。
+**例外：内置工具不进沙箱。** `HOST_TOOLS` 里的宿主工具和 `BUILTIN_PYTHON` 里的 `generate_image` / `generate_video` / `lookup_demo` / `read_skill` 在网页服务进程里运行（代码必须是自己工具目录里的 `tool.py`，即 `toolpacks/builtin/<名字>/tool.py`，清单写 `"module": "tool.py"`），受名单和授权复核约束。其中出图、出视频要访问**本机或局域网的 ComfyUI**（Windows 上通常是 `http://127.0.0.1:8188`），这是唯一被允许连本机地址的出网，按“本机白名单客户端”处理：它走 12.A 审计（渠道 `comfyui_local`）和 12.C 策略，但不受沙箱限制。第三方包想连本机 ComfyUI 会被拒，请用内置 `generate_image`。
 
 ## 未做
 

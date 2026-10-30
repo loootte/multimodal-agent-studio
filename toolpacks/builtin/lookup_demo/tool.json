@@ -22,7 +22,7 @@
   "confirm": "never",
   "entry": {
     "kind": "python",
-    "module": "poc/tools/internal/demo.py"
+    "module": "tool.py"
   },
   "config": [],
   "requires": {

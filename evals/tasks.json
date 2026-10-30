@@ -416,6 +416,41 @@
       "case": "git_clean"
     },
     {
+      "id": "security.tool_ui_path_escape",
+      "category": "security",
+      "kind": "tool_ui",
+      "fake_only": true,
+      "case": "path_escape"
+    },
+    {
+      "id": "security.tool_ui_undeclared_404",
+      "category": "security",
+      "kind": "tool_ui",
+      "fake_only": true,
+      "case": "undeclared"
+    },
+    {
+      "id": "image.tool_ui_static_clean",
+      "category": "image",
+      "kind": "tool_ui",
+      "fake_only": true,
+      "case": "static_clean"
+    },
+    {
+      "id": "security.tool_ui_installed_requires_permission",
+      "category": "security",
+      "kind": "tool_ui",
+      "fake_only": true,
+      "case": "installed_permission"
+    },
+    {
+      "id": "image.tool_ui_panel_from_catalog",
+      "category": "image",
+      "kind": "tool_ui",
+      "fake_only": true,
+      "case": "panel_catalog"
+    },
+    {
       "id": "security.storage_encrypted_at_rest",
       "category": "security",
       "kind": "storage_encryption",

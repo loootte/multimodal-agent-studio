@@ -109,11 +109,11 @@ Agent 运行时
 | `services/runtime/loop.py` | 观察、决定、调用工具或回答，直到结束或碰到预算。模型文本里说已经执行，不算执行 |
 | `services/runtime/budget.py` | 步数、时间和 token 预算。超过时停下并留下可读原因 |
 | `services/runtime/trace.py` | 按 `run_id` 串起模型调用、工具调用、输入模态和耗时 |
-| `services/runtime/tools.py` | 校验并调用 `poc/tools`。不另建 `services/tools` |
+| `services/runtime/tools.py` | 调用前的授权复核，再转发给 `services/tools` 的注册表 |
 | `services/runtime/skills.py` | 扫描 `skills/*/SKILL.md`。系统指令只带技能名字和短描述。模型调用 `read_skill` 之后，这一轮才带上正文 |
 | `services/runtime/agents.py` | 多智能体（ADR 0005）：`mas.agent/1` 清单校验、发现、安装导出；`delegate` 工具（层数 ≤2、禁止成环、只传句柄）；按清单裁剪工具并在运行时拒绝越权（`tool_not_allowed`）；树预算池、并行上限 2、同一后端串行；子 Agent 复用 `loop.run`，追踪写 `type: agent` 的 span（带 `parent_run_id`），遥测 `agent.run` |
 | `agents/builtin/*/agent.json` | 内置 orchestrator、planner、image、reviewer |
-| `poc/tools/internal/demo.py`、`toolpacks/builtin/lookup_demo/tool.json` | 只读演示 `lookup_demo` |
+| `toolpacks/builtin/lookup_demo/tool.py`、`tool.json` | 只读演示 `lookup_demo` |
 
 输入框旁勾上「多智能体」时，`chat_run.py` 把这一轮交给编排者：系统指令和工具换成编排者清单，`delegate` 起子 Agent；子 Agent 的工具调用、确认卡和 `agent` 节点事件都标出 Agent 名和 `agent_run_id`，界面右侧画成「编排者 → 子 Agent → 工具调用」的树。`accept_local_content` 只给编排者。不勾时路径不变。见 [agents.md](agents.md)。
 
@@ -150,17 +150,27 @@ Agent 运行时
 
 每个工具有名字、说明、参数模式、是否写外部状态、超时。运行时按这个注册表调用，不在业务代码里散落 HTTP 调用。
 
-这一层的目录 `services/tools` 还没建。生成工具仍在 `poc/comfyui/`，网页不另写一套 ComfyUI 客户端。
+包和引擎分开放：`toolpacks/` 只放包（`builtin/`、`backends/`、`examples/`、`installed/` 或 `MAS_TOOLPACKS_DIR`），一个工具的代码只在它自己的目录里；引擎在 `services/tools/`，导入路径是 `services.tools`。`entry.kind=host` 的内置工具实现在 `apps/web/chat_run.py`。生成工具访问 ComfyUI 仍靠 `poc/comfyui/` 的本机脚本，网页不另写一套 ComfyUI 客户端。见 [ADR 0004](adr/0004-tool-governance.md)。
+
+```
+toolpacks/builtin/<名字>/tool.json [+ tool.py]
+toolpacks/backends/  toolpacks/examples/  toolpacks/installed/
+services/tools/  api  schema  registry  packs  sandbox  sandbox_runner  mcp  _support  check
+```
 
 | 文件 | 做什么 |
 | --- | --- |
-| `poc/comfyui/agent_tools.py` | 本机工具的导入和命令入口。名单来自 `poc/tools/internal/` 的扫描。网页目前只调用 `generate_image` |
-| `poc/tools/registry.py`、`poc/tools/packs.py` | 只从 `toolpacks/` 清单注册工具，见 [tool-packs.md](tool-packs.md)。安装的包重启后可用 |
-| `poc/tools/sandbox.py`、`poc/tools/sandbox_runner.py` | 12.D：第三方工具包在子进程沙箱里运行，权限强制、环境变量白名单、出网经宿主裁决并记 `toolpack` 渠道审计，见 [tool-sandbox.md](tool-sandbox.md) |
-| `poc/tools/internal/image.py` | 本机 `generate_image`。参数含画面描述。会改外部状态 |
-| `poc/tools/internal/video.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图。会改外部状态 |
-| `poc/tools/internal/demo.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
-| `poc/tools/mcp.py` | 两边的进程内 MCP 投影。本机 `tools/call` 会执行，外部只校验 |
+| `poc/comfyui/agent_tools.py` | 本机工具的导入和命令入口，从 `services.tools` 导入。名单来自 `toolpacks/` 清单。网页目前只调用 `generate_image` |
+| `services/tools/registry.py`、`services/tools/packs.py` | 只从 `toolpacks/` 清单注册工具，见 [tool-packs.md](tool-packs.md)。内置 Python 工具只限名单 `BUILTIN_PYTHON`，入口必须是自己目录里的 `tool.py`。安装的包重启后可用 |
+| `services/tools/schema.py`、`services/tools/api.py` | 参数校验和 `Tool` 形状 |
+| `services/tools/sandbox.py`、`services/tools/sandbox_runner.py` | 12.D：第三方工具包在子进程沙箱里运行，权限强制、环境变量白名单、出网经宿主裁决并记 `toolpack` 渠道审计，见 [tool-sandbox.md](tool-sandbox.md) |
+| `services/tools/_support.py` | 内置出图、出视频共用的参数校验、进度监听和结果形状 |
+| `toolpacks/builtin/generate_image/tool.py` | 本机 `generate_image`。执行参数含画面描述；模型参数（清单）是内容句柄。会改外部状态 |
+| `toolpacks/builtin/generate_video/tool.py` | 本机 `generate_video`。参数含画面描述、时长白名单和参考图。会改外部状态。清单不提供给模型 |
+| `toolpacks/builtin/lookup_demo/tool.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
+| `toolpacks/builtin/read_skill/tool.py` | 读取已安装技能的做法 |
+| `toolpacks/builtin/character_image/tool.py` | 表单工具「角色定制」（`entry.kind=module`） |
+| `services/tools/mcp.py` | 两边的进程内 MCP 投影。本机 `tools/call` 会执行，外部只校验 |
 | `poc/comfyui/template_fill.py` | 复制模板，只写字段对照里的白名单。模型拼出的工作流 JSON 不会被提交 |
 | `poc/comfyui/comfy_poc.py` | 命令行的文生图、图生图、文生视频、图生视频。它等待下载完成 |
 | `poc/comfyui/comfy_client.py` | `POST /prompt`、WebSocket `/ws`、`GET /history/{prompt_id}`、`GET /view`、取消。`submit` 拿到 `prompt_id` 就返回 |
@@ -225,7 +235,7 @@ Agent 运行时
 | `apps/web/check.py` | 聊天页的离线检查。假供应商和假 ComfyUI 都只听本机。不访问外网，也不连接真正的 ComfyUI。覆盖运行时的只读演示循环、步数预算、写操作确认和取消，也覆盖聊天页附件、工具时间线、确认拒绝、失败重试、运行过程窗口、统一请求、出图隔离、语义唤起、上传文件、同一会话复用工件、检索来源标识和会话记忆，以及外部 MCP 只校验、不执行。等距技能只在普通回合带上名字和短描述；模型来读之后这一轮才带正文，页面按 `artifact_id` 打开，没有 Node 时不落到出图 |
 | `poc/comfyui/comfy_client.py check` | 客户端自己的离线检查 |
 | `poc/comfyui/comfy_poc.py check` | 模板白名单会拒绝自由 JSON |
-| `poc/comfyui/agent_tools.py check` | 两个生成工具的参数校验，以及本机 MCP 投影会执行 |
+| `python -m services.tools.check` | 工具引擎的离线检查：`Tool` 规范探测、两个生成工具的参数校验和模板填充、视频白名单、工件交接，以及本机 MCP 投影会执行。不连 ComfyUI；没有 `poc/comfyui/config.json` 时用示例配置。`poc/comfyui/agent_tools.py check` 跑的是同一个 `self_check` |
 | `poc/comfyui/artifacts.py check` | 工件只按会话和 `artifact_id` 读取 |
 | `poc/comfyui/chat.py check` | POC 消息上的事件顺序 |
 

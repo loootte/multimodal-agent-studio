@@ -1,4 +1,4 @@
-"""本机生成工具共用的校验、监听和结果形状。这个文件不参与自注册。"""
+"""本机生成工具共用的校验、监听和结果形状。内置 generate_image / generate_video 的 tool.py 导入它。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import random
 import sys
 from contextlib import contextmanager
 
-POC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COMFY_DIR = os.path.join(POC_DIR, "comfyui")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+COMFY_DIR = os.path.join(REPO_ROOT, "poc", "comfyui")
 SCRIPT_DIR = COMFY_DIR
 
 

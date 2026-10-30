@@ -255,7 +255,7 @@
 按顺序（上一子阶段完成标准未达不开始下一阶段功能；14.G 可提前做回归底座）：
 
 1. [#78](https://github.com/loootte/multimodal-agent-studio/issues/78) **14.A** 受控接入外部 MCP server（P0）
-   - 层：工具平面（`poc/tools/mcp.py` 扩成客户端，MCP server 作为 `kind: mcp` 的工具包，stdio 跑在 12.D 沙箱）和网关出站（`toolpack` 渠道）。
+   - 层：工具平面（`services/tools/mcp.py` 扩成客户端，MCP server 作为 `kind: mcp` 的工具包，stdio 跑在 12.D 沙箱）和网关出站（`toolpack` 渠道）。
    - 句柄隔离：有风险，可控。参数只给句柄和模型可见文字，出站前过字段白名单、编码检测和 `local_fingerprint`；默认 `confirm: always`；确认卡用宿主模板；结果标 `untrusted`；远端工具默认不启用，描述或 schema 变了要重新授权。
    - 验收：接通一个 stdio server 和一个 HTTP server，每次调用都有确认和审计；本地正文及其编码变体被拦；schema 变化后要重新授权；`security.mcp_*` 进门禁。
 2. [#79](https://github.com/loootte/multimodal-agent-studio/issues/79) **14.B** 上下文压缩与工具结果裁剪（P0）

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from tools.api import Tool, tool_error
-from tools.schema import check as check_schema
+from services.tools.api import Tool, tool_error
+from services.tools.schema import check as check_schema
 
 NAME = "lookup_demo"
 PARAMETERS = {

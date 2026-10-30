@@ -6,7 +6,7 @@
 
 ### 清单校验（装包 / 注册时）
 
-`poc/tools/packs.py` 的 `validate_manifest`：
+`services/tools/packs.py` 的 `validate_manifest`：
 
 | 清单 | 结果 |
 | --- | --- |

@@ -1,6 +1,6 @@
 # 工具包沙箱（12.D，#60）
 
-第三方工具包的权限从“声明 + 确认”变成**运行时强制**。本文以代码为准：`poc/tools/sandbox.py`（宿主侧）、`poc/tools/sandbox_runner.py`（子进程入口）、`poc/tools/packs.py`（名单、授权、审阅）、`services/runtime/tools.py`（`authorize`）。决定记录见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md#12d-实现定稿的沙箱)。
+第三方工具包的权限从“声明 + 确认”变成**运行时强制**。本文以代码为准：`services/tools/sandbox.py`（宿主侧）、`services/tools/sandbox_runner.py`（子进程入口）、`services/tools/packs.py`（名单、授权、审阅）、`services/runtime/tools.py`（`authorize`）。决定记录见 [ADR 0009](adr/0009-handle-scope-and-egress-audit.md#12d-实现定稿的沙箱)。
 
 ## 谁进沙箱
 
@@ -8,9 +8,9 @@
 | --- | --- | --- |
 | 安装的第三方包（`toolpacks/installed/*`，`entry.kind: "python"`） | 每次调用一个子进程 | 本文全部规则 |
 | 内置宿主工具（`packs.HOST_TOOLS`） | 网页服务进程 | 名单 + 授权复核 |
-| 内置 Python 工具（`packs.BUILTIN_PYTHON`，模块必须在 `poc/tools/internal/`） | 网页服务进程 | 名单 + 授权复核；出网走 12.A 审计和 12.C 策略 |
+| 内置 Python 工具（`packs.BUILTIN_PYTHON`，代码必须是自己工具目录里的 `tool.py`） | 网页服务进程 | 名单 + 授权复核；出网走 12.A 审计和 12.C 策略 |
 
-名单写明每个内置工具真正需要的权限，例如 `retrieve_local → {read_local_content}`、`plan_images → {}`、`generate_image → {network, read_local_content, write_files}`。不在名单里的 `host` 工具或不在 `internal/` 的内置模块，清单校验直接拒绝。`packs.load_module` 对第三方包抛 `sandbox_required`，第三方代码不会被导入网页服务进程。
+名单写明每个内置工具真正需要的权限，例如 `retrieve_local → {read_local_content}`、`plan_images → {}`、`generate_image → {network, read_local_content, write_files}`。不在名单里的 `host` 工具或入口不是自己目录里 `tool.py` 的内置 Python 工具，清单校验直接拒绝。`packs.load_module` 对第三方包抛 `sandbox_required`，第三方代码不会被导入网页服务进程。
 
 ### 本机 ComfyUI 例外
 

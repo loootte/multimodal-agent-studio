@@ -89,7 +89,7 @@ def _label(name: str) -> str:
         from services.runtime.tools import _ensure
 
         _ensure()
-        from tools import packs
+        from services.tools import packs
 
         pack = packs.find(name)
     except Exception:

@@ -39,7 +39,7 @@
 | 2.4 | 工具参数先过 schema 校验再执行；不合法参数返回错误，不执行 | 自动：`apps/web/check.py` 的 `_runtime_invalid_schema` |
 | 2.5 | 新增工具时决定是否 `mutating`，并把它加进评测任务的 `mutating` 或 `read_only` 列表 | 人工（评审时） |
 | 2.6 | 工具配置里的地址、令牌只在本机保存；令牌只以 Bearer 头发给 ComfyUI，不回显 | 自动：`apps/web/check.py` 的工具配置用例 |
-| 2.7 | 第三方工具包只在沙箱子进程里运行，不在网页服务进程里导入（`sandbox_required`）；内置宿主工具只限 `packs.HOST_TOOLS`，内置 Python 模块只限 `poc/tools/internal/` 下的 `packs.BUILTIN_PYTHON`（#60） | 自动：`apps/web/check.py` 的 `_sandbox_cases`；人工：新增内置工具时把它和需要的权限写进名单 |
+| 2.7 | 第三方工具包只在沙箱子进程里运行，不在网页服务进程里导入（`sandbox_required`）；内置宿主工具只限 `packs.HOST_TOOLS`，内置 Python 工具只限 `packs.BUILTIN_PYTHON`，代码必须是自己工具目录里的 `tool.py`（#60） | 自动：`apps/web/check.py` 的 `_sandbox_cases`；人工：新增内置工具时把它和需要的权限写进名单 |
 | 2.8 | 没授权 `network` 的包联网（直接 socket、域名解析、urllib，包括自己吞掉异常的）被拦，返回 `permission_denied`，出站审计记 `toolpack` 渠道的 `egress.blocked`；授权了也不能连本机地址（`egress_policy_denied`）（#60） | 自动：`security.sandbox_network_denied`；`_sandbox_cases` |
 | 2.9 | 没授权 `write_files` 的包只能写临时目录；授权后只多自己的数据目录；数据目录（会话、句柄、配置、审计）不能直接读或列，本地内容只经句柄 API；起子进程、ctypes 拒绝（#60） | 自动：`security.sandbox_write_denied`、`security.sandbox_session_read_denied`；`_sandbox_cases` |
 | 2.10 | 子进程拿不到宿主环境变量里的 API key、令牌；工具配置（含密钥）只经 `config` 显式注入，且不出现在模型请求里（#60） | 自动：`security.sandbox_env_isolated` |
@@ -73,7 +73,7 @@
 
 ## 4. 发布前
 
-1. `python apps/web/check.py` 输出 `check ok`。
+1. `python apps/web/check.py` 输出 `check ok`；`python -m services.tools.check` 输出 `tools check ok`。
 2. `python evals/gate.py` 通过（没有相对基线的回退）。
 3. 逐条过一遍上面标 `人工` 的项。
 4. 开了本地存储加密的机器：`python apps/web/storage_tool.py status` 无明文残留、`verify` 通过、主密钥已离机备份（见 [storage-encryption.md](storage-encryption.md)）。

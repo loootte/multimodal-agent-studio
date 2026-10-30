@@ -23,7 +23,7 @@ LABEL = "第三方图片 API"
 
 
 def settings() -> dict:
-    from tools import packs
+    from services.tools import packs
 
     pack = packs.find(TOOL)
     return packs.config_for(pack) if pack else {}

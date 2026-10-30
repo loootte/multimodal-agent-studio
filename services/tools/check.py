@@ -1,20 +1,27 @@
-"""本机工具的离线检查。不提交 ComfyUI。"""
+"""本机工具的离线检查。不提交 ComfyUI。
+
+在仓库根运行：python -m services.tools.check
+（也可以 python poc/comfyui/agent_tools.py check，跑的是同一个 self_check。）
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
+
+# _support 会把 poc/comfyui 放上路径，下面的本机 ComfyUI 脚本才能导入。
+from services.tools._support import FORBIDDEN_IN_SCHEMA, load_styles
 
 import artifacts
 import comfy_client
 import comfy_poc
 import template_fill
 
-from tools._support import FORBIDDEN_IN_SCHEMA, load_styles
-from tools.api import ToolSpecError
-from tools.mcp import internal_handle as handle
-from tools.registry import call_tool, collect, load_modules, tool_specs
-import tools.registry as registry
+from services.tools.api import ToolSpecError
+from services.tools.mcp import internal_handle as handle
+from services.tools.registry import call_tool, collect, load_modules, tool_specs
+import services.tools.registry as registry
 
 
 def _check_discovery() -> None:
@@ -26,7 +33,7 @@ def _check_discovery() -> None:
             handle.write("raise RuntimeError('不应装载')\n")
         with open(os.path.join(folder, "ping.py"), "w", encoding="utf-8") as handle:
             handle.write(
-                "from tools.api import Tool\n"
+                "from services.tools.api import Tool\n"
                 "def validate(arguments):\n"
                 "    return None\n"
                 "def call(arguments):\n"
@@ -37,7 +44,7 @@ def _check_discovery() -> None:
             )
         with open(os.path.join(folder, "extra.py"), "w", encoding="utf-8") as handle:
             handle.write(
-                "from tools.api import Tool\n"
+                "from services.tools.api import Tool\n"
                 "def validate(arguments):\n"
                 "    return None\n"
                 "def call(arguments):\n"
@@ -46,21 +53,21 @@ def _check_discovery() -> None:
                 "    return [Tool(name='extra', description='extra', order=10, validate=validate, call=call,\n"
                 "        parameters={'type': 'object', 'additionalProperties': False, 'properties': {}})]\n"
             )
-        found = collect(load_modules(folder, "tools._probe_ok"), "internal")
+        found = collect(load_modules(folder, "_mas_probe_ok"), "internal")
         if [item.name for item in found] != ["extra", "ping"]:
             comfy_poc.fail(f"新文件没有按规范注册：{[item.name for item in found]}")
         leaked = tempfile.mkdtemp(prefix="tool-discover-bad-")
         try:
             with open(os.path.join(leaked, "leak.py"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "from tools.api import Tool\n"
+                    "from services.tools.api import Tool\n"
                     "def tools():\n"
                     "    return [Tool(name='leak', description='leak',\n"
                     "        parameters={'type': 'object', 'additionalProperties': False,\n"
                     "            'properties': {'body': {'type': 'string'}}})]\n"
                 )
             try:
-                collect(load_modules(leaked, "tools._probe_bad"), "external")
+                collect(load_modules(leaked, "_mas_probe_bad"), "external")
             except ToolSpecError as exc:
                 if "body" not in exc.message:
                     comfy_poc.fail(f"外部工具的正文参数没有被规范拒绝：{exc.message}")
@@ -213,7 +220,7 @@ def _check_video_whitelist() -> None:
         comfy_poc.fail("视频预览默认应关闭。")
     if not comfy_poc.preview_enabled({"video": {"preview": True}}, "video"):
         comfy_poc.fail("显式打开的视频预览没有被认出来。")
-    job = registry.module("internal", "video").fields()
+    job = registry.module("generate_video").fields()
     if template_fill.preview_choice(True, job) != "skipped":
         comfy_poc.fail("没有预览节点时打开预览应跳过，而不是失败。")
 
@@ -314,3 +321,22 @@ def _check_artifact_handoff() -> None:
             comfy_poc.fail("下一轮视频工件能被别的会话读到。")
     finally:
         temporary.cleanup()
+
+
+def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+    # 离线检查只读模板，不连 ComfyUI；没有本机 config.json 时用仓库里的示例配置。
+    if not os.environ.get("COMFY_CONFIG"):
+        from services.tools._support import COMFY_DIR
+
+        if not os.path.isfile(os.path.join(COMFY_DIR, "config.json")):
+            os.environ["COMFY_CONFIG"] = os.path.join(COMFY_DIR, "config.example.json")
+    self_check()
+    print("tools check ok")
+
+
+if __name__ == "__main__":
+    main()

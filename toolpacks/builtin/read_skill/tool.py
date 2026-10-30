@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
-import sys
-
-from tools.api import Tool
-from tools.schema import check as check_schema
+from services.tools.api import Tool
+from services.tools.schema import check as check_schema
 
 NAME = "read_skill"
 PARAMETERS = {
@@ -31,9 +28,6 @@ def call(arguments: dict) -> dict:
     problem = validate(arguments)
     if problem:
         return problem
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
     from services.runtime.skills import read_instructions
 
     return read_instructions(arguments.get("name") or "")

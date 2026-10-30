@@ -1,17 +1,11 @@
-"""运行时调用 poc/tools。不另建 services/tools。"""
+"""运行时的授权和转发。工具引擎在 services/tools。"""
 
 from __future__ import annotations
 
-import os
-import sys
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-POC = os.path.join(ROOT, "poc")
 
 
 def _ensure() -> None:
-    if POC not in sys.path:
-        sys.path.append(POC)
+    """引擎是 services.tools，和本模块同在仓库根下的 services 包里，不用改 sys.path。"""
 
 
 def authorize(name: str) -> dict | None:
@@ -21,7 +15,7 @@ def authorize(name: str) -> dict | None:
     网页宿主的 host 工具（_execute_web_tool）和这里的 python 工具都先过它。
     """
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     try:
         pack = packs.find(name)
@@ -34,7 +28,7 @@ def authorize(name: str) -> dict | None:
 
 def execute_tool(name: str, arguments: dict) -> dict:
     _ensure()
-    from tools.registry import audience_tools, call_tool, validate_external, validate_tool
+    from services.tools.registry import audience_tools, call_tool, validate_external, validate_tool
 
     denied = authorize(name)
     if denied:
@@ -63,9 +57,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
 def validate_arguments(name: str, arguments) -> dict | None:
     _ensure()
-    from tools.api import tool_error
-    from tools.registry import audience_tools
-    from tools.schema import check as check_schema
+    from services.tools.api import tool_error
+    from services.tools.registry import audience_tools
+    from services.tools.schema import check as check_schema
 
     if not isinstance(arguments, dict):
         return tool_error(name, "invalid_tool_call", "工具参数必须是对象。", executed=False)
@@ -79,7 +73,7 @@ def validate_arguments(name: str, arguments) -> dict | None:
 def tool_mutates(name: str, arguments=None) -> bool:
     """按清单的确认策略：always 要确认，never 不要，by_args 看是否带了 confirm_args 里的参数。"""
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     pack = packs.find(name)
     if pack is None:
@@ -91,7 +85,7 @@ def confirm_every_call(name: str) -> bool:
     """12.E：联网 / 读本地内容的第三方工具每次调用都要确认，不复用同一轮里之前的同意。
     内置工具（如一轮连出 N 张图的 generate_image）仍然一轮问一次；本地提示词发第三方另有按句柄和主机的确认。"""
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     pack = packs.find(name)
     return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
@@ -103,7 +97,7 @@ def egress_preview(name: str, arguments=None) -> dict:
     这里只给通用部分（会不会联网、会不会读本地内容）；网页宿主再补上目的地主机和句柄用途。
     """
     _ensure()
-    from tools import packs
+    from services.tools import packs
 
     pack = packs.find(name)
     permissions = (pack.manifest.get("permissions") or {}) if pack is not None else {}
@@ -119,6 +113,6 @@ def egress_preview(name: str, arguments=None) -> dict:
 
 def openai_tools() -> list[dict]:
     _ensure()
-    from tools.registry import external_contracts
+    from services.tools.registry import external_contracts
 
     return external_contracts()

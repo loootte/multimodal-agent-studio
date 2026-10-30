@@ -47,7 +47,7 @@
 - `services/gateway/openai_chat.py`：`stream` 在开连接前 `egress.guard("chat_completion", …, local_bodies=…)`；查到本地正文就记 `blocked/local_content` 并抛 `local_content`，连接不打开。适配器带 `audits_egress = True`。
 - `apps/web/remote_image.py`：第三方出图 `remote_image`。
 - `poc/comfyui/comfy_client.py`：ComfyUI 提交 `comfyui_local`（目的地通常是本机，scope 照实记）。
-- `poc/tools/sandbox.py` → `egress.toolpack_connect`：沙箱子进程每次连接前问宿主，宿主裁决后记 `toolpack` 渠道；放行记 `planned` + `sent`（`sent` 只表示连接已放行），拒绝记 `blocked`（`permission_denied` 没有联网权限 / `egress_policy_denied` 连本机地址）。宿主看不到载荷，字数、字节数不记。
+- `services/tools/sandbox.py` → `egress.toolpack_connect`：沙箱子进程每次连接前问宿主，宿主裁决后记 `toolpack` 渠道；放行记 `planned` + `sent`（`sent` 只表示连接已放行），拒绝记 `blocked`（`permission_denied` 没有联网权限 / `egress_policy_denied` 连本机地址）。宿主看不到载荷，字数、字节数不记。
 - `apps/web/chat_run.py`：`remote_local_prompt=refuse` 拦下、用户拒绝时由宿主记 `blocked`（`local_prompt_remote_refused` / `user_declined`）；模型点名的句柄过期、越权或跨会话时也记 `blocked`（`handle_*`，12.B）；本地提示词出图时用 `egress.note(local_derived=True, handle=…)` 给下游请求打标。
 
 运行上下文按 `trace_id` 登记（`egress.attach/detach`），会话、运行、子 Agent 运行编号从遥测的当前运行取。

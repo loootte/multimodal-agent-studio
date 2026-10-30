@@ -43,7 +43,7 @@ def known_tools() -> set:
     if _KNOWN is None:
         names = set(HOST_TOOLS)
         try:
-            from tools import packs
+            from services.tools import packs
 
             names.update(pack.name for pack in packs.discover())
         except Exception:
