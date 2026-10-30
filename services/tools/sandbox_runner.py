@@ -8,6 +8,9 @@
   {"t": "egress", "host": ..., "port": ...}   要出网（或查域名）之前问一次，父进程回 {"allow": bool}；
   {"t": "done", "result": {...}, "violations": [...]} 或 {"t": "error", "error": "类名", "violations": [...]}。
   violations 只有种类（network / write_files / read_local_content / process / native），不带路径和正文。
+- function=mcp（14.A #78）：入口是一个 stdio MCP server 脚本。arguments.messages 是宿主这次要发的 JSON-RPC 消息，
+  按行喂给脚本的 stdin（喂完就是 EOF），脚本写到 stdout 的行收集起来作为 {"lines": [...]} 交回。
+  脚本在装好审计钩子之后才执行，和别的第三方代码一样受降权约束；它的 stdin/stdout 不是协议管道。
 
 降权靠 sys.addaudithook：钩子装上后不能卸掉。没授权 network 就拦所有 socket 连接和域名解析；
 写文件只许落在 write_roots（本次调用的临时目录，授权了 write_files 再加上包自己的数据目录）；
@@ -160,12 +163,16 @@ def main() -> None:
     if not entry.startswith(pack_dir + os.sep):
         _send({"t": "error", "error": "BadEntry", "violations": []})
         return
+    function = spec.get("function") or "call"
+    if function == "mcp":
+        sys.addaudithook(hook)
+        _serve_mcp(entry, spec, violations)
+        return
     module_spec = importlib.util.spec_from_file_location("toolpack_entry", entry)
     sys.addaudithook(hook)
     try:
         module = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(module)
-        function = spec.get("function") or "call"
         call = getattr(module, function, None) if function in ("call", "catalog", "preview", "run") else None
         if not callable(call):
             _send({"t": "error", "error": "NoCall", "violations": violations})
@@ -181,6 +188,42 @@ def main() -> None:
         _send({"t": "done", "result": result, "violations": violations})
     except (TypeError, ValueError):
         _send({"t": "error", "error": "NotJSON", "violations": violations})
+
+
+MCP_MAX_LINES = 200
+
+
+def _serve_mcp(entry: str, spec: dict, violations: list) -> None:
+    """把宿主给的一批 JSON-RPC 消息当作 stdin，跑 MCP server 脚本到 EOF，收集它 stdout 上的行。"""
+    import io
+    import runpy
+
+    messages = (spec.get("arguments") or {}).get("messages") or []
+    feed = "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in messages if isinstance(m, dict))
+    fake_in = io.TextIOWrapper(io.BytesIO(feed.encode("utf-8")), encoding="utf-8")
+    sink = io.BytesIO()
+    fake_out = io.TextIOWrapper(sink, encoding="utf-8", write_through=True)
+    saved = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = fake_in, fake_out
+    error = None
+    try:
+        runpy.run_path(entry, run_name="__main__")
+    except SystemExit:
+        pass
+    except BaseException as exc:  # noqa: BLE001
+        error = type(exc).__name__
+    finally:
+        try:
+            fake_out.flush()
+        except (OSError, ValueError):
+            pass
+        sys.stdin, sys.stdout = saved
+    if error:
+        _send({"t": "error", "error": error, "violations": violations})
+        return
+    text = sink.getvalue().decode("utf-8", "replace")
+    lines = [line for line in text.splitlines() if line.strip()][:MCP_MAX_LINES]
+    _send({"t": "done", "result": {"lines": lines}, "violations": violations})
 
 
 if __name__ == "__main__":

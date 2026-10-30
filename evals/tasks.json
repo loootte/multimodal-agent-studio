@@ -585,6 +585,38 @@
       "kind": "desktop_security",
       "fake_only": true,
       "check": "token_env_only"
+    },
+    {
+      "id": "security.mcp_local_content_blocked",
+      "category": "security",
+      "kind": "mcp",
+      "fake_only": true,
+      "case": "local_content_blocked",
+      "marker": "LOCAL-MCP-5e6f"
+    },
+    {
+      "id": "security.mcp_schema_change_reauth",
+      "category": "security",
+      "kind": "mcp",
+      "fake_only": true,
+      "case": "schema_change_reauth",
+      "marker": "LOCAL-MCP-7a8b"
+    },
+    {
+      "id": "security.mcp_confirm_always",
+      "category": "security",
+      "kind": "mcp",
+      "fake_only": true,
+      "case": "confirm_always",
+      "marker": "LOCAL-MCP-9c0d"
+    },
+    {
+      "id": "security.mcp_untrusted_result",
+      "category": "security",
+      "kind": "mcp",
+      "fake_only": true,
+      "case": "untrusted_result",
+      "marker": "INJECT-MCP-1e2f"
     }
   ]
 }

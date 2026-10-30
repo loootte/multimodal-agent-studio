@@ -76,8 +76,11 @@ EGRESS_POLICIES = {
         "raw_upload": True,
     },
     # 不透明出口：载荷在子进程里，宿主只裁决「有没有 network 授权、是不是回环地址」。没有 network 授权的包一律拒绝。
+    # 14.A（#78）：宿主替 MCP 工具包发的 JSON-RPC（HTTP 请求、喂给 stdio server 的消息）也走这个渠道，
+    # 只许 jsonrpc / id / method / params 四个顶层字段和下面四个方法；参数照常查本地正文、编码变体和指纹。
     "toolpack": {
-        "fields": (),
+        "fields": ("jsonrpc", "id", "method", "params"),
+        "methods": ("initialize", "notifications/initialized", "tools/list", "tools/call"),
         "exempt": (),
         "opaque": True,
         "requires_permission": "network",

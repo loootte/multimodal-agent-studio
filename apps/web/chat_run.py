@@ -594,7 +594,8 @@ def _run_error_code(app, session_id: str, message_id: str) -> str | None:
 
 def _traced_generate(app, session_id: str, message_id: str, run: Run, provider: dict) -> None:
     telemetry.bind(run.run_id, owner="web")
-    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run))
+    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run),
+                  local_bodies=lambda: app.sessions.local_bodies(session_id))
     started = time.monotonic()
     try:
         _generate(app, session_id, message_id, run, provider)
@@ -1526,7 +1527,8 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
     started = time.monotonic()
     status = "failed"
     telemetry.bind(run.run_id, owner="web")
-    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run))
+    egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run),
+                  local_bodies=lambda: app.sessions.local_bodies(session_id))
     try:
         if plan["privacy"] == "local":
             record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
@@ -2019,8 +2021,19 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
     args = args if isinstance(args, dict) else {}
     destination, host, scope = "none", "", ""
     try:
+        preview = egress_preview(name, args)
+    except Exception:
+        preview = {}
+    try:
         form_tool = name != "generate_image" and module_tools.is_module_tool(name)
-        if (name == "generate_image" or form_tool) and (args.get("backend") or "local") == "remote":
+        if preview.get("mcp"):  # 14.A：远端 MCP 工具，目的地按清单（http 地址 / 本机沙箱）
+            summary.update({"sensitive": True, "sandboxed": True, "network": bool(preview.get("network"))})
+            if preview.get("mcp_host"):
+                host, scope = egress.destination("https://" + str(preview["mcp_host"]))
+            else:
+                host, scope = egress.destination(f"//{str(preview.get('mcp_server') or 'mcp').replace('_', '-')}.mcp.localhost")
+            destination = "mcp_server"
+        elif (name == "generate_image" or form_tool) and (args.get("backend") or "local") == "remote":
             settings = image_run.remote_settings()
             host, scope = egress.destination(settings.get("remote_base_url"))
             destination = "third_party_image"
@@ -2029,7 +2042,7 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
             destination = "comfyui"
     except Exception:
         destination = "unknown"
-    if destination != "none":
+    if destination not in ("none", "mcp_server") or (destination == "mcp_server" and scope != "local"):
         summary["network"] = True
     summary["destination"] = destination
     if host:
@@ -2102,6 +2115,10 @@ def _egress_text(summary: dict) -> str:
     elif destination == "comfyui":
         where = {"local": "本机", "lan": "局域网"}.get(scope, "第三方主机上的")
         parts.append(f"{'不出本机' if scope == 'local' else '会联网'}：提交给{where} ComfyUI（{host}）")
+    elif destination == "mcp_server":
+        parts.append(f"会联网：参数发给 MCP server {host}" if scope != "local"
+                     else "参数交给本机沙箱里的 MCP server" + ("（它可以联网）" if summary.get("network") else ""))
+        parts.append("返回内容不可信")
     elif summary.get("network"):
         parts.append("会联网")
     else:

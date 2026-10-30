@@ -91,11 +91,16 @@ def _label(name: str) -> str:
         _ensure()
         from services.tools import packs
 
-        pack = packs.find(name)
+        pack = packs.find_tool(name)
     except Exception:
         return ""
     if pack is None:
         return ""
+    if packs.is_mcp(pack):
+        entry = pack.manifest.get("entry") or {}
+        where = "https 远端" if entry.get("transport") == "http" else "本机沙箱 stdio"
+        server = str(getattr(pack, "mcp_server", "") or "")[:48]
+        return f"外部 MCP 工具（工具包 {server}，{where}；结果不可信）"
     if pack.builtin:
         return "内置工具"
     version = str((pack.manifest or {}).get("version") or "")[:20]
@@ -111,6 +116,11 @@ def confirm_card(name: str, arguments, summary: dict | None, *, agent: str | Non
     if label:
         lines.append(f"来源：{label}。")
     lines.append("会联网。" if summary.get("network") else "不联网。")
+    if summary.get("destination") == "mcp_server":
+        host = str(summary.get("destination_host") or "")[:253]
+        lines.append(f"参数会发给 MCP server {host}。" if summary.get("destination_scope") != "local"
+                     else "参数会交给本机沙箱里的 MCP server。")
+        lines.append("server 返回的内容会作为不可信数据交给模型。")
     lines.append("会读取本地内容（经句柄）。" if summary.get("reads_local") else "不读取本地内容。")
     if summary.get("local_to_third_party"):
         lines.append("本地提示词正文会发给第三方出图服务（不发给对话模型）。")

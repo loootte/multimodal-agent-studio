@@ -396,7 +396,7 @@ def backends_of(tool: str) -> list[str]:
     from services.tools import packs
 
     try:
-        pack = packs.find(tool)
+        pack = packs.find_tool(tool)
     except Exception:
         return []
     if pack is None:

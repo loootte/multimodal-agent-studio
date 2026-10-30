@@ -18,7 +18,7 @@ def authorize(name: str) -> dict | None:
     from services.tools import packs
 
     try:
-        pack = packs.find(name)
+        pack = packs.find_tool(name)
     except packs.PackError as exc:
         return {"ok": False, "tool": name, "executed": False, "error": {"code": exc.code, "message": exc.message}}
     if pack is None:
@@ -75,7 +75,7 @@ def tool_mutates(name: str, arguments=None) -> bool:
     _ensure()
     from services.tools import packs
 
-    pack = packs.find(name)
+    pack = packs.find_tool(name)
     if pack is None:
         return False
     return packs.needs_confirm(pack, arguments)
@@ -87,7 +87,9 @@ def confirm_every_call(name: str) -> bool:
     _ensure()
     from services.tools import packs
 
-    pack = packs.find(name)
+    pack = packs.find_tool(name)
+    if packs.is_mcp(pack):  # 14.A：远端工具做什么宿主看不见，一律每次确认
+        return True
     return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
 
 
@@ -99,7 +101,7 @@ def egress_preview(name: str, arguments=None) -> dict:
     _ensure()
     from services.tools import packs
 
-    pack = packs.find(name)
+    pack = packs.find_tool(name)
     permissions = (pack.manifest.get("permissions") or {}) if pack is not None else {}
     return {
         "by": "host",
@@ -108,7 +110,19 @@ def egress_preview(name: str, arguments=None) -> dict:
         "sends_local_to_model": bool(permissions.get("send_local_to_model")),
         "sandboxed": bool(pack is not None and not pack.builtin),
         "sensitive": bool(pack is not None and packs.sensitive(pack)),
+        **(_mcp_preview(pack) if packs.is_mcp(pack) else {}),
     }
+
+
+def _mcp_preview(pack) -> dict:
+    from services.tools import mcp_client
+
+    facts = mcp_client.review_facts(pack.manifest.get("entry") or {})
+    out = {"mcp": True, "mcp_server": getattr(pack, "mcp_server", None), "mcp_transport": facts["transport"],
+           "sensitive": True}
+    if facts.get("host"):
+        out["mcp_host"] = facts["host"]
+    return out
 
 
 def openai_tools() -> list[dict]:

@@ -96,12 +96,27 @@ def failures() -> dict:
     return dict(_failures)
 
 
-def attach(trace_id: str, *, session_id: str | None = None, listener=None) -> None:
-    """网页一次运行开始时登记：这条 trace 上的出站记录归到哪个会话、推给谁。子 Agent 线程共用 trace_id，也能归进来。"""
+def attach(trace_id: str, *, session_id: str | None = None, listener=None, local_bodies=None) -> None:
+    """网页一次运行开始时登记：这条 trace 上的出站记录归到哪个会话、推给谁。子 Agent 线程共用 trace_id，也能归进来。
+    local_bodies（14.A）：可调用对象，返回本会话已登记的本地正文（LocalBodies）。工具自己出站（MCP）时按它查本地正文。"""
     if not trace_id:
         return
     with _contexts_lock:
-        _contexts[trace_id] = {"session_id": session_id, "listener": listener}
+        _contexts[trace_id] = {"session_id": session_id, "listener": listener, "local_bodies": local_bodies}
+
+
+def session_bodies():
+    """当前运行登记的本地正文（14.A MCP 出站前检查用）。没有登记时返回空的 LocalBodies。"""
+    trace_id = telemetry.current()
+    with _contexts_lock:
+        provider = (_contexts.get(trace_id) or {}).get("local_bodies") if trace_id else None
+    if callable(provider):
+        try:
+            found = provider()
+        except Exception as exc:  # 取不到正文时按「有正文但取不到」处理：调用方必须拒绝出站
+            raise RuntimeError("local_bodies_unavailable") from exc
+        return found if found is not None else LocalBodies()
+    return LocalBodies()
 
 
 def detach(trace_id: str) -> None:
@@ -397,6 +412,9 @@ def check_policy(channel: str, payload, *, raw_upload: bool = False) -> str | No
     if not isinstance(payload, dict):
         return "egress_policy_denied"
     if set(payload) - set(policy.get("fields") or ()):
+        return "egress_policy_denied"
+    methods = policy.get("methods")
+    if methods is not None and payload.get("method") not in methods:
         return "egress_policy_denied"
     message_fields = policy.get("message_fields")
     if message_fields is not None:

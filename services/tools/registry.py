@@ -148,6 +148,11 @@ def audience_tools(audience: str) -> list[Tool]:
         raise ToolSpecError(exc.message) from exc
     items = []
     for pack in found:
+        if packs.is_mcp(pack):  # 14.A：一个 MCP 包投影成它已启用、摘要没变的远端工具
+            for tool in _mcp_tools(pack, audience):
+                _require_tool(tool, f"toolpacks/{pack.name}", audience)
+                items.append(tool)
+            continue
         tool = _external(pack) if audience == "external" else _internal(pack)
         if tool is None:
             continue
@@ -206,6 +211,37 @@ def _internal(pack) -> Tool | None:
     tool.pack = pack
     tool.sandboxed = True
     return tool
+
+
+def _mcp_tools(server, audience: str) -> list[Tool]:
+    from services.tools import mcp_client, packs
+
+    out = []
+    for item in mcp_client.model_tools(server):
+        pack = mcp_client.tool_pack(server, item["name"])
+        if pack is None:
+            continue
+        parameters = pack.manifest["parameters"]
+        if audience == "external":
+            tool = Tool(name=pack.name, description=pack.manifest["description"], parameters=parameters,
+                        order=pack.manifest.get("order", 1000), mutating=True)
+        else:
+            def validate(arguments, _pack=pack, _parameters=parameters):
+                return packs.gate(_pack) or check_schema(_pack.name, _parameters, arguments)
+
+            def run(arguments, _pack=pack, _validate=validate):
+                problem = _validate(arguments)
+                if problem:
+                    return problem
+                return mcp_client.call(_pack, dict(arguments))
+
+            tool = Tool(name=pack.name, description=pack.manifest["description"], parameters=parameters,
+                        order=pack.manifest.get("order", 1000), mutating=True, validate=validate, call=run)
+            tool.sandboxed = True
+        tool.pack = pack
+        tool.mcp = True
+        out.append(tool)
+    return out
 
 
 def _find(audience: str, name: str) -> Tool | None:

@@ -23,14 +23,14 @@
 | `parameters` | 发给模型的 JSON Schema，`type: object`，`additionalProperties: false`。`null` 表示不提供给模型（例如 `generate_video`） |
 | `mutating` | 是否改外部状态 |
 | `confirm` | `always`、`never` 或 `by_args`（配 `confirm_args`，参数里出现这些键才确认） |
-| `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现；`{"kind": "module", "module": "tool.py"}` 表单工具，按[工具代码契约](tool-code-contract.md)实现 `catalog` / `preview` / `run`（#86）。`module` 必须是工具目录里的 .py 文件，解开符号链接以后也要在目录里 |
+| `entry` | `{"kind": "host"}` 由宿主实现（仅内置）；`{"kind": "python", "module": "tool.py"}` 由包内模块的 `call(args, config)` 实现；`{"kind": "module", "module": "tool.py"}` 表单工具，按[工具代码契约](tool-code-contract.md)实现 `catalog` / `preview` / `run`（#86）；`{"kind": "mcp", "transport": "stdio" \| "http", …}` 外部 MCP server（14.A #78，仅第三方，见 [mcp-client.md](mcp-client.md)）。`module` 必须是工具目录里的 .py 文件，解开符号链接以后也要在目录里 |
 | `ui` | 只给 `module`：`{"form", "preview", "title", "run_label", "panel"}`。`panel` 是工具目录 `ui/` 里自带的网页面板（`{"script": "ui/panel.js", "style": "ui/panel.css", "title", "mount": "dialog"}`），要同时声明 `permissions.ui`，见[工具代码契约 · 网页面板](tool-code-contract.md#网页面板uipanelissue-89) |
 | `content` | 只给 `module`：`{"rating": "general"}` 或 `{"rating": "adult", "min_age", "label", "confirm", "chat_keywords"}`；`adult` 一律受宿主分级守卫约束，见[工具代码契约](tool-code-contract.md#宿主守卫工具代码改不了) |
 | `config` | 配置字段，格式同 #28（`int`、`string`、`secret` 等） |
 | `requires.backends` | 依赖的后端名 |
 | `permissions` | `read_local_content`、`network`、`write_files`、`send_local_to_model`、`ui`。`send_local_to_model` 必须为 `false`；`ui` 表示带网页面板（安装的面板只在沙箱 iframe 里跑） |
 | `parameter_sources` | 参数枚举的来源，例如 `style ← comfyui.styles` |
-| `mcp` | 保留，未实现 |
+| `mcp` | 保留字段，未使用；MCP server 用 `entry.kind: "mcp"` 声明，见 [mcp-client.md](mcp-client.md) |
 
 后端清单用 `schema: "mas.backend/1"`。ComfyUI 的配置写成 `"builtin:comfyui"`，沿用已有字段。
 
@@ -72,4 +72,4 @@
 
 ## 未做
 
-沙箱是 Python 审计钩子 + 子进程，不是操作系统级隔离（C 扩展可绕过；Windows Job Object / Linux seccomp、namespace 未做）；内置工具和本机 ComfyUI 不进沙箱（见上）；第三方包没有句柄接口；不做市场和签名；MCP 字段保留；宿主类工具的实现仍在 `chat_run`；安装只收本机路径，不做上传。
+沙箱是 Python 审计钩子 + 子进程，不是操作系统级隔离（C 扩展可绕过；Windows Job Object / Linux seccomp、namespace 未做）；内置工具和本机 ComfyUI 不进沙箱（见上）；第三方包没有句柄接口；不做市场和签名；MCP 客户端的未做项见 [mcp-client.md](mcp-client.md#未做)；宿主类工具的实现仍在 `chat_run`；安装只收本机路径，不做上传。
