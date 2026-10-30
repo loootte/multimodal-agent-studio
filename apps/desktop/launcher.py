@@ -153,6 +153,31 @@ def main() -> int:
     python = _python_bin(root)
     sys.path.insert(0, str(root / "apps/desktop"))
     import integration  # 13.B：原生对话框 / 通知 / 托盘
+    import wizard  # 13.C：首次运行向导
+    import updater  # 13.C：可选更新检查（默认关）
+
+    # 首次运行：选数据目录 / 确认加密 / 探测 ComfyUI / 可选 API key
+    if (os.environ.get("MAS_SKIP_WIZARD") or "").strip().lower() not in ("1", "on", "true", "yes"):
+        try:
+            if wizard.needs_wizard():
+                wizard.ensure_done(gui=True)
+        except wizard.WizardError as exc:
+            integration.show_error("首次运行向导", exc.message)
+            return 2
+        except Exception as exc:
+            # 无显示设备等：退回非 GUI 默认（确认加密、跳过 key）
+            try:
+                if wizard.needs_wizard():
+                    wizard.apply(encryption_confirmed=True, skip_api_key=True, probe=False)
+            except Exception:
+                integration.show_error("首次运行向导", str(exc))
+                return 2
+
+    # 自动更新默认关；开启时只发 version+platform
+    try:
+        updater.maybe_check()
+    except Exception:
+        pass
 
     try:
         proc, url, base, token, server_pid = _spawn_host(root, python)

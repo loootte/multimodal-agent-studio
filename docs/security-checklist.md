@@ -70,6 +70,9 @@
 | 5.1 | 桌面壳模式（`--desktop-token` / `MAS_DESKTOP_TOKEN`）下，无令牌访问页面、本地资源、设置、出站审计等接口返回 `401 desktop_token_required`；有令牌（头 / Cookie / 首次查询引导）可访问（#74） | 自动：`security.desktop_token_required`；`apps/desktop/check.py`；`apps/web/check.py` 的 `_desktop_token_unit` |
 | 5.2 | 直接跑 Web 服务不启用令牌，行为与第 3–12 阶段一致（#74） | 自动：现有 `apps/web/check.py` / `evals/gate.py`；`apps/desktop/check.py` 的 Web 模式用例 |
 | 5.3 | 壳只绑 `127.0.0.1`、关窗停止运行中的任务并不留残留 Python 进程（#74） | 自动：`apps/desktop/check.py` 生命周期；手工：Windows 关窗后任务管理器无残留 |
+| 5.4 | 自动更新默认关闭；开启后出站渠道 `update` 的载荷与审计只有 `version`+`platform`，不含提示词 / 路径 / 密钥；更新清单需验签（#76） | 自动：`security.desktop_update_egress_no_user_data`；`apps/desktop/check.py` 的 `_wizard_and_update_unit` |
+| 5.5 | 首次运行向导：选数据目录、确认加密、ComfyUI 只探测用户填写或本机默认 `127.0.0.1:8188`（不扫网段）、API key 可跳过；完成状态持久化且不含密钥（#76） | 自动：`apps/desktop/check.py` 的 `_wizard_and_update_unit`；手工：删 `desktop.json` 后冷启动 |
+| 5.6 | 卸载默认保留数据目录与钥匙串；仅勾选删除时才清目录并 `keychain_tool.py purge-all`（#76） | 手工：NSIS 卸载页；自动：`keychain_tool.py purge-all` 冒烟 |
 
 ## 4. 发布前
 

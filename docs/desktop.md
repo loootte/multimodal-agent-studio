@@ -9,7 +9,7 @@
 - 单实例锁：默认 `~/.mas/desktop.lock`（可用 `MAS_DESKTOP_LOCK` 改）。
 - 关窗 / 停宿主：先 `POST /api/desktop/stop` 停止运行中的任务，再结束 Python 进程。
 
-打包安装、自动更新见 13.C；CSP / 导航白名单加固见 13.D。
+打包安装、首次运行向导、可选自动更新见下方 13.C；CSP / 导航白名单加固见 13.D。
 
 ## 13.B 系统集成（[#75](https://github.com/loootte/multimodal-agent-studio/issues/75)）
 
@@ -134,6 +134,7 @@ python apps/web/server.py --port 0 --desktop-token <secret> --ready-file ready.j
 - `security.desktop_keychain_not_in_webview`：key 只在钥匙串，不落数据目录、页面接口拿不到；`js_api` 只有白名单方法；删掉钥匙串条目后 `remote_missing_key` 且消息不含 key。
 - `security.desktop_default_encrypted`：桌面默认加密，全新数据目录是密文、主密钥在钥匙串；已有明文时预检拒绝并给迁移命令。
 - `security.desktop_file_handle_only`：原生对话框选文件只回 `{ok, bytes}`，提交给运行的只有字节和媒体类型。
+- `security.desktop_update_egress_no_user_data`：更新检查默认关闭；开启后出站只有 version+platform。
 - 现有 `apps/web/check.py`、`python -m services.tools.check`、`evals/run.py`、`evals/gate.py` 在 Web 模式（无令牌）下行为不变。
 
 ## Windows 双击入口（本机 Python，无内嵌 DLL）
@@ -179,9 +180,58 @@ npm run build
 
 也可用环境变量 `MAS_REPO_ROOT` 显式指定仓库根；`MAS_PYTHON` 指定解释器。
 
-打包安装、代码签名、自动更新仍属 13.C；本说明只覆盖「能双击的壳 exe」。
+## 13.C 打包、首次运行向导与更新（[#76](https://github.com/loootte/multimodal-agent-studio/issues/76)）
+
+### Windows 安装布局（优先，不用 PyInstaller onefile）
+
+```
+powershell -ExecutionPolicy Bypass -File apps\desktop\packaging\windows\build.ps1
+# 正式内嵌 Python：
+# powershell -File apps\desktop\packaging\windows\build.ps1 -PythonEmbedZip <embed.zip>
+```
+
+- 产物：`dist/mas-windows/`（可拷贝；双击 `start-mas.cmd`）。有 `makensis` 时再打 `dist/MultimodalAgentStudio-<ver>-Setup.exe`。
+- 内嵌运行时在 `runtime/python/`；应用在 `app/`。启动器仍是 `launcher.py`，查找顺序与 `find-python.cmd` 一致，并优先 `MAS_PYTHON`。
+- **不要**恢复已废弃的 PyInstaller onefile（`python312.dll` LoadLibrary 问题）。
+- 卸载默认**保留** `%LOCALAPPDATA%\MultimodalAgentStudio\data` 和钥匙串；勾选「删除数据目录和钥匙串条目」才调用 `keychain_tool.py purge-all`。
+- macOS / Linux：`apps/desktop/packaging/macos|linux/build.sh` 占位，不阻塞本 issue。
+- **未做代码签名**（不买证书）；SmartScreen 会警告，风险见 ADR 0010。
+
+### 首次运行向导
+
+`apps/desktop/wizard.py`。启动器在拉起 sidecar 前若 `desktop.json` 里没有 `wizard_completed`，则弹出向导（也可用 `python apps/desktop/wizard.py --json`）：
+
+1. 选择数据目录（默认每用户目录）；
+2. 确认开启落盘加密；
+3. 探测 ComfyUI：**只**探测用户填写的地址或本机默认 `http://127.0.0.1:8188`，不扫描网段 / 端口范围；通配地址（`0.0.0.0` / `*`）直接拒绝；
+4. 模型 API key 可跳过 → `local_only=true`，只用本机能力；填写的 key 只进钥匙串。
+
+完成状态写在数据目录上一级的 `desktop.json`（不含任何密钥）。`MAS_SKIP_WIZARD=1` 可跳过（测试用）。
+
+### 自动更新（默认关闭）
+
+`apps/desktop/updater.py` + `desktop.json` 的 `auto_update`（默认 `false`）。开启后：
+
+- 只向配置的 `update_url`（或 `MAS_UPDATE_URL`）发检查；
+- 载荷只有 `version` + `platform`，走新出站渠道 `update`（`EGRESS_POLICIES` 白名单同此）；
+- 响应用 Ed25519 公钥（`update_pubkey` / `MAS_UPDATE_PUBKEY`）校验清单签名；失败不下载。
+
+评测：`security.desktop_update_egress_no_user_data`。
+
+### 环境变量（13.C 增补）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MAS_SKIP_WIZARD` | 关 | `1` 跳过首次向导 |
+| `MAS_AUTO_UPDATE` | 关 | `1` 打开自动更新 |
+| `MAS_UPDATE_URL` | 空 | 发布检查地址 |
+| `MAS_UPDATE_PUBKEY` | 空 | Ed25519 公钥（hex） |
+
+### 13.C 评测
+
+- `security.desktop_update_egress_no_user_data`：关闭时无更新出站；开启后载荷与审计只有白名单字段，不含提示词 / 路径 / 密钥。
 
 ## 不做（本阶段）
 
-正式安装包分发流程、代码签名、自动更新、移动端、云同步、密钥托管、多用户。Windows 下可先用上面的 release exe / NSIS 包本地双击。
-Tauri 壳（Rust）这一版还没接 13.B 的原生对话框 / 托盘 / 通知轮询（钥匙串、默认加密在 sidecar 里，Tauri 壳同样生效）；pywebview 启动器已接。
+代码签名证书采购、应用商店上架、移动端、云同步、密钥托管、多用户。`--desktop-token` CLI 改成仅环境变量留给 13.D / #77。
+Tauri 壳（Rust）这一版还没接 13.B 的原生对话框 / 托盘 / 通知轮询（钥匙串、默认加密在 sidecar 里，Tauri 壳同样生效）；pywebview 启动器已接向导与更新检查。

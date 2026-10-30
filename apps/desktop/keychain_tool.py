@@ -6,6 +6,7 @@
     python apps/desktop/keychain_tool.py rollback               # 钥匙串 → 文件（回退）；默认保留钥匙串
     python apps/desktop/keychain_tool.py rollback --purge-keychain
     python apps/desktop/keychain_tool.py delete ENTRY           # 删一个条目（如 tool.generate_image.remote_api_key）
+    python apps/desktop/keychain_tool.py purge-all             # 13.C 卸载勾选「删数据」时：删掉本命名空间下全部条目
 
 数据目录默认同桌面版（desktop_env.default_data_dir()）；--data-dir 可改。迁移前先关掉桌面窗口和服务。
 主密钥迁移前请先 `apps/web/storage_tool.py export-key` 做口令备份：钥匙串和文件都丢了，加密数据就打不开。
@@ -205,6 +206,16 @@ def rollback(data_dir: str, purge: bool) -> dict:
     return {"ok": True, "restored": restored, "keychain_purged": purge}
 
 
+
+def purge_all() -> dict:
+    """卸载勾选删数据时调用：只删本命名空间下能列出来的条目，不碰别的程序的凭据。"""
+    removed = []
+    for entry in list(keychain.entries()):
+        if keychain.delete(entry):
+            removed.append(entry)
+    return {"ok": True, "purged": removed, "count": len(removed)}
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows 控制台默认 GBK；统一 UTF-8 输出，父进程按 UTF-8 读。
     for _stream in (sys.stdout, sys.stderr):
@@ -222,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--purge-keychain", action="store_true")
     rm = sub.add_parser("delete")
     rm.add_argument("entry")
+    sub.add_parser("purge-all")
     args = parser.parse_args(argv)
     if not os.environ.get("MAS_KEYCHAIN"):
         os.environ["MAS_KEYCHAIN"] = "on"
@@ -233,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
             out = migrate(data_dir, args.purge_files)
         elif args.command == "rollback":
             out = rollback(data_dir, args.purge_keychain)
+        elif args.command == "purge-all":
+            out = purge_all()
         else:
             if args.entry not in _known_entries():
                 print(json.dumps({"ok": False, "code": "keychain_entry_unknown"}, ensure_ascii=False))

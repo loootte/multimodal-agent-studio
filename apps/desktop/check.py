@@ -294,6 +294,60 @@ def _sidecar_plaintext_refused() -> None:
         fail(f"host.py 预检失败应输出 MAS_ERROR 并退出 2：{proc.returncode} {proc.stdout[-200:]}")
 
 
+
+def _wizard_and_update_unit() -> None:
+    """13.C：向导只探测用户地址；更新默认关闭；卸载默认保留数据（脚本层约定）。"""
+    import desktop_config
+    import wizard
+    import updater
+
+    with tempfile.TemporaryDirectory(prefix="mas-wiz-") as tmp:
+        data = os.path.join(tmp, "data")
+        # 向导未完成
+        if not wizard.needs_wizard(data):
+            fail("空配置应需要向导")
+        # 拒绝通配地址（不扫描）
+        try:
+            wizard._normalize_comfy_url("http://0.0.0.0:8188")
+            fail("通配 Comfy 地址应拒绝")
+        except wizard.WizardError as exc:
+            if exc.code != "comfy_scan_refused":
+                fail(f"通配拒绝码不对：{exc.code}")
+        # 完成向导（不真探活）
+        out = wizard.apply(
+            data_dir=data,
+            encryption_confirmed=True,
+            comfy_url="http://127.0.0.1:8188",
+            skip_api_key=True,
+            auto_update=False,
+            probe=False,
+        )
+        if not out["ok"] or not out["local_only"]:
+            fail(f"向导结果不对：{out}")
+        if wizard.needs_wizard(data):
+            fail("完成后不应再要向导")
+        cfg = desktop_config.load(data)
+        if cfg.get("auto_update"):
+            fail("自动更新默认应关闭")
+        # 更新跳过
+        skipped = updater.maybe_check(data)
+        if not skipped.get("skipped"):
+            fail(f"更新应跳过：{skipped}")
+        # 打包脚本存在
+        nsis = DESKTOP_DIR / "packaging" / "windows" / "installer.nsi"
+        build = DESKTOP_DIR / "packaging" / "windows" / "build.ps1"
+        if not nsis.is_file() or "un.删除数据目录" not in nsis.read_text(encoding="utf-8"):
+            fail("NSIS 卸载默认保留数据的可选段缺失")
+        if not build.is_file():
+            fail("缺少 Windows build.ps1")
+        # macOS/Linux stubs
+        for name in ("macos", "linux"):
+            stub = DESKTOP_DIR / "packaging" / name / "build.sh"
+            if not stub.is_file():
+                fail(f"缺少 {name} 占位脚本")
+
+
+
 def main() -> None:
     desktop_host.force_utf8_stdio()
     _web_mode_no_token()
@@ -306,6 +360,8 @@ def main() -> None:
     for name, func in security_checks.ALL.items():
         func()
         print(f"{name} ok")
+    _wizard_and_update_unit()
+    print("wizard/update ok")
     _busy_port_and_lock()
     _cli_ready_file()
     print("desktop check ok")
