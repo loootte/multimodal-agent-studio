@@ -26,6 +26,7 @@ if WEB_DIR not in sys.path:
 
 import character
 import chat_run
+import desktop_notify
 import image_run
 import resources
 import store
@@ -79,6 +80,10 @@ class App:
                              key_id=self.storage.key_id, key_source=self.storage.key_source)
         self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts, storage=self.storage)
         self.runs = chat_run.RunHub()
+        # 13.B（#75）：桌面通知只在桌面壳模式挂上；文本只来自宿主模板。
+        self.notify = desktop_notify.NotifyHub() if self.desktop_token else None
+        if self.notify is not None:
+            self.runs.observer = self.notify.observe
 
 
 def bind_host(host: str) -> str:
@@ -484,7 +489,42 @@ def _set_desktop_cookie(handler: BaseHTTPRequestHandler, token: str) -> None:
     )
 
 
+_DRAIN_LIMIT = 1 << 20
+
+
+def _discard_unread_body(handler: BaseHTTPRequestHandler) -> None:
+    """路由在读请求体之前就回了错误（404/401/403/415…）时，把没读的请求体读掉。
+
+    不读的话：HTTP/1.1 长连接上剩下的字节会被当成下一个请求行；Windows 上带着未读数据关 socket
+    会发 RST，客户端常在读响应时报 ConnectionAbortedError（WinError 10053）。太大的就不读，直接断开。
+    """
+    if getattr(handler, "_mas_body_read", False):
+        return
+    handler._mas_body_read = True
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except (AttributeError, TypeError, ValueError):
+        length = 0
+    if length <= 0:
+        return
+    if length > _DRAIN_LIMIT:
+        handler.close_connection = True
+        return
+    try:
+        handler.rfile.read(length)
+    except OSError:
+        handler.close_connection = True
+
+
 def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
+    handler._mas_body_read = False
+    try:
+        _dispatch_inner(handler, app, method)
+    finally:
+        _discard_unread_body(handler)
+
+
+def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
     try:
         parsed = urllib.parse.urlparse(handler.path)
         path = parsed.path
@@ -505,6 +545,14 @@ def _dispatch(handler: BaseHTTPRequestHandler, app: App, method: str) -> None:
             if method == "POST" and path == "/api/desktop/stop":
                 stopped = chat_run.stop_all(app)
                 _send_json(handler, 200, {"ok": True, "stopped": stopped})
+                return
+            if method == "GET" and path == "/api/desktop/notifications":
+                # 13.B：托盘通知轮询。只有模板文本（工具名 + 状态 + 张数），没有正文和文件名。
+                try:
+                    after = max(0, int((query.get("after") or ["0"])[0]))
+                except ValueError:
+                    after = 0
+                _send_json(handler, 200, app.notify.since(after) if app.notify else {"items": [], "last": 0})
                 return
         if method == "GET" and path == "/":
             _send_file(handler, os.path.join(WEB_DIR, "static", "index.html"), "text/html; charset=utf-8")
@@ -859,6 +907,7 @@ def _read_json(handler: BaseHTTPRequestHandler, max_body: int = _MAX_BODY) -> di
     if length < 0 or length > max_body:
         raise chat_run.RequestError(413, "payload_too_large", "这条请求太长了。")
     raw = handler.rfile.read(length) if length else b""
+    handler._mas_body_read = True
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:

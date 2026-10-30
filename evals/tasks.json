@@ -361,6 +361,34 @@
       "category": "security",
       "kind": "desktop_token",
       "fake_only": true
+    },
+    {
+      "id": "security.desktop_notify_no_body",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "notify_no_body"
+    },
+    {
+      "id": "security.desktop_keychain_not_in_webview",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "keychain_not_in_webview"
+    },
+    {
+      "id": "security.desktop_default_encrypted",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "default_encrypted"
+    },
+    {
+      "id": "security.desktop_file_handle_only",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "file_handle_only"
     }
   ]
 }

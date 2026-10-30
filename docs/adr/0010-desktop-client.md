@@ -42,6 +42,8 @@
 - WebView 严格 CSP、禁止导航到 sidecar 以外的地址、release 关闭 devtools；外链经宿主确认卡后交给系统浏览器。
 - 自动更新默认关闭；开启后作为新出站渠道 `update` 记审计，按 12.C 加字段白名单（只有版本号和平台）。
 
+13.B 实现记录：密钥条目由 sidecar 进程内的 `packages/keychain.py` 读写（Windows 直接用凭据管理器 API，其它平台用 `keyring`）；`js_api` 只有选文件 / 另存审计两个方法，令牌不暴露；通知文本只来自 `apps/web/desktop_notify.py` 的固定模板；默认加密的明文目录由宿主启动前预检拒绝，不做自动迁移。
+
 ### 不变
 
 一次 `generate_image` 出一张、张数由 `plan_images` 决定、本地内容不进 LLM、单 Agent 模式不变、`remote_local_prompt` 默认 `refuse`。桌面壳不新增任何能把本地内容发给模型的路径。

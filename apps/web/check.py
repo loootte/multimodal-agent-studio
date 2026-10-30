@@ -6576,6 +6576,22 @@ def _delete_session_case(base: str, directory: str) -> None:
     status, _body = request("POST", base + f"/api/sessions/{victim}/delete", {})
     if status != 404:
         fail("重复删除没有返回 404")
+    # 路由在读请求体前就回错时，请求体也要读掉：长连接上下一个请求不能被残留字节带偏
+    # （Windows 上残留数据关连接会 RST，客户端报 WinError 10053）。
+    parsed_base = urllib.parse.urlparse(base)
+    conn = http.client.HTTPConnection(parsed_base.hostname, parsed_base.port, timeout=5)
+    try:
+        conn.request("POST", f"/api/sessions/{victim}/delete", body=b'{"pad": "' + b"x" * 64 + b'"}',
+                     headers={"Content-Type": "application/json"})
+        first = conn.getresponse()
+        first.read()
+        conn.request("GET", "/api/sessions")
+        second = conn.getresponse()
+        second.read()
+        if first.status != 404 or second.status != 200:
+            fail(f"提前回错后没读掉请求体，长连接被带偏：{first.status} {second.status}")
+    finally:
+        conn.close()
     status, _body = request("POST", base + f"/api/sessions/{keeper}/delete", {})
     if status != 200:
         fail("停下以后的会话删不掉")

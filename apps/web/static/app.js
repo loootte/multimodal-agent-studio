@@ -582,6 +582,18 @@ function renderEgress() {
 
 async function exportEgress() {
   const query = state.currentId ? `?session_id=${encodeURIComponent(state.currentId)}` : "";
+  const native = desktopApi();
+  if (native && native.save_egress_export) {
+    // 13.B：桌面壳用系统「另存为」对话框；路径不回到页面。
+    try {
+      const result = await native.save_egress_export(state.currentId || null);
+      if (result && result.ok) showNote("出站审计已导出。");
+      else if (!result || result.code !== "cancelled") showNote("导出失败。");
+    } catch (error) {
+      showNote("导出失败。");
+    }
+    return;
+  }
   try {
     const response = await fetch(`/api/egress/export${query}`);
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).message || "导出失败。");
@@ -989,7 +1001,29 @@ function localEntry(message, request) {
     const file = document.createElement("input");
     file.type = "file";
     file.setAttribute("aria-label", "留在本机的文件");
-    form.append(hint, file, actions);
+    form.classList.add("local-entry-file");
+    form.append(hint, file);
+    const native = desktopApi();
+    if (native && native.pick_local_file) {
+      // 13.B：桌面壳用系统「打开文件」对话框。路径和字节只在宿主 Python 里，JS 只拿到 ok / 错误码。
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.textContent = "用系统对话框选择…";
+      pick.addEventListener("click", () => pickNativeFile(message, request, pick, button));
+      form.append(pick);
+    }
+    const drop = document.createElement("p");
+    drop.className = "status-line";
+    drop.textContent = "也可以把文件拖到这里。文件只存在本机，模型只看到句柄。";
+    form.append(drop, actions);
+    form.addEventListener("dragover", (event) => event.preventDefault());
+    form.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const dropped = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (dropped) submitLocalBlob(message, request, dropped, button);
+    });
+    form._localDrop = (dropped) => submitLocalBlob(message, request, dropped, button);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       submitLocalFile(message, request, file, button);
@@ -1040,9 +1074,59 @@ async function skipLocal(message, request, cancel, submit) {
   }
 }
 
-async function submitLocalFile(message, request, file, button) {
+function desktopApi() {
+  return (window.pywebview && window.pywebview.api) || null;
+}
+
+async function pickNativeFile(message, request, pick, button) {
   const runId = message.run_id || request.run_id;
+  const native = desktopApi();
+  if (!runId || !native) return;
+  pick.disabled = true;
+  button.disabled = true;
+  try {
+    const result = await native.pick_local_file(runId);
+    if (!result || !result.ok) {
+      pick.disabled = false;
+      button.disabled = false;
+      if (result && result.code === "cancelled") return;
+      const reasons = {
+        payload_too_large: "文件太大了，本机内容最大 256 KB。",
+        empty: "这个文件是空的。",
+        not_waiting: "现在没有在等待本地内容。",
+      };
+      showNote(reasons[result && result.code] || "没能加入本地内容。");
+    }
+  } catch (error) {
+    pick.disabled = false;
+    button.disabled = false;
+    showNote("没能打开系统文件对话框。");
+  }
+}
+
+// 13.B：拖进窗口的文件。WebView 默认会跳转去打开 file://，这里拦下来：
+// 有等待中的「本机文件」请求就交给它（走同一个上传接口、只得句柄），否则只提示，不读文件。
+document.addEventListener("dragover", (event) => event.preventDefault());
+document.addEventListener("drop", (event) => {
+  event.preventDefault();
+  const dropped = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+  if (!dropped) return;
+  const forms = [...document.querySelectorAll("form.local-entry-file")].filter((form) => form._localDrop);
+  const target = forms[forms.length - 1];
+  if (target) {
+    target._localDrop(dropped);
+  } else {
+    showNote("现在没有在等待本机文件。要让模型看图，请用输入框旁的附件按钮。");
+  }
+});
+
+async function submitLocalFile(message, request, file, button) {
   const chosen = file.files && file.files[0];
+  return submitLocalBlob(message, request, chosen, button);
+}
+
+async function submitLocalBlob(message, request, chosen, button) {
+  const runId = message.run_id || request.run_id;
   if (!runId || !chosen) {
     showNote("请选择要留在本机的文件。");
     return;
@@ -1449,6 +1533,7 @@ function storageText(body) {
   return `已加密（${body.alg}，每个会话单独派生密钥，key_id ${body.key_id}）。`
     + (rest ? ` 还有 ${rest} 项明文残留，请运行 storage_tool.py encrypt。` : "")
     + (body.decrypt_failures ? ` 有 ${body.decrypt_failures} 次解密失败（密钥不对或文件被改）。` : "")
+    + (body.key_source === "keychain" ? " 主密钥在系统钥匙串里。" : "")
     + " 丢了主密钥和备份就无法恢复。";
 }
 
@@ -1506,6 +1591,9 @@ function keyHint(provider) {
   if (!provider || !provider.configured) return "密钥只保存在本机。保存后这一栏会清空，页面上方会留下末四位。";
   if (provider.key_source === "environment") {
     return `正在使用环境变量里的密钥，末四位 ${provider.key_hint}。在这里填写会改成本机文件。`;
+  }
+  if (provider.key_source === "keychain") {
+    return `密钥在系统钥匙串里（页面拿不到原文），末四位 ${provider.key_hint}。留空表示不修改。`;
   }
   return `本机已保存密钥，末四位 ${provider.key_hint}。留空表示不修改。`;
 }

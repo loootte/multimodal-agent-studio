@@ -44,7 +44,11 @@
         "security.injection_confirm_text_host": true,
         "security.injection_high_risk_ack": true,
         "security.injection_tool_result_untrusted": true,
-        "security.desktop_token_required": true
+        "security.desktop_token_required": true,
+        "security.desktop_notify_no_body": true,
+        "security.desktop_keychain_not_in_webview": true,
+        "security.desktop_default_encrypted": true,
+        "security.desktop_file_handle_only": true
       }
     }
   }

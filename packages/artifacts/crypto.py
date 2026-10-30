@@ -51,6 +51,7 @@ STORAGE_ERRORS = {
     "storage_backup_invalid": "备份文件或口令不对。",
     "storage_passphrase_weak": f"备份口令至少 {PASSPHRASE_MIN} 个字符。",
     "storage_mode_invalid": "MAS_STORAGE_ENCRYPTION 只认 off / on / memory。",
+    "storage_keychain_failed": "系统钥匙串读写失败。检查凭据管理器 / 钥匙串是否可用，或设 MAS_KEYCHAIN=off 改用主密钥文件。",
 }
 
 
@@ -235,11 +236,32 @@ def parse_master(text: str) -> bytes:
     return raw
 
 
+def _keychain():
+    from packages import keychain
+
+    return keychain
+
+
 def load_master(data_dir: str | None = None) -> tuple[bytes | None, str]:
-    """返回 (主密钥, 来源)。来源 env / file / none。环境变量优先。"""
+    """返回 (主密钥, 来源)。来源 env / keychain / file / none。
+
+    顺序：环境变量 > 系统钥匙串（13.B，桌面壳启用时）> 主密钥文件。"""
     env = os.environ.get("MAS_MASTER_KEY")
     if env:
         return parse_master(env), "env"
+    keychain = _keychain()
+    if keychain.enabled():
+        try:
+            stored = keychain.get(keychain.MASTER_ENTRY)
+        except keychain.KeychainError as exc:
+            raise StorageError("storage_keychain_failed", exc.code) from exc
+        if stored:
+            return parse_master(stored), "keychain"
+    return load_master_file(data_dir)
+
+
+def load_master_file(data_dir: str | None = None) -> tuple[bytes | None, str]:
+    """只看主密钥文件（迁移 / 回退命令用）。"""
     path = default_key_path()
     if not os.path.isfile(path):
         return None, "none"
@@ -274,6 +296,19 @@ def write_master(master: bytes, data_dir: str | None = None, path: str | None = 
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(payload)
     return path
+
+
+def store_master(master: bytes, data_dir: str | None = None) -> str:
+    """新主密钥存哪：钥匙串启用且可用就进钥匙串（读回校验），否则写文件。返回来源 keychain / file。"""
+    keychain = _keychain()
+    if keychain.active():
+        try:
+            keychain.set(keychain.MASTER_ENTRY, _b64e(master))
+        except keychain.KeychainError as exc:
+            raise StorageError("storage_keychain_failed", exc.code) from exc
+        return "keychain"
+    write_master(master, data_dir)
+    return "file"
 
 
 def new_master() -> bytes:
@@ -403,6 +438,7 @@ class Storage:
             "key_source": self.key_source if self.mode == "encrypted" else None,
             "session_isolation": "per_session_key" if self.mode == "encrypted" else None,
             "persisted": self.mode != "memory",
+            "keychain": _keychain().status(),
         }
 
 
@@ -437,8 +473,7 @@ def open_storage(data_dir: str, *, allow_create: bool = True) -> Storage:
         if not crypto_available():
             raise StorageError("storage_crypto_unavailable")
         master = new_master()
-        write_master(master, data_dir)
-        source, created = "file", True
+        source, created = store_master(master, data_dir), True
     cipher = Cipher(master)
     write_marker(data_dir, cipher.key_id)
     return Storage("encrypted", cipher, source, created)
