@@ -283,7 +283,11 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
         return None
     root = os.path.realpath(folder)
     module = os.path.realpath(os.path.join(root, entry["module"]))
-    if os.path.normcase(os.path.commonpath([root, module])) != os.path.normcase(root) or module == root:
+    try:
+        inside = os.path.normcase(os.path.commonpath([root, module])) == os.path.normcase(root)
+    except ValueError:  # Windows 上不同盘符
+        inside = False
+    if not inside or module == root:
         return "entry.module 指向工具目录外面。"
     if not os.path.isfile(module):
         return "entry.module 指向的文件不在工具目录里。"

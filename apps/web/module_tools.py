@@ -74,11 +74,19 @@ def form_tools() -> list[dict]:
     return out
 
 
+def _inside(root: str, path: str) -> bool:
+    """path 在 root 里面（都已 realpath）。Windows 上不同盘符直接算在外面。"""
+    try:
+        return os.path.normcase(os.path.commonpath([root, path])) == os.path.normcase(root)
+    except ValueError:
+        return False
+
+
 def load_builtin(path: str, folder: str):
     """import 内置工具的代码文件。文件必须在 folder 里（realpath），改了文件会重新加载。"""
     root = os.path.realpath(folder)
     real = os.path.realpath(path)
-    if os.path.commonpath([root, real]) != root or not os.path.isfile(real):
+    if not _inside(root, real) or real == root or not os.path.isfile(real):
         raise GuardError("tool_error", "工具代码不在自己的工具目录里。")
     stamp = os.stat(real).st_mtime_ns
     cached = _LOADED.get(real)
