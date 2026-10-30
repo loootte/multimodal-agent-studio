@@ -11,6 +11,7 @@
 #
 # Gap: this environment may lack makensis / a downloaded embed zip. The script still
 # produces a smoke layout that reuses -SourcePython (default: MAS_PYTHON / find-python).
+# Smoke path NEVER copies bare python.exe (missing python3xx.dll → 系统错误).
 
 param(
   [string]$PythonEmbedZip = "",
@@ -49,9 +50,13 @@ function Resolve-SourcePython {
 
 $srcPy = Resolve-SourcePython -Hint $SourcePython
 Write-Host "Source Python: $srcPy"
+$srcDir = Split-Path -Parent $srcPy
+$srcPyw = Join-Path $srcDir "pythonw.exe"
+if (-not (Test-Path $srcPyw)) { $srcPyw = $srcPy }
 
 # --- Runtime ---
 $runtimePy = Join-Path $Stage "runtime\python"
+$IsSmoke = $false
 if ($PythonEmbedZip -and (Test-Path $PythonEmbedZip)) {
   Write-Host "Expanding embeddable Python from $PythonEmbedZip"
   Expand-Archive -Path $PythonEmbedZip -DestinationPath $runtimePy -Force
@@ -66,42 +71,24 @@ if ($PythonEmbedZip -and (Test-Path $PythonEmbedZip)) {
   & (Join-Path $runtimePy "python.exe") -m ensurepip --upgrade
   & (Join-Path $runtimePy "python.exe") -m pip install --upgrade pip
 } else {
-  Write-Host "No embed zip; copying portable venv-style runtime from $srcPy (smoke path)."
-  $srcDir = Split-Path -Parent $srcPy
-  # Minimal smoke: write a runtime\python\python.cmd that delegates to SourcePython,
-  # plus a marker so find-python / start-mas prefer it. Avoids redistributing Miniconda.
+  $IsSmoke = $true
+  Write-Host "No embed zip; smoke runtime shims only (delegate to $srcPy). Do NOT copy bare python.exe."
+  # Only .bat shims + marker. Never Copy-Item python.exe/pythonw.exe — they need python3xx.dll beside them.
   @"
 @echo off
-REM Smoke runtime shim — replace by building with -PythonEmbedZip for real installs.
-set "MAS_SMOKE_RUNTIME=1"
-"$srcPy" %*
-"@ | Set-Content -Path (Join-Path $runtimePy "python.exe.cmd") -Encoding ASCII
-  # Also drop a real python.bat for start-mas; and a pointer file
-  @"
-@echo off
+REM Smoke runtime shim — rebuild with -PythonEmbedZip for a self-contained install.
 "$srcPy" %*
 "@ | Set-Content -Path (Join-Path $runtimePy "python.bat") -Encoding ASCII
   @"
 @echo off
-REM pythonw shim
-set "_PY=$srcPy"
-set "_PYW=%~dp0"
-if exist "%~dp0..\..\..\.." (
-  rem keep
-)
-"$srcPy" %*
+REM Smoke pythonw shim — prefer SourcePython's pythonw.exe when present.
+"$srcPyw" %*
 "@ | Set-Content -Path (Join-Path $runtimePy "pythonw.bat") -Encoding ASCII
   Set-Content -Path (Join-Path $runtimePy "SMOKE_RUNTIME.txt") -Value "Delegates to $srcPy. Rebuild with -PythonEmbedZip for a self-contained install." -Encoding UTF8
-  # Copy python.exe/pythonw.exe if they live next to each other AND are embeddable-sized? Skip — use bat.
-  # Provide python.exe as a tiny launcher via PowerShell alias file for NSIS shortcuts:
-  Copy-Item $srcPy (Join-Path $runtimePy "python.exe") -ErrorAction SilentlyContinue
-  $pyw = Join-Path $srcDir "pythonw.exe"
-  if (Test-Path $pyw) { Copy-Item $pyw (Join-Path $runtimePy "pythonw.exe") -ErrorAction SilentlyContinue }
 }
 
-# Install runtime deps into embedded / smoke interpreter
-$pipPy = Join-Path $runtimePy "python.exe"
-if (-not (Test-Path $pipPy)) { $pipPy = $srcPy }
+# Install runtime deps: embed uses staged python.exe; smoke uses SourcePython (no orphan exe in runtime).
+$pipPy = if ($IsSmoke) { $srcPy } else { Join-Path $runtimePy "python.exe" }
 Write-Host "Installing app deps with $pipPy"
 & $pipPy -m pip install --disable-pip-version-check cryptography pywebview pystray Pillow 2>$null
 if ($LASTEXITCODE -ne 0) {
@@ -132,19 +119,39 @@ Get-ChildItem $App -Recurse -Directory -Filter "toolpacks\installed" -ErrorActio
 Remove-Item -Recurse -Force (Join-Path $App "apps\desktop\src-tauri") -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $App "apps\desktop\dist") -ErrorAction SilentlyContinue
 
-# Entrypoints at layout root
+# Entrypoints at layout root.
+# Smoke (SMOKE_RUNTIME.txt): always use .bat shims → SourcePython.
+# Real embed: use python.exe only when a matching python3*.dll sits beside it; else fall back to .bat.
 $start = @"
 @echo off
 setlocal
 set "MAS_REPO_ROOT=%~dp0app"
-set "MAS_PYTHON=%~dp0runtime\python\python.exe"
-if not exist "%MAS_PYTHON%" set "MAS_PYTHON=%~dp0runtime\python\python.bat"
+set "RT=%~dp0runtime\python"
 cd /d "%MAS_REPO_ROOT%"
 call "%~dp0app\apps\desktop\find-python.cmd"
-rem Prefer embedded runtime over system
-if exist "%~dp0runtime\python\python.exe" set "MAS_PY=%~dp0runtime\python\python.exe"
-if exist "%~dp0runtime\python\pythonw.exe" set "MAS_PYW=%~dp0runtime\python\pythonw.exe"
-"%MAS_PY%" "%~dp0app\apps\desktop\launcher.py"
+rem Prefer install-dir runtime over system, but never a bare python.exe without its DLL.
+if exist "%RT%\SMOKE_RUNTIME.txt" (
+  set "MAS_PY=%RT%\python.bat"
+  set "MAS_PYW=%RT%\pythonw.bat"
+  set "MAS_PYTHON=%RT%\python.bat"
+  goto launch
+)
+if exist "%RT%\python.exe" (
+  dir /b "%RT%\python3*.dll" >nul 2>&1
+  if not errorlevel 1 (
+    set "MAS_PY=%RT%\python.exe"
+    if exist "%RT%\pythonw.exe" (set "MAS_PYW=%RT%\pythonw.exe") else (set "MAS_PYW=%RT%\python.exe")
+    set "MAS_PYTHON=%RT%\python.exe"
+    goto launch
+  )
+)
+if exist "%RT%\python.bat" (
+  set "MAS_PY=%RT%\python.bat"
+  if exist "%RT%\pythonw.bat" (set "MAS_PYW=%RT%\pythonw.bat") else (set "MAS_PYW=%RT%\python.bat")
+  set "MAS_PYTHON=%RT%\python.bat"
+)
+:launch
+call "%MAS_PY%" "%~dp0app\apps\desktop\launcher.py"
 if errorlevel 1 pause
 "@
 Set-Content -Path (Join-Path $Stage "start-mas.cmd") -Value $start -Encoding ASCII
@@ -162,6 +169,10 @@ Build: apps/desktop/packaging/windows/build.ps1
 "@ | Set-Content -Path (Join-Path $Stage "README.txt") -Encoding UTF8
 
 Write-Host "Layout ready: $Stage"
+if ($IsSmoke) {
+  Write-Host "Smoke runtime contents:"
+  Get-ChildItem $runtimePy | ForEach-Object { Write-Host ("  " + $_.Name) }
+}
 
 # NSIS
 if (-not $SkipNsis) {

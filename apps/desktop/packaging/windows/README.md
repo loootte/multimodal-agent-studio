@@ -27,10 +27,22 @@ powershell -File apps\desktop\packaging\windows\build.ps1 `
 | `dist/mas-windows/` | 可拷贝的目录布局；双击 `start-mas.cmd` |
 | `dist/MultimodalAgentStudio-<ver>-Setup.exe` | 有 `makensis` 时才生成 |
 
+### 冒烟布局 vs 正式内嵌
+
+- **冒烟**（无 `-PythonEmbedZip`）：`runtime/python/` 只有 `python.bat` / `pythonw.bat` / `SMOKE_RUNTIME.txt`，转发到构建机上的 SourcePython。**绝不**复制裸的 `python.exe`（缺 `python3xx.dll` 会弹出「由于找不到 python312.dll，无法继续执行代码」）。
+- **正式内嵌**：展开 embed zip；`start-mas.cmd` 仅在同目录有 `python3*.dll` 时才用 `python.exe`。
+
+### `start-mas.cmd` 解析顺序
+
+1. 有 `SMOKE_RUNTIME.txt` → `python.bat` / `pythonw.bat`
+2. 有 `python.exe` **且** 有 `python3*.dll` → 用 exe
+3. 否则回退 `python.bat`
+
 ## 安装 / 卸载
 
 - 安装目录默认 `%LOCALAPPDATA%\MultimodalAgentStudio`（当前用户，不需管理员）。
 - 卸载**默认保留**数据目录和钥匙串条目；勾选「删除数据目录和钥匙串条目」才删。
+- **顺序**：可选的数据/钥匙串清理（`UnSecData`）写在删除 `runtime`/`app`（`UnSecApp`）**之前**，这样勾选删除时仍能用安装目录里的 `python.exe` 或冒烟的 `python.bat` 跑 `keychain_tool.py purge-all`。
 
 ## 缺口（本环境）
 
