@@ -88,6 +88,10 @@
 | 6.3 | 每次调用都弹宿主模板确认卡，server 写的说明不进卡片（#78） | 自动：`security.mcp_confirm_always` |
 | 6.4 | 本地正文及其编码变体在连接 MCP server 前就被拦（`egress.blocked`，渠道 `toolpack`），server 不会被启动（#78） | 自动：`security.mcp_local_content_blocked` |
 | 6.5 | MCP 结果标 `untrusted` 回传，非文字内容丢掉；出站 JSON-RPC 有字段和方法白名单（#78） | 自动：`security.mcp_untrusted_result`、`_check_mcp_client` |
+| 6.6 | 工具安全策略没配置就是最严格：命令模式、回环 / 链路本地 / 局域网地址、参数黑名单都按默认拦；非法项回退默认并给出 warning（#93） | 自动：`security.tool_policy_default_block`、`_check_tool_policy` |
+| 6.7 | 放宽项（命令、地址类别、认证头、`params_allow`）要显式写进策略，安装时勾 `external_command` / `policy_relaxed`，启用时带 `acknowledge`；记 `security.policy_relaxed`（只有字段名）；改策略后已启用工具变成 `changed`，要重新启用（#93） | 自动：`security.tool_policy_explicit_relax`、`security.tool_policy_policy_change_reenable` |
+| 6.8 | 覆盖优先级 工具 > 包 > 全局 > 默认（#93） | 自动：`security.tool_policy_precedence` |
+| 6.9 | 认证头只从环境变量或钥匙串取值，不写盘、不进日志 / 审计 / 确认卡、不回给模型；策略写接口跨站 403，工具执行期间拒绝；本地正文检查和 `remote_local_prompt` 默认拒绝是锁定项，不能关（#93） | 自动：`security.tool_policy_no_secret_leak`、`apps/web/check.py` 的 `_tool_policy_case` 和跨站用例 |
 
 ## 4. 发布前
 

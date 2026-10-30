@@ -90,6 +90,8 @@ def confirm_every_call(name: str) -> bool:
     pack = packs.find_tool(name)
     if packs.is_mcp(pack):  # 14.A：远端工具做什么宿主看不见，一律每次确认
         return True
+    if pack is not None and packs.policy_confirm_always(pack):  # #93：策略把确认收紧成每次都问
+        return True
     return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
 
 

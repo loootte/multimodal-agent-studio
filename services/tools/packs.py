@@ -61,12 +61,16 @@ _FIELDS = {"schema", "name", "version", "description", "order", "parameters", "m
            "ui", "content"}
 ENTRY_KINDS = ("python", "host", "module", "mcp")
 MCP_TRANSPORTS = ("stdio", "http")
+MCP_COMMAND_ARG = r"^[A-Za-z0-9@._/:=+,~-]{1,256}$"  # 与 sandbox.COMMAND_ARG 一致：不含 % 和 cmd 元字符
+LOOPBACK_LITERALS = ("localhost", "127.0.0.1", "::1")
 MCP_SEPARATOR = "__"  # 远端工具投影成 <包名>__<工具名>；第三方包名里不许出现
 RATINGS = ("general", "adult")
 # 「包含代码」：入口是 python/module，或包里带任何可执行的文件。安装时要单独勾选确认。
 CODE_SUFFIXES = (".py", ".pyc", ".pyd", ".pyw", ".so", ".dll", ".exe", ".bat", ".cmd", ".ps1", ".sh", ".js")
 ACCEPT_CODE = "code"
 ACCEPT_ADULT = "rating_adult"
+ACCEPT_COMMAND = "external_command"  # #93：stdio MCP 用策略放行的命令（不在 12.D 沙箱里）
+ACCEPT_POLICY = "policy_relaxed"     # #93：工具安全策略对这个包有放宽项
 
 # 内置工具名单（12.D #60）：只有这些名字能用 entry.kind=host 或仓库里的 python 模块，在宿主进程里跑。
 # 值是这个工具实际要用的权限：运行时二次核对「清单声明 ⊇ 实际需要」，清单少声明了就 permission_denied。
@@ -251,9 +255,20 @@ def _mcp_problems(data: dict, entry: dict, builtin: bool) -> list[str]:
     transport = entry.get("transport")
     if transport not in MCP_TRANSPORTS:
         return out + ["entry.transport 只能是 stdio 或 http。"]
-    if transport == "stdio":
+    if transport == "stdio" and "command" in entry:
+        # #93：命令形式。清单只做结构校验（和策略无关，否则改策略会让已装的包整个列不出来）；
+        # 命令要不要放行看工具安全策略的 stdio_commands，在审阅 / 安装和每次调用时核对。
+        if set(entry) - {"kind", "transport", "command", "args"}:
+            out.append("命令形式的 stdio entry 只能有 kind、transport、command、args。")
+        if not isinstance(entry.get("command"), str) or not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", entry["command"]):
+            out.append("entry.command 只能是裸命令名（如 npx），不能带路径和参数。")
+        args = entry.get("args", [])
+        if not isinstance(args, list) or len(args) > 32 or \
+                not all(isinstance(a, str) and re.match(MCP_COMMAND_ARG, a) for a in args):
+            out.append("entry.args 最多 32 项，每项只能有字母、数字和 @%._/:=+,~-。")
+    elif transport == "stdio":
         if set(entry) - {"kind", "transport", "module"}:
-            out.append("stdio 的 entry 只能有 kind、transport、module（不能写任意命令）。")
+            out.append("stdio 的 entry 只能有 kind、transport、module（命令形式要写 command，并由工具安全策略放行）。")
         module = entry.get("module")
         if not isinstance(module, str) or not module.endswith(".py"):
             out.append("stdio 的 entry.module 必须是工具目录里的 .py（在 12.D 沙箱里跑）。")
@@ -284,8 +299,8 @@ def mcp_url_problem(url) -> str | None:
         parts.port
     except ValueError:
         return "entry.url 不是合法地址。"
-    if parts.scheme != "https":
-        return "entry.url 只能是 https://（不支持明文 http）。"
+    if parts.scheme != "https" and not (parts.scheme == "http" and (host or "").lower() in LOOPBACK_LITERALS):
+        return "entry.url 只能是 https://（明文 http 只许写 localhost / 127.0.0.1 / ::1，且要工具安全策略放行回环）。"
     if not host or parts.username or parts.password or parts.fragment:
         return "entry.url 要有主机名，不能带用户名、密码或 # 片段。"
     return None
@@ -444,8 +459,60 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
 
 
 def _mcp_stdio(data: dict) -> bool:
+    """包里的 .py 当 stdio MCP server（在 12.D 沙箱里跑）。命令形式不算。"""
     entry = data.get("entry") if isinstance(data, dict) else None
-    return isinstance(entry, dict) and entry.get("kind") == "mcp" and entry.get("transport") == "stdio"
+    return isinstance(entry, dict) and entry.get("kind") == "mcp" and entry.get("transport") == "stdio" \
+        and "command" not in entry
+
+
+def mcp_command(data: dict) -> str | None:
+    """#93：命令形式的 stdio MCP 用的命令名；不是就 None。"""
+    entry = data.get("entry") if isinstance(data, dict) else None
+    if isinstance(entry, dict) and entry.get("kind") == "mcp" and entry.get("transport") == "stdio":
+        command = entry.get("command")
+        return command if isinstance(command, str) else None
+    return None
+
+
+def policy_review(data: dict) -> dict:
+    """#93：工具安全策略对这个包的影响。relaxations 要在安装时勾选（policy_relaxed）；
+    problems 是策略不允许的地方（命令没放行、明文 http 回环没放行），有就装不上（policy_denied）。"""
+    from services.tools import policy
+
+    name = data.get("name") if isinstance(data.get("name"), str) else None
+    entry = data.get("entry") if isinstance(data.get("entry"), dict) else {}
+    effective = policy.resolve(name)
+    out = {"relaxations": [], "problems": [], "items": []}
+    if entry.get("kind") != "mcp":
+        return out
+    transport = entry.get("transport")
+    command = mcp_command(data)
+    out["relaxations"] = policy.relaxations(effective, transport, command)
+    if command and command not in effective["stdio_commands"]:
+        out["problems"].append(f"工具安全策略没有放行命令 {command}（stdio_commands）。")
+    if transport == "http":
+        import urllib.parse
+
+        try:
+            host = (urllib.parse.urlsplit(str(entry.get("url") or "")).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if host in LOOPBACK_LITERALS and not effective["http_loopback"]:
+            out["problems"].append("这个 MCP server 在本机回环地址上，工具安全策略没有放行回环（http_loopback）。")
+    for key in out["relaxations"]:
+        out["items"].append({"field": key, "text": POLICY_RELAX_TEXT[key]})
+    return out
+
+
+POLICY_RELAX_TEXT = {
+    "stdio_commands": "策略放行了这个包用的命令。命令在 12.D 沙箱外运行：能读写你能读写的文件、能自己联网；"
+                      "宿主只清掉环境变量（保留 PATH）、工作目录设为包目录、限时。",
+    "http_loopback": "策略允许连本机回环地址（本程序自己的端口除外）。本机上的其他服务（如 ComfyUI）也能被连到。",
+    "http_link_local": "策略允许连链路本地地址（169.254.x.x / fe80::），包括云主机的元数据地址。",
+    "http_private": "策略允许连局域网地址（10.x、172.16-31.x、192.168.x 等），局域网里的设备和服务能被连到。",
+    "auth": "策略给这个包配置了认证头。密钥从环境变量或本机钥匙串取，只在发请求时带上，不落盘、不进日志和审计、不给模型。",
+    "params_allow": "策略从参数名黑名单里放行了一些名字（如 text、path）。本地正文的出站检测照样生效。",
+}
 
 
 def has_code(folder: str, data: dict) -> bool:
@@ -760,6 +827,16 @@ def review(data: dict, code: bool = False, panel: list | None = None) -> dict:
 
         out["confirm_every_call"] = True
         out["mcp"] = mcp_client.review_facts(entry)
+        out["policy"] = policy_review(data)
+        if mcp_command(data):
+            items.append({"permission": ACCEPT_COMMAND, "label": f"运行外部命令 {entry.get('command')}",
+                          "risk": "high",
+                          "effect": f"会在本机运行 {entry.get('command')} {' '.join(entry.get('args') or [])}"
+                                    "（工具安全策略放行的命令）。它不在 12.D 沙箱里：能读写你能读写的文件、能自己联网。"})
+        if out["policy"]["relaxations"]:
+            items.append({"permission": ACCEPT_POLICY, "label": "工具安全策略的放宽项", "risk": "high",
+                          "effect": "工具安全策略对这个包放宽了：" + "、".join(out["policy"]["relaxations"])
+                                    + "。改策略以后已启用的远端工具要重新启用。"})
         if entry.get("transport") == "http":
             out["mode"] = "host_http"
     return out
@@ -778,6 +855,8 @@ def needs_confirm(pack: Pack, arguments=None) -> bool:
     # 12.E：敏感工具不论清单写了什么都要确认（校验已经拒绝了别的写法，这里是第二道）。
     if sensitive(pack):
         return True
+    if policy_confirm_always(pack):  # #93：策略只能把确认收紧成 always
+        return True
     policy = pack.manifest["confirm"]
     if policy == "always":
         return True
@@ -786,6 +865,15 @@ def needs_confirm(pack: Pack, arguments=None) -> bool:
     if not isinstance(arguments, dict):
         return True
     return any(key in arguments for key in pack.manifest.get("confirm_args") or [])
+
+
+def policy_confirm_always(pack) -> bool:
+    from services.tools import policy
+
+    if pack is None:
+        return False
+    server = getattr(pack, "mcp_server", None)
+    return policy.resolve(server or pack.name, pack.name)["confirm"] == "always"
 
 
 def load_module(pack: Pack):
@@ -905,13 +993,21 @@ def inspect(source: str) -> dict:
         level = rating(data) if isinstance(data, dict) else "general"
         content = data.get("content") if isinstance(data, dict) and isinstance(data.get("content"), dict) else {}
         accept = sorted(permissions + ([ACCEPT_CODE] if code else []) + ([ACCEPT_ADULT] if level == "adult" else []))
+        policy_info = {"relaxations": [], "problems": []}
+        if isinstance(data, dict) and not problems and (data.get("entry") or {}).get("kind") == "mcp":
+            policy_info = policy_review(data)
+            if mcp_command(data):
+                accept = sorted(accept + [ACCEPT_COMMAND])
+            if policy_info["relaxations"]:
+                accept = sorted(accept + [ACCEPT_POLICY])
         summary = {"name": data.get("name"), "version": data.get("version"), "description": data.get("description"),
                    "permissions": permissions, "code": code, "rating": level,
                    "min_age": content.get("min_age"), "label": content.get("label"), "confirm": content.get("confirm"),
                    "accept": accept, "ui": data.get("ui") if isinstance(data.get("ui"), dict) else {},
                    "target": os.path.join(installed_dir(), str(data.get("name") or "")),
                    "requires": data.get("requires") or {}, "problems": problems,
-                   "panel": panel,
+                   "panel": panel, "policy_problems": policy_info["problems"],
+                   "policy_relaxations": policy_info["relaxations"],
                    "review": review(data, code=code, panel=panel) if isinstance(data, dict) else None}
         if not problems:
             if find(data["name"]) is not None and not os.path.isdir(os.path.join(installed_dir(), data["name"])):
@@ -934,12 +1030,20 @@ def install(source: str, accept_permissions) -> dict:
     summary = inspect(source)
     if summary["problems"]:
         raise PackError("invalid_manifest", "工具包不合格：" + "；".join(summary["problems"]), summary["problems"])
+    if summary.get("policy_problems"):
+        raise PackError("policy_denied", "工具安全策略不允许：" + "；".join(summary["policy_problems"]),
+                        summary["policy_problems"])
     wanted = summary["accept"]
     given = sorted(set(accept_permissions)) if isinstance(accept_permissions, list) else None
     if given != wanted:
         given = given or []
         if summary["code"] and ACCEPT_CODE not in given:
             raise PackError("code_not_accepted", "这个工具包含代码（.py），安装前要勾选确认「包含代码」。")
+        if ACCEPT_COMMAND in wanted and ACCEPT_COMMAND not in given:
+            raise PackError("command_not_accepted", "这个 MCP 包要运行外部命令（不在沙箱里），安装前要勾选确认。")
+        if ACCEPT_POLICY in wanted and ACCEPT_POLICY not in given:
+            raise PackError("policy_not_accepted", "工具安全策略对这个包有放宽项，安装前要勾选确认："
+                            + "、".join(summary.get("policy_relaxations") or []) + "。")
         if summary["rating"] == "adult" and ACCEPT_ADULT not in given:
             raise PackError("rating_not_accepted",
                             f"这个工具声明了成人分级（rating=adult，{summary.get('min_age')} 岁以上），安装前要勾选确认。")
@@ -954,6 +1058,10 @@ def install(source: str, accept_permissions) -> dict:
         shutil.copytree(folder, staging, ignore=_export_ignore)
         record = {"schema": GRANT_SCHEMA, "permissions": summary["permissions"], "version": summary["version"],
                   "code": summary["code"], "rating": summary["rating"], "digest": pack_digest(staging)}
+        if ACCEPT_COMMAND in wanted:
+            record["external_command"] = True
+        if summary.get("policy_relaxations"):
+            record["policy_relaxed"] = list(summary["policy_relaxations"])
         with open(os.path.join(staging, GRANTS), "w", encoding="utf-8") as handle:
             json.dump(record, handle)
         shutil.rmtree(target, ignore_errors=True)
@@ -961,7 +1069,22 @@ def install(source: str, accept_permissions) -> dict:
     finally:
         if temp:
             shutil.rmtree(temp, ignore_errors=True)
+    if summary.get("policy_relaxations"):
+        _policy_audit("install", summary["policy_relaxations"])
     return summary
+
+
+def _policy_audit(stage: str, fields) -> None:
+    """#93：放宽项生效（安装 / 启用）时记 security.policy_relaxed，只有字段名。"""
+    try:
+        import uuid
+
+        from services import telemetry
+
+        telemetry.record("security.policy_relaxed", trace_id="pol_" + uuid.uuid4().hex, stage=stage,
+                         fields=sorted(str(f)[:48] for f in fields)[:20])
+    except Exception:  # noqa: BLE001 遥测失败不改变结果
+        pass
 
 
 def uninstall(name: str) -> None:

@@ -109,6 +109,26 @@
         <label><input type="checkbox" name="ctx_session_query"> 压缩后允许模型按引用取回原文（session_query）</label>
       </fieldset>
       <p id="context-hint" class="hint">非法取值会回退默认值。</p>
+      <h2>工具安全策略</h2>
+      <p class="hint">MCP 出站控制和参数黑名单（#93，见 docs/tool-policy.md）。留空 = 最严格：只跑包内 Python、不连回环 / 链路本地 / 局域网、不注入认证头。
+        层级 global → packs.&lt;包名&gt; → tools.&lt;工具名&gt;，越具体越优先。任何放宽在安装或启用工具时还要再确认一次；改了策略，已启用的 MCP 工具要重新启用。</p>
+      <fieldset id="tool-policy" class="context-settings">
+        <label>策略（JSON，只写要改的项）<textarea name="policy_json" rows="8" spellcheck="false" autocomplete="off"></textarea></label>
+        <p id="tool-policy-hint" class="hint">读取中…</p>
+        <details><summary>不可配置的底线（只读）</summary><ul id="tool-policy-locked" class="hint"></ul></details>
+        <div class="dialog-actions">
+          <button type="button" id="tool-policy-save">保存策略</button>
+          <button type="button" id="tool-policy-reset">恢复默认</button>
+        </div>
+        <label>MCP 认证密钥写进系统钥匙串（只写不读，仅桌面版）
+          <input name="policy_secret_pack" placeholder="包名" autocomplete="off" spellcheck="false">
+          <input name="policy_secret_value" type="password" placeholder="密钥" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="tool-policy-secret">写入</button>
+          <button type="button" id="tool-policy-secret-clear">删除</button>
+        </div>
+      </fieldset>
       <h2>本地存储</h2>
       <p id="storage-status" class="hint">读取中…</p>
       <p class="hint">加密、迁移、备份和恢复主密钥只走命令行 <code>python apps/web/storage_tool.py</code>，密钥不经过网页。见 docs/storage-encryption.md。</p>

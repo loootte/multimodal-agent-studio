@@ -5584,6 +5584,43 @@ def _now_mark(base: str) -> float:
     return round(time.time(), 3) - 0.002
 
 
+def _tool_policy_case(base: str) -> None:
+    """#93：工具安全策略 API。默认最严格；锁定项只读；坏值不存并给 warnings；放宽记 security.policy_relaxed（只有字段名）；
+    写入审计只有字段路径（不带包名、取值）；网页模式没有钥匙串，写密钥回 409；reset 恢复默认。"""
+    status, body = request("GET", base + "/api/tool-policy")
+    view = json.loads(body)
+    if status != 200 or view["policy"]["global"] or view["policy"]["packs"] or view["warnings"] \
+            or view["defaults"]["http_private"] is not False or view["defaults"]["stdio_commands"] != []:
+        fail(f"工具安全策略默认值不对：{status} {body[:300]}")
+    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model"):
+        if key not in {item["key"] for item in view["locked"]}:
+            fail(f"底线 {key} 没有列成锁定项")
+    mark = _now_mark(base)
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": {
+        "global": {"http_private": "yes", "local_body_check": "off", "result_max_chars": 8000},
+        "packs": {"mcp_secret_pack": {"http_loopback": True}}}})
+    view = json.loads(body)
+    if status != 200 or "global.http_private" not in view["warnings"] or "global.local_body_check" not in view["warnings"] \
+            or "http_private" in view["policy"]["global"] or view["policy"]["global"].get("result_max_chars") != 8000 \
+            or not view["policy"]["packs"]["mcp_secret_pack"].get("http_loopback"):
+        fail(f"工具安全策略坏值处理不对：{status} {body[:400]}")
+    changed = _config_audit_since(base, mark, "security.config_changed")
+    relaxed = _config_audit_since(base, mark, "security.policy_relaxed")
+    last = changed[-1] if changed else {}
+    if last.get("target") != "tool_policy" or "mcp_secret_pack" in json.dumps(last) or "8000" in json.dumps(last) \
+            or "packs.http_loopback" not in (last.get("fields") or []):
+        fail(f"工具安全策略写入审计不对：{last}")
+    if not relaxed or relaxed[-1].get("fields") != ["http_loopback"]:
+        fail(f"放宽没记 security.policy_relaxed：{relaxed}")
+    status, body = request("PUT", base + "/api/tool-policy/secret", {"pack": "mcp_secret_pack", "value": "tok-web-1"})
+    if status != 409 or json.loads(body).get("code") != "keychain_unavailable" or "tok-web-1" in body:
+        fail(f"网页模式写钥匙串密钥的结果不对：{status} {body}")
+    status, body = request("PUT", base + "/api/tool-policy", {"reset": True})
+    if status != 200 or json.loads(body)["policy"]["global"] or json.loads(body)["policy"]["packs"]:
+        fail(f"工具安全策略 reset 没恢复默认：{body[:300]}")
+    print("tool policy settings ok")
+
+
 def _context_settings_case(base: str) -> None:
     """14.B（#79）：压缩设置 API。默认值；合法项保存；非法项不存、回退默认值并列进 warnings；reset 恢复默认。"""
     status, body = request("GET", base + "/api/context")
@@ -5621,9 +5658,12 @@ def _config_origin_case(base: str) -> dict:
             fail(f"跨站写配置没被拒：{headers} {status} {body}")
     for path, body_ in (("/api/provider", {"base_url": "https://evil.example/v1", "model": "x"}),
                         ("/api/context", {"values": {"enabled": False}}),
+                        ("/api/tool-policy", {"policy": {"global": {"http_private": True}}}),
+                        ("/api/tool-policy/secret", {"pack": "mcp_x", "value": "nope"}),
                         ("/api/toolpacks/install", {"source": "/tmp/nowhere"}),
                         ("/api/toolpacks/x/uninstall", {})):
-        method = "PUT" if path in ("/api/provider", "/api/context") else "POST"
+        method = "PUT" if path in ("/api/provider", "/api/context", "/api/tool-policy", "/api/tool-policy/secret") \
+            else "POST"
         status, _ = _request_headers(method, base + path, body_, {"Origin": "https://evil.example"})
         if status != 403:
             fail(f"跨站写 {path} 没被拒：{status}")
@@ -5631,7 +5671,9 @@ def _config_origin_case(base: str) -> dict:
     if view["values"]["remote_local_prompt"]["value"] != "refuse":
         fail("跨站请求改动了 remote_local_prompt")
     denied = _config_audit_since(base, mark, "security.config_write_denied")
-    if len(denied) < 7 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
+    if json.loads(request("GET", base + "/api/tool-policy")[1])["policy"]["global"]:
+        fail("跨站请求改动了工具安全策略")
+    if len(denied) < 9 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
         fail(f"跨站写配置没记安全事件：{denied}")
     mark = _now_mark(base)
     status, body = _request_headers("PUT", url, {"values": {"remote_timeout_sec": 61}},
@@ -5657,6 +5699,7 @@ def _injection_cases(base: str, directory: str) -> None:
     _config_scope_unit(directory)
     _config_origin_case(base)
     _context_settings_case(base)
+    _tool_policy_case(base)
     print("injection guard ok")
 
 

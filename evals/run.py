@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from http.server import ThreadingHTTPServer
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1412,6 +1413,252 @@ def run_mcp(h: Harness, task: dict, live: bool) -> dict:
             shutil.rmtree(source, ignore_errors=True)
 
 
+def _policy_put(h: Harness, policy_body: dict) -> dict:
+    status, body = check.request("PUT", h.base + "/api/tool-policy", {"policy": policy_body})
+    expect(status == 200, f"写工具安全策略失败：{status} {body[:300]}")
+    return json.loads(body)
+
+
+def _policy_pack(h: Harness, source: str, name: str, url: str, accept_extra=()) -> dict:
+    """装一个指向 url 的假 HTTP MCP 包；返回 inspect 的结果（不一定装上）。"""
+    folder = _mcp_fake().write_pack(source, name, url)
+    status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": folder})
+    expect(status == 200, f"检查失败：{status} {body[:300]}")
+    return dict(json.loads(body), folder=folder)
+
+
+def _policy_mcp_rows(h: Harness, name: str, refresh: bool = False) -> tuple[int, list]:
+    path = f"/api/toolpacks/{name}/mcp" + ("/refresh" if refresh else "")
+    status, body = check.request("POST" if refresh else "GET", h.base + path, {} if refresh else None)
+    return status, ((json.loads(body).get("mcp") or {}).get("tools") or []) if status == 200 else []
+
+
+def run_tool_policy(h: Harness, task: dict, live: bool) -> dict:
+    """#93：可配置的工具安全策略（MCP 出站控制）。
+    default_block：未配置时外部命令不让装、http://回环地址不让装、局域网地址连接前就拒、默认黑名单参数的工具不进工具表；
+    explicit_relax：设置里放开回环后，安装要确认 policy_relaxed，启用要逐项 acknowledge（409 列字段名），之后能真正调用；
+                    审计只有字段名；
+    precedence：参数黑名单 tools > packs > global（全局放行、包收紧、工具再放行）；
+    no_secret_leak：认证头从环境变量 MAS_MCP_* 取，server 收到了，但模型请求、结果、事件流、审计、遥测、策略文件和接口里都没有；
+    policy_change_reenable：已启用的工具在策略变了（哪怕是收紧）之后退出工具表，要重新确认。"""
+    from services.tools import mcp_client
+
+    case = task["case"]
+    marker = task.get("marker", "POLICY")
+    saved_dir = os.environ.get("MAS_TOOLPACKS_DIR")
+    saved_post = mcp_client.HTTP_POST
+    saved_token = os.environ.get("MAS_MCP_EVAL_TOKEN")
+    temp = tempfile.mkdtemp(prefix="mas-eval-policy-")
+    source = tempfile.mkdtemp(prefix="mas-eval-policy-src-")
+    os.environ["MAS_TOOLPACKS_DIR"] = temp
+    fake = _mcp_fake().FakeMcpHttp(result_text=f"查到了 {marker}")
+    mcp_client.HTTP_POST = fake
+    installed = []
+    detail = {"case": case}
+
+    def install(info: dict, accept: list) -> None:
+        status, body = check.request("POST", h.base + "/api/toolpacks/install",
+                                     {"source": info["folder"], "accept_permissions": accept})
+        expect(status == 200, f"安装失败：{status} {body[:300]}")
+        installed.append(info["summary"]["name"] if "summary" in info else json.loads(body)["installed"]["name"])
+
+    def enable(name: str, row: dict, acknowledge=None) -> tuple[int, dict]:
+        payload = {"tool": row["remote"], "digest": row["digest"]}
+        if acknowledge is not None:
+            payload["acknowledge"] = acknowledge
+        status, body = check.request("POST", h.base + f"/api/toolpacks/{name}/mcp/enable", payload)
+        return status, json.loads(body)
+
+    try:
+        if case == "default_block":
+            folder = os.path.join(source, "mcp_cmd")
+            os.makedirs(folder)
+            data = _mcp_fake().manifest("mcp_cmd")
+            data.update(entry={"kind": "mcp", "transport": "stdio", "command": "npx", "args": ["-y", "some-server"]},
+                        permissions=dict(data["permissions"], network=False))
+            with open(os.path.join(folder, "tool.json"), "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            denied = {}
+            for label, folder_ in (("command", folder),
+                                   ("loopback", _policy_pack(h, source, "mcp_loop", "http://127.0.0.1:18080/mcp")["folder"])):
+                status, body = check.request("POST", h.base + "/api/toolpacks/inspect", {"source": folder_})
+                summary = json.loads(body).get("summary") or json.loads(body)
+                expect(status == 200 and summary.get("policy_problems"), f"{label} 没被标成策略不允许：{body[:300]}")
+                status, body = check.request("POST", h.base + "/api/toolpacks/install",
+                                             {"source": folder_, "accept_permissions": summary.get("accept")})
+                expect(status == 400 and json.loads(body).get("code") == "policy_denied",
+                       f"默认策略下 {label} 也装上了：{status} {body[:300]}")
+                denied[label] = json.loads(body).get("code")
+            # 局域网 https 地址能装，但连接前就拒，server 一条请求都没收到。
+            info = _policy_pack(h, source, "mcp_lan", "https://192.168.1.20/mcp")
+            install(info, ["network"])
+            status, _ = _policy_mcp_rows(h, "mcp_lan", refresh=True)
+            expect(status != 200 and not fake.calls, f"局域网地址也连了：{status} {fake.calls}")
+            # 默认黑名单参数（prompt）：工具标 blocked，启用不了，不进工具表。
+            fake.tools.append({"name": "draw", "description": "画图。",
+                               "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}}}})
+            info = _policy_pack(h, source, "mcp_fake", _mcp_fake().URL)
+            install(info, ["network"])
+            status, rows = _policy_mcp_rows(h, "mcp_fake", refresh=True)
+            draw = {r["remote"]: r for r in rows}.get("draw") or {}
+            expect(draw.get("state") == "blocked", f"带 prompt 参数的远端工具没被拦：{draw}")
+            status, body = enable("mcp_fake", draw)
+            expect(status == 400 and "mcp_fake__draw" not in _model_tool_names(), f"被拦的工具也启用了：{status} {body}")
+            detail.update(denied=denied, lan_calls=len(fake.calls) and 0)
+        elif case == "explicit_relax":
+            info = _policy_pack(h, source, "mcp_loop", "http://127.0.0.1:18080/mcp")
+            mark = time.time() - 0.01
+            _policy_put(h, {"packs": {"mcp_loop": {"http_loopback": True}}})
+            info = _policy_pack(h, source, "mcp_loop", "http://127.0.0.1:18080/mcp")
+            summary = info.get("summary") or info
+            expect(not summary.get("policy_problems") and "policy_relaxed" in summary.get("accept", []),
+                   f"放开回环后审阅没要求确认放宽：{summary}")
+            status, body = check.request("POST", h.base + "/api/toolpacks/install",
+                                         {"source": info["folder"], "accept_permissions": ["network"]})
+            expect(status == 400, f"没确认放宽也装上了：{status} {body[:200]}")
+            install(info, summary["accept"])
+            status, rows = _policy_mcp_rows(h, "mcp_loop", refresh=True)
+            expect(status == 200 and rows and rows[0]["state"] == "disabled", f"刷新失败：{status} {rows}")
+            expect("http_loopback" in (rows[0].get("relaxations") or []), f"工具行没列出放宽项：{rows[0]}")
+            status, body = enable("mcp_loop", rows[0])
+            expect(status == 409 and body.get("code") == "acknowledge_required" and "http_loopback" in body.get("fields", []),
+                   f"没 acknowledge 也启用了：{status} {body}")
+            status, body = enable("mcp_loop", rows[0], ["http_loopback"])
+            expect(status == 200 and "mcp_loop__lookup" in _model_tool_names(), f"确认后启用失败：{status} {body}")
+            session_id = check._fresh_session(h.base)
+            sent = len(h.provider.requests)
+            h.provider.mode, h.provider.probe_tool, h.provider.probe, h.provider.probe_times = \
+                "probe", "mcp_loop__lookup", {"query": "abc"}, 1
+            events = check._speak(h.base, session_id, "查一下 abc", timeout=20)
+            expect(_status(events) == "completed", f"状态是 {_status(events)}")
+            later = json.dumps([r["body"] for r in h.provider.requests[sent + 1:]], ensure_ascii=False)
+            expect("tools/call" in fake.calls and marker in later, f"放开回环后没调用成功：{fake.calls} {later[:300]}")
+            relaxed = [e for e in _telemetry_since(h, mark) if e.get("kind") == "security.policy_relaxed"]
+            stages = sorted({e.get("stage") for e in relaxed})
+            expect({"policy", "install", "mcp_enable"} <= set(stages), f"放宽没在设置 / 安装 / 启用时都记审计：{stages}")
+            for item in relaxed:
+                expect(set(item.get("fields") or []) <= {"http_loopback", "auth", "stdio_commands", "http_private",
+                                                         "http_link_local", "params_allow"}
+                       and "127.0.0.1" not in json.dumps(item), f"放宽审计里不只是字段名：{item}")
+            detail.update(stages=stages)
+        elif case == "precedence":
+            fake.tools = [{"name": "draw", "description": "画图。",
+                           "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}}}}]
+            info = _policy_pack(h, source, "mcp_fake", _mcp_fake().URL)
+            install(info, ["network"])
+            states = {}
+            for label, body_, expected in (
+                    ("global_allow", {"global": {"params_allow": ["prompt"]}}, "disabled"),
+                    ("pack_block", {"global": {"params_allow": ["prompt"]}, "packs": {"mcp_fake": {"params_block": ["prompt"]}}},
+                     "blocked"),
+                    ("tool_allow", {"global": {"params_allow": ["prompt"]}, "packs": {"mcp_fake": {"params_block": ["prompt"]}},
+                                    "tools": {"mcp_fake__draw": {"params_allow": ["prompt"]}}}, "disabled"),
+                    ("tool_block", {"global": {"params_allow": ["prompt"]}, "tools": {"mcp_fake__draw": {"params_block": ["prompt"]}}},
+                     "blocked")):
+                _policy_put(h, body_)
+                status, rows = _policy_mcp_rows(h, "mcp_fake", refresh=True)
+                states[label] = rows[0]["state"] if rows else None
+                expect(states[label] == expected, f"{label}：状态 {states[label]}，应该 {expected}")
+            _policy_put(h, {"tools": {"mcp_fake__draw": {"params_allow": ["prompt"]}}})
+            status, rows = _policy_mcp_rows(h, "mcp_fake")
+            status, body = enable("mcp_fake", rows[0])
+            expect(status == 409 and "params_allow" in body.get("fields", []), f"放行黑名单参数也要确认：{status} {body}")
+            status, body = enable("mcp_fake", rows[0], body.get("fields"))
+            expect(status == 200 and "mcp_fake__draw" in _model_tool_names(), f"工具级放行后启用失败：{status} {body}")
+            detail.update(states=states)
+        elif case == "no_secret_leak":
+            token = "tok-" + marker + "-" + uuid.uuid4().hex
+            os.environ["MAS_MCP_EVAL_TOKEN"] = token
+            fake.echo_auth = True
+            _policy_put(h, {"packs": {"mcp_fake": {"auth": {"source": "env", "env": "MAS_MCP_EVAL_TOKEN",
+                                                            "header": "Authorization", "scheme": "bearer"}}}})
+            info = _policy_pack(h, source, "mcp_fake", _mcp_fake().URL)
+            summary = info.get("summary") or info
+            install(info, summary["accept"])
+            status, rows = _policy_mcp_rows(h, "mcp_fake", refresh=True)
+            expect(status == 200 and rows, f"刷新失败：{status}")
+            expect(any(hd.get("Authorization") == "Bearer " + token for hd in fake.headers), "认证头没注入")
+            status, body = enable("mcp_fake", rows[0])
+            status, body = enable("mcp_fake", rows[0], body.get("fields") or [])
+            expect(status == 200, f"启用失败：{status} {body}")
+            session_id = check._fresh_session(h.base)
+            sent = len(h.provider.requests)
+            h.provider.mode, h.provider.probe_tool, h.provider.probe, h.provider.probe_times = \
+                "probe", "mcp_fake__lookup", {"query": "abc"}, 1
+            events = check._speak(h.base, session_id, "查一下 abc", timeout=20)
+            expect(_status(events) == "completed" and "tools/call" in fake.calls, f"调用失败：{_status(events)} {fake.calls}")
+            later = json.dumps([r["body"] for r in h.provider.requests[sent:]], ensure_ascii=False)
+            expect(marker in later, "MCP 结果没回给模型")
+            blobs = {"模型请求": later, "事件流": json.dumps(events, ensure_ascii=False)}
+            for api in ("/api/tool-policy", "/api/toolpacks/mcp_fake/mcp", "/api/telemetry?limit=5000",
+                        f"/api/egress?session_id={session_id}"):
+                blobs["接口 " + api] = check.request("GET", h.base + api)[1]
+            for base_dir in (h.directory, temp):
+                for folder_, _, files in os.walk(base_dir):
+                    for file_name in files:
+                        try:
+                            with open(os.path.join(folder_, file_name), encoding="utf-8", errors="ignore") as handle:
+                                blobs[file_name] = handle.read()
+                        except OSError:
+                            pass
+            for where, blob in blobs.items():
+                expect(token not in blob and token[4:] not in blob, f"认证密钥出现在 {where} 里")
+            detail.update(checked=len(blobs))
+        elif case == "policy_change_reenable":
+            info = _policy_pack(h, source, "mcp_fake", _mcp_fake().URL)
+            install(info, ["network"])
+            status, rows = _policy_mcp_rows(h, "mcp_fake", refresh=True)
+            status, body = enable("mcp_fake", rows[0])
+            expect(status == 200 and "mcp_fake__lookup" in _model_tool_names(), f"启用失败：{status} {body}")
+            _policy_put(h, {"packs": {"mcp_fake": {"result_max_chars": 2000}}})  # 收紧也算变更
+            expect("mcp_fake__lookup" not in _model_tool_names(), "策略变了，已启用的工具还在工具表里")
+            status, rows = _policy_mcp_rows(h, "mcp_fake")
+            expect(rows and rows[0]["state"] == "changed" and rows[0].get("changed_reason") == "policy_changed",
+                   f"状态没标策略变更：{rows}")
+            # 模型照旧点这个工具：宿主不认（不在工具表），tools/call 不发。
+            before = fake.calls.count("tools/call")
+            session_id = check._fresh_session(h.base)
+            h.provider.mode, h.provider.probe_tool, h.provider.probe, h.provider.probe_times = \
+                "probe", "mcp_fake__lookup", {"query": "abc"}, 1
+            check._speak(h.base, session_id, "查一下 abc", timeout=20)
+            h.provider.mode = "ok"
+            expect(fake.calls.count("tools/call") == before, "策略变了还发了 tools/call")
+            status, body = enable("mcp_fake", rows[0])
+            expect(status == 200 and "mcp_fake__lookup" in _model_tool_names(), f"重新确认后启用失败：{status} {body}")
+            detail.update(reenabled=True)
+        else:
+            raise Failed(f"不认识的策略用例：{case}")
+        return detail
+    finally:
+        h.provider.mode = "ok"
+        for key in ("probe_tool", "probe", "probe_times"):
+            if hasattr(h.provider, key):
+                try:
+                    delattr(h.provider, key)
+                except AttributeError:
+                    pass
+        mcp_client.HTTP_POST = saved_post
+        check.request("PUT", h.base + "/api/tool-policy", {"reset": True})
+        for name in installed:
+            check.request("POST", h.base + f"/api/toolpacks/{name}/uninstall")
+        if saved_dir is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved_dir
+        if saved_token is None:
+            os.environ.pop("MAS_MCP_EVAL_TOKEN", None)
+        else:
+            os.environ["MAS_MCP_EVAL_TOKEN"] = saved_token
+        shutil.rmtree(temp, ignore_errors=True)
+        shutil.rmtree(source, ignore_errors=True)
+
+
+def _telemetry_since(h: Harness, mark: float) -> list:
+    status, body = check.request("GET", h.base + "/api/telemetry?limit=5000")
+    expect(status == 200, f"读遥测失败：{status}")
+    return [e for e in json.loads(body)["events"] if e.get("ts", 0) >= mark]
+
+
 def _compaction_history(turns: int, marker: str = "", long: int = 120, secret_result: str = "") -> list:
     """一段很长的历史：用户问、助手答、带长文本的工具结果（结构字段里有句柄和 artifact_id）。
     secret_result：放进第 0 轮工具结果正文里的文字（用来测本地正文只在归档原文里）。"""
@@ -1897,6 +2144,7 @@ RUNNERS = {
     "sandbox": run_sandbox,
     "confirm_policy": run_confirm_policy,
     "mcp": run_mcp,
+    "tool_policy": run_tool_policy,
     "storage_encryption": run_storage_encryption,
     "desktop_token": run_desktop_token,
     "desktop_security": run_desktop_security,

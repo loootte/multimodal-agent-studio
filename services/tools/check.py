@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import os
 import sys
 
@@ -154,6 +155,7 @@ def self_check() -> None:
             comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
     _check_mcp(specs)
     _check_mcp_client()
+    _check_tool_policy()
     _check_video_whitelist()
     artifacts.self_check()
     _check_artifact_handoff()
@@ -239,8 +241,12 @@ def _check_mcp_client() -> None:
         {"name": "noschema", "inputSchema": {"type": "array"}},
     ]
     items = mcp_client.project("mcp_unit", listed)
-    if [i["blocked"] for i in items] != [None, "blocked_param", "bad_name", "bad_schema"]:
+    if [i["blocked"] for i in items] != [None, None, "bad_name", "bad_schema"]:
         comfy_poc.fail(f"MCP 工具投影不对：{[i['blocked'] for i in items]}")
+    # #93：参数黑名单改由策略决定（投影只管结构问题），默认策略下 prompt 仍然被拦。
+    unit = SimpleNamespace(name="mcp_unit")
+    if [mcp_client.blocked_reason(unit, i) for i in items] != [None, "blocked_param", "bad_name", "bad_schema"]:
+        comfy_poc.fail(f"默认策略下参数黑名单不对：{[mcp_client.blocked_reason(unit, i) for i in items]}")
     if items[0]["schema"].get("additionalProperties") is not False or items[0]["name"] != "mcp_unit__ok":
         comfy_poc.fail(f"MCP 工具 schema 没收紧：{items[0]}")
     if mcp_client.digest_of(listed[0]) == mcp_client.digest_of(dict(listed[0], description="d2")):
@@ -334,6 +340,218 @@ def _check_mcp_client() -> None:
             os.environ["MAS_TOOLPACKS_DIR"] = saved_dir
         shutil.rmtree(temp, ignore_errors=True)
         shutil.rmtree(source, ignore_errors=True)
+
+
+def _check_tool_policy() -> None:
+    """#93：工具安全策略。未配置 = 最严格；坏值（整个字段）回默认并给 warnings；tools > packs > global；地址分类；
+    放宽要在安装 / 启用时确认；策略变了已启用的要重新确认；认证头的值不出现在结果、记录和策略文件里。"""
+    import shutil
+    import sys
+    import tempfile
+
+    from services.tools import mcp_client, packs, policy
+
+    fake_mod = _mcp_fake()
+    # 1) 默认 + 校验
+    base = policy.resolve("p", "p__t", {"global": {}, "packs": {}, "tools": {}})
+    if base["stdio_commands"] or base["http_loopback"] or base["http_link_local"] or base["http_private"] \
+            or base["auth"] is not None or base["confirm"] != "manifest" or "prompt" not in base["blocked_params"]:
+        comfy_poc.fail(f"默认策略不是最严格：{base}")
+    normalized, warnings = policy.normalize({
+        "global": {"http_private": "yes", "local_body_check": "off", "remote_local_prompt_default": "allow",
+                   "stdio_commands": ["npx", "../evil", "a b"], "result_max_chars": 10**9, "nope": 1},
+        "packs": {"Bad Name": {}, "ok_pack": {"auth": {"source": "env", "env": "OPENAI_API_KEY", "header": "Authorization"}}},
+        "tools": {"ok_pack__t": {"stdio_commands": ["npx"]}}})
+    for path in ("global.http_private", "global.local_body_check", "global.remote_local_prompt_default",
+                 "global.stdio_commands", "global.result_max_chars", "global.nope", "packs.ok_pack.auth.env",
+                 "tools.ok_pack__t.stdio_commands"):
+        if path not in warnings:
+            comfy_poc.fail(f"坏值 {path} 没给 warning：{warnings}")
+    if "stdio_commands" in normalized["global"] or "http_private" in normalized["global"] \
+            or "local_body_check" in normalized["global"] or normalized["packs"].get("ok_pack", {}).get("auth"):
+        comfy_poc.fail(f"坏值没回默认：{normalized}")
+    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model"):
+        if key not in policy.LOCKED:
+            comfy_poc.fail(f"底线 {key} 不在锁定项里")
+    # 2) 优先级 tools > packs > global
+    layered = {"global": {"confirm": "always", "params_block": ["q"], "result_max_chars": 8000},
+               "packs": {"p": {"params_allow": ["prompt"], "result_max_chars": 4000}},
+               "tools": {"p__t": {"params_block": ["prompt"], "params_allow": ["q"], "result_max_chars": 1000}}}
+    tool_level = policy.resolve("p", "p__t", layered)
+    pack_level = policy.resolve("p", "p__other", layered)
+    global_level = policy.resolve("x", "x__t", layered)
+    if tool_level["result_max_chars"] != 1000 or pack_level["result_max_chars"] != 4000 \
+            or global_level["result_max_chars"] != 8000 or global_level["confirm"] != "always":
+        comfy_poc.fail("策略覆盖顺序不对（result_max_chars / confirm）")
+    if "prompt" not in tool_level["blocked_params"] or "q" in tool_level["blocked_params"] \
+            or "prompt" in pack_level["blocked_params"] or "q" not in pack_level["blocked_params"] \
+            or "prompt" not in global_level["blocked_params"]:
+        comfy_poc.fail("参数黑名单的覆盖顺序不对")
+    if policy.digest(tool_level) == policy.digest(pack_level):
+        comfy_poc.fail("策略不同，指纹一样")
+    # 3) 地址分类：默认回环 / 链路本地 / 局域网都拒；放开哪类只放哪类；本程序端口和 0.0.0.0 永远拒。
+    for host in ("127.0.0.1", "::1", "localhost", "169.254.169.254", "fe80::1", "10.0.0.5", "192.168.1.2",
+                 "172.16.0.1", "fd00::1", "0.0.0.0", "::ffff:127.0.0.1"):
+        if policy.address_decision(base, host, 443)[0]:
+            comfy_poc.fail(f"默认策略放行了 {host}")
+    if not policy.address_decision(base, "203.0.113.10", 443)[0]:
+        comfy_poc.fail("默认策略拦了公网地址")
+    lan = dict(base, http_private=True)
+    if not policy.address_decision(lan, "192.168.1.2", 443)[0] or policy.address_decision(lan, "127.0.0.1", 443)[0] \
+            or policy.address_decision(lan, "169.254.169.254", 443)[0]:
+        comfy_poc.fail("只放开局域网时分类不对")
+    saved_ports = set(policy.HOST_PORTS)
+    policy.HOST_PORTS.add(48765)
+    loop = dict(base, http_loopback=True)
+    if not policy.address_decision(loop, "127.0.0.1", 8188)[0] or policy.address_decision(loop, "127.0.0.1", 48765)[0] \
+            or policy.address_decision(loop, "0.0.0.0", 8188)[0]:
+        comfy_poc.fail("放开回环后，本程序端口或 0.0.0.0 也能连")
+    policy.HOST_PORTS.clear()
+    policy.HOST_PORTS.update(saved_ports)
+    if policy.scrub({"a": ["x SECRET-1 y"]}, ["SECRET-1"]) != {"a": ["x [已隐去] y"]}:
+        comfy_poc.fail("scrub 没隐去密钥")
+
+    # 4) 端到端：命令形式的 stdio、回环 HTTP、认证头。
+    saved = {k: os.environ.get(k) for k in ("MAS_TOOLPACKS_DIR", "MAS_MCP_CHECK_TOKEN")}
+    saved_path, saved_post = policy.PATH, mcp_client.HTTP_POST
+    temp = tempfile.mkdtemp(prefix="mas-policy-check-")
+    source = tempfile.mkdtemp(prefix="mas-policy-src-")
+    os.environ["MAS_TOOLPACKS_DIR"] = os.path.join(temp, "installed")
+    policy.PATH = os.path.join(temp, "tool_policy.json")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    command = os.path.splitext(os.path.basename(sys.executable))[0]
+    saved_env_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.path.dirname(sys.executable) + os.pathsep + saved_env_path
+    try:
+        # confirm：策略只能收紧成每次确认（对非 MCP 工具同样生效）
+        policy.save({"tools": {"some_tool": {"confirm": "always"}}, "global": {"confirm": "never"}})
+        if not packs.policy_confirm_always(SimpleNamespace(name="some_tool")) \
+                or packs.policy_confirm_always(SimpleNamespace(name="other_tool")) \
+                or "global.confirm" not in policy.normalize({"global": {"confirm": "never"}})[1]:
+            comfy_poc.fail("confirm 策略不对（只能收紧成 always）")
+        policy.save({})
+        from services.runtime import injection
+
+        with injection.tool_scope("evil_tool"):
+            for attempt in (lambda: policy.save({"global": {"http_private": True}}), policy.reset):
+                try:
+                    attempt()
+                    comfy_poc.fail("工具执行期间写策略没被拒")
+                except injection.ConfigWriteDenied:
+                    pass
+        if policy.current()["global"]:
+            comfy_poc.fail("工具执行期间的策略写入生效了")
+        folder = os.path.join(source, "mcp_cmd")
+        os.makedirs(folder)
+        shutil.copy(os.path.join(root, "toolpacks", "examples", "mcp_echo", "server.py"), folder)
+        data = json.load(open(os.path.join(root, "toolpacks", "examples", "mcp_echo", "tool.json"), encoding="utf-8"))
+        data.update(name="mcp_cmd", entry={"kind": "mcp", "transport": "stdio", "command": command,
+                                           "args": ["-B", "-u", "server.py"]})
+        with open(os.path.join(folder, "tool.json"), "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        summary = packs.inspect(folder)
+        if not summary.get("policy_problems"):
+            comfy_poc.fail("默认策略下外部命令没被标成策略不允许")
+        try:
+            packs.install(folder, summary["accept"])
+            comfy_poc.fail("默认策略下外部命令也装上了")
+        except packs.PackError as exc:
+            if exc.code != "policy_denied":
+                comfy_poc.fail(f"外部命令被拒的错误码不对：{exc.code}")
+        policy.save({"packs": {"mcp_cmd": {"stdio_commands": [command]}}})
+        summary = packs.inspect(folder)
+        if summary.get("policy_problems") or packs.ACCEPT_COMMAND not in summary["accept"] \
+                or packs.ACCEPT_POLICY not in summary["accept"]:
+            comfy_poc.fail(f"放开命令后审阅没要求确认外部命令 / 放宽项：{summary.get('accept')}")
+        try:
+            packs.install(folder, [a for a in summary["accept"] if a != packs.ACCEPT_POLICY])
+            comfy_poc.fail("没确认放宽项也装上了")
+        except packs.PackError:
+            pass
+        packs.install(folder, summary["accept"])
+        pack = packs.find("mcp_cmd")
+        rows = {r["remote"]: r for r in mcp_client.refresh(pack)["tools"]}
+        try:
+            mcp_client.enable(pack, "echo", rows["echo"]["digest"])
+            comfy_poc.fail("没确认放宽项也启用了")
+        except mcp_client.AcknowledgeRequired as exc:
+            if "stdio_commands" not in exc.fields:
+                comfy_poc.fail(f"启用时要确认的放宽项不对：{exc.fields}")
+        mcp_client.enable(pack, "echo", rows["echo"]["digest"], acknowledge=["stdio_commands"])
+        said = mcp_client.call(packs.find_tool("mcp_cmd__echo"), {"message": "hi-cmd"})
+        if not said.get("ok") or "hi-cmd" not in json.dumps(said, ensure_ascii=False):
+            comfy_poc.fail(f"命令形式的 stdio MCP 调用不对：{said}")
+        # 策略变了（即使是收紧） -> 已启用的要重新确认
+        policy.save({"packs": {"mcp_cmd": {"stdio_commands": [command], "result_max_chars": 2000}}})
+        again = mcp_client.call(packs.find_tool("mcp_cmd__echo"), {"message": "hi"}) if packs.find_tool("mcp_cmd__echo") \
+            else {"error": {"code": "reauth_required"}}
+        if (again.get("error") or {}).get("code") != "reauth_required":
+            comfy_poc.fail(f"策略变了，已启用的工具没要求重新确认：{again}")
+        state = {r["remote"]: r for r in mcp_client.view(pack)["tools"]}["echo"]
+        if state["state"] != "changed" or state.get("changed_reason") != "policy_changed":
+            comfy_poc.fail(f"策略变了，状态没标出来：{state}")
+        # 去掉命令放行 -> 包整体不可用
+        policy.save({})
+        if packs.find_tool("mcp_cmd__echo") is not None and mcp_client.model_tools(pack):
+            comfy_poc.fail("撤掉命令放行后工具还在")
+
+        # HTTP：回环地址（http://127.0.0.1）+ 环境变量认证头
+        token = "tok-CHECK-" + "9" * 24
+        os.environ["MAS_MCP_CHECK_TOKEN"] = token
+        fake = fake_mod.FakeMcpHttp("ok")
+        fake.echo_auth = True
+        mcp_client.HTTP_POST = fake
+        hfolder = fake_mod.write_pack(source, "mcp_loop", "http://127.0.0.1:18080/mcp")
+        if not packs.inspect(hfolder).get("policy_problems"):
+            comfy_poc.fail("默认策略下回环 MCP 地址没被标出来")
+        policy.save({"packs": {"mcp_loop": {"http_loopback": True, "auth": {
+            "source": "env", "env": "MAS_MCP_CHECK_TOKEN", "header": "Authorization", "scheme": "bearer"}}}})
+        summary = packs.inspect(hfolder)
+        packs.install(hfolder, summary["accept"])
+        loop_pack = packs.find("mcp_loop")
+        rows = {r["remote"]: r for r in mcp_client.refresh(loop_pack)["tools"]}
+        if fake.headers[0].get("Authorization") != "Bearer " + token:
+            comfy_poc.fail("认证头没注入")
+        relax = sorted(rows["lookup"].get("relaxations") or [])
+        mcp_client.enable(loop_pack, "lookup", rows["lookup"]["digest"], acknowledge=relax)
+        result = mcp_client.call(packs.find_tool("mcp_loop__lookup"), {"query": "abc"})
+        if not result.get("ok") or token in json.dumps(result, ensure_ascii=False):
+            comfy_poc.fail(f"MCP 结果里带出了认证密钥：{result}")
+        public = json.dumps(policy.public(), ensure_ascii=False)
+        stored = open(policy.PATH, encoding="utf-8").read()
+        records = ""
+        for base_dir, _, files in os.walk(temp):
+            for name in files:
+                try:
+                    records += open(os.path.join(base_dir, name), encoding="utf-8", errors="ignore").read()
+                except OSError:
+                    pass
+        if token in public or token in stored or token in records:
+            comfy_poc.fail("认证密钥写进了策略 / 记录 / 接口输出")
+        os.environ.pop("MAS_MCP_CHECK_TOKEN")
+        failed = mcp_client.call(packs.find_tool("mcp_loop__lookup"), {"query": "abc"})
+        if failed.get("ok"):
+            comfy_poc.fail("取不到密钥时也调用成功了")
+    finally:
+        os.environ["PATH"] = saved_env_path
+        policy.PATH, mcp_client.HTTP_POST = saved_path, saved_post
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(temp, ignore_errors=True)
+        shutil.rmtree(source, ignore_errors=True)
+
+
+def _mcp_fake():
+    import importlib.util
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    spec = importlib.util.spec_from_file_location("mas_mcp_fake_policy", os.path.join(root, "evals", "fixtures", "mcp_fake.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _mcp_call_with_bodies(mcp_client, egress, packs, body: str, arguments: dict) -> dict:

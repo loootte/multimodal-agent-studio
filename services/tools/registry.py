@@ -277,7 +277,13 @@ def _require_tool(item, filename: str, audience: str) -> None:
         return
     if item.validate is not None or item.call is not None:
         raise ToolSpecError(f"外部工具 {item.name} 只声明参数，不能提供 validate 或 call。")
-    leaked = BLOCKED_EXTERNAL.intersection(parameters.get("properties") or {})
+    blocked = BLOCKED_EXTERNAL
+    if getattr(item, "mcp", False):
+        # #93：MCP 远端工具的参数名黑名单由工具安全策略决定（默认 = BLOCKED_EXTERNAL；model_tools 已按它筛过），这里再核一遍。
+        from services.tools import policy
+
+        blocked = set(policy.resolve(getattr(item.pack, "mcp_server", None), item.name)["blocked_params"])
+    leaked = set(blocked).intersection(parameters.get("properties") or {})
     if leaked:
         raise ToolSpecError(f"外部工具 {item.name} 的参数里有 {'、'.join(sorted(leaked))}。")
 

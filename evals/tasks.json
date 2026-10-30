@@ -619,6 +619,46 @@
       "marker": "INJECT-MCP-1e2f"
     },
     {
+      "id": "security.tool_policy_default_block",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "default_block",
+      "marker": "POLICY-1a2b"
+    },
+    {
+      "id": "security.tool_policy_explicit_relax",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "explicit_relax",
+      "marker": "POLICY-3c4d"
+    },
+    {
+      "id": "security.tool_policy_precedence",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "precedence",
+      "marker": "POLICY-5e6f"
+    },
+    {
+      "id": "security.tool_policy_no_secret_leak",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "no_secret_leak",
+      "marker": "POLICY-7a8b"
+    },
+    {
+      "id": "security.tool_policy_policy_change_reenable",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "policy_change_reenable",
+      "marker": "POLICY-9c0d"
+    },
+    {
       "id": "runtime.compaction_keeps_plan",
       "category": "runtime",
       "kind": "compaction",

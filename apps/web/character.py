@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-import content_guard
+from services.runtime import content_guard
 import module_tools
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

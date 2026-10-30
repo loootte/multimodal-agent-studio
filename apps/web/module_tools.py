@@ -15,9 +15,9 @@ import os
 import re
 import sys
 
-import content_guard
+from services.runtime import content_guard
 import tool_config
-from content_guard import GuardError
+from services.runtime.content_guard import GuardError
 
 _LOADED: dict = {}
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")

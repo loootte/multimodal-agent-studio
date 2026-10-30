@@ -16,12 +16,15 @@ class FakeMcpHttp:
         self.calls = []
         self.bodies = []
         self.result_text = result_text
+        self.headers = []  # #93：每次请求的头（测认证头注入）
+        self.echo_auth = False  # #93：True 时把收到的 Authorization 原样写进结果（测结果里的密钥会被隐去）
 
     def __call__(self, url, body, headers, timeout):
         message = json.loads(body.decode("utf-8"))
         method = message.get("method")
         self.calls.append(method)
         self.bodies.append(body.decode("utf-8"))
+        self.headers.append(dict(headers))
         if "id" not in message:
             return 202, {}, b""
         if method == "initialize":
@@ -35,7 +38,8 @@ class FakeMcpHttp:
                 json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"tools": self.tools}}).encode()
         if method == "tools/call":
             reply = {"jsonrpc": "2.0", "id": message["id"],
-                     "result": {"content": [{"type": "text", "text": self.result_text},
+                     "result": {"content": [{"type": "text", "text": self.result_text + (
+                         " auth=" + str(headers.get("Authorization") or "") if self.echo_auth else "")},
                                             {"type": "image", "data": "AAAA", "mimeType": "image/png"}],
                                 "isError": False}}
             return 200, {"content-type": "text/event-stream"}, \

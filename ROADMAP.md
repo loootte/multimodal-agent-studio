@@ -259,6 +259,7 @@
    - 句柄隔离：有风险，可控。参数只给句柄和模型可见文字，出站前过字段白名单、编码检测和 `local_fingerprint`；默认 `confirm: always`；确认卡用宿主模板；结果标 `untrusted`；远端工具默认不启用，描述或 schema 变了要重新授权。
    - 验收：接通一个 stdio server 和一个 HTTP server，每次调用都有确认和审计；本地正文及其编码变体被拦；schema 变化后要重新授权；`security.mcp_*` 进门禁。
    - 进度：实现在 `issue-78` 分支，见 [docs/mcp-client.md](docs/mcp-client.md)。客户端是新的 `services/tools/mcp_client.py`，`mcp.py` 仍然只做 server。
+   - 后续 [#93](https://github.com/loootte/multimodal-agent-studio/issues/93)（实现在 `issue-93` 分支）：MCP 出站控制和工具安全策略可配置，见 [docs/tool-policy.md](docs/tool-policy.md)。`<data_dir>/tool_policy.json` 分全局 / 包 / 工具三层，没配置就是最严格；stdio 命令白名单（默认只许包内 Python，放行后可用 `npx` 等，沙箱外运行要单独审阅）；回环 / 链路本地 / 局域网按类放行（默认全拦，本程序端口永远拦）；认证头只从环境变量或钥匙串注入，不落盘、不进审计、不给模型；参数名黑名单可按全局 / 包 / 工具收紧或放宽；放宽要在安装和启用时审阅，改了策略已启用的工具要重新确认；设置页加「工具安全策略」，写入只认本机界面；本地正文检查、`remote_local_prompt` 默认拒绝等底线只读；`content_guard` 移到 `services/runtime`；`security.tool_policy_*` 进门禁。
 2. [#79](https://github.com/loootte/multimodal-agent-studio/issues/79) **14.B** 上下文压缩与工具结果裁剪（P0）
    - 层：运行时（`loop.py` 按上下文上限设阈值压缩，大工具结果只保留结构字段）。
    - 句柄隔离：不破坏。摘要发出前过 `local_fingerprint`；句柄不展开；`plan_images` 计划、未完成确认和句柄清单固定保留；原始会话留在本机。

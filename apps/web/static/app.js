@@ -67,6 +67,10 @@ document.querySelector("#close-runtime").addEventListener("click", () => {
 });
 document.querySelector("#settings-form").addEventListener("submit", saveSettings);
 document.querySelector("#clear-key").addEventListener("click", clearKey);
+document.querySelector("#tool-policy-save").addEventListener("click", saveToolPolicy);
+document.querySelector("#tool-policy-reset").addEventListener("click", resetToolPolicy);
+document.querySelector("#tool-policy-secret").addEventListener("click", () => writeToolSecret(false));
+document.querySelector("#tool-policy-secret-clear").addEventListener("click", () => writeToolSecret(true));
 document.querySelector("#file").addEventListener("change", (event) => {
   const chosen = event.target.files && event.target.files[0];
   event.target.value = "";
@@ -1557,6 +1561,7 @@ function openSettings() {
   showSettingsError("");
   refreshStorage();
   refreshContext();
+  refreshToolPolicy();
   settings.showModal();
 }
 
@@ -1596,6 +1601,97 @@ function contextValues(form) {
     else values[key] = input.value.trim() === "" ? null : input.value.trim();
   }
   return values;
+}
+
+// #93：工具安全策略。服务端校验：坏值不存、回退默认并列在 warnings；锁定项只读显示；认证密钥只写不读。
+async function refreshToolPolicy() {
+  try {
+    fillToolPolicy(await api("GET", "/api/tool-policy"));
+  } catch (error) {
+    document.querySelector("#tool-policy-hint").textContent = "读不到工具安全策略。";
+  }
+}
+
+function toolPolicyText(policy) {
+  const out = {};
+  for (const level of ["global", "packs", "tools"]) {
+    const value = (policy && policy[level]) || {};
+    if (Object.keys(value).length) out[level] = value;
+  }
+  return Object.keys(out).length ? JSON.stringify(out, null, 2) : "";
+}
+
+function fillToolPolicy(view, note) {
+  const form = document.querySelector("#settings-form");
+  form.elements.policy_json.value = toolPolicyText(view && view.policy);
+  const locked = document.querySelector("#tool-policy-locked");
+  locked.replaceChildren(...((view && view.locked) || []).map((item) => {
+    const li = document.createElement("li");
+    li.textContent = `${item.key} = ${item.value}：${item.text}`;
+    return li;
+  }));
+  const warnings = (view && view.warnings) || [];
+  document.querySelector("#tool-policy-hint").textContent = (note ? note + " " : "") + (warnings.length
+    ? `这些项取值不合法或不可配置，已回退默认值：${warnings.join("、")}。`
+    : "未配置的项就是最严格的默认值。");
+}
+
+function relaxingIn(policy, relaxing) {
+  const found = new Set();
+  for (const level of ["global", "packs", "tools"]) {
+    const sections = level === "global" ? [policy[level] || {}] : Object.values(policy[level] || {});
+    for (const body of sections) {
+      for (const key of relaxing) {
+        const value = body && body[key];
+        if (value && !(Array.isArray(value) && !value.length)) found.add(key);
+      }
+    }
+  }
+  return [...found];
+}
+
+async function saveToolPolicy() {
+  const form = document.querySelector("#settings-form");
+  const text = form.elements.policy_json.value.trim();
+  let policy = {};
+  try {
+    policy = text ? JSON.parse(text) : {};
+  } catch (error) {
+    document.querySelector("#tool-policy-hint").textContent = "不是合法的 JSON，没有保存。";
+    return;
+  }
+  try {
+    const current = await api("GET", "/api/tool-policy");
+    const relaxed = relaxingIn(policy, current.relaxing || []);
+    if (relaxed.length && !window.confirm(`这份策略放宽了：${relaxed.join("、")}。放宽会让 MCP 工具能做更多事（启动外部命令、连本机或局域网服务、带认证头）。确定保存？`)) return;
+    const view = await api("PUT", "/api/tool-policy", { policy });
+    fillToolPolicy(view, (view.changed || []).length ? "已保存。已启用的 MCP 工具如受影响，需要到工具页重新启用。" : "没有变化。");
+  } catch (error) {
+    document.querySelector("#tool-policy-hint").textContent = error.message || "没能保存。";
+  }
+}
+
+async function resetToolPolicy() {
+  try {
+    fillToolPolicy(await api("PUT", "/api/tool-policy", { reset: true }), "已恢复默认。");
+  } catch (error) {
+    document.querySelector("#tool-policy-hint").textContent = error.message || "没能恢复默认。";
+  }
+}
+
+async function writeToolSecret(clear) {
+  const form = document.querySelector("#settings-form");
+  const pack = form.elements.policy_secret_pack.value.trim();
+  const value = form.elements.policy_secret_value.value;
+  const hint = document.querySelector("#tool-policy-hint");
+  try {
+    await api("PUT", "/api/tool-policy/secret", clear ? { pack, clear: true } : { pack, value });
+    hint.textContent = clear ? "已从钥匙串删除。" : "已写入钥匙串（不会再显示）。";
+  } catch (error) {
+    hint.textContent = error.message || "没能写入钥匙串。";
+  } finally {
+    form.elements.policy_secret_value.value = "";
+  }
 }
 
 // 12.F（#62）：本地存储状态。只显示模式、算法、key_id，不显示密钥和路径。
@@ -2124,6 +2220,10 @@ async function installToolPack() {
     const info = await api("POST", "/api/toolpacks/inspect", { source });
     if ((info.problems || []).length) {
       toolNote(`工具包不合格：${info.problems.join("；")}`);
+      return;
+    }
+    if ((info.policy_problems || []).length) {  // #93：工具安全策略没放行（外部命令 / 回环地址），装不上
+      toolNote(`工具安全策略不允许：${info.policy_problems.join("；")}（可在设置 → 工具安全策略里放开）`);
       return;
     }
     showToolPackReview(source, info);

@@ -48,7 +48,7 @@ my_tool/
 
 ## 宿主守卫（工具代码改不了）
 
-`apps/web/content_guard.py`，对**任何**声明了 `content.rating=adult` 的工具都生效，不管代码是内置的还是安装的、代码自己有没有检查：
+`services/runtime/content_guard.py`，对**任何**声明了 `content.rating=adult` 的工具都生效，不管代码是内置的还是安装的、代码自己有没有检查：
 
 1. 调用前（`check_inputs`）逐个字段查：未成年（中英文词表；“17岁”“16 years old”“十六岁”“age 19”、年龄栏的纯数字，低于 18 或低于 `min_age` 都算）→ `minor_unsafe`；校服 / 教室 / 学生、幼态体型 → `minor_unsafe` 并说明原因；真人、明星、熟人、版权角色（词表、《作品名》、@账号、英文人名）→ `not_original_character`“请只描述原创角色”。普通（general）工具：露骨词 → `unsafe_content`。
 2. 调用后（`check_output`）再查最终提示词（同样的规则）；结果的 `rating` 一律以清单为准，工具自称 `general` 也会被改成 `adult`。普通工具拼出露骨提示词 → `unsafe_content`。
@@ -177,7 +177,7 @@ def preview(fields, ctx):
 ## 代码
 
 - 契约调用和值检查：`apps/web/module_tools.py`
-- 分级守卫：`apps/web/content_guard.py`
+- 分级守卫：`services/runtime/content_guard.py`
 - 清单校验、安装确认、授权：`services/tools/packs.py`（`entry_problem`、`has_code`、`inspect`、`install`）
 - 沙箱里按函数名调用：`services/tools/sandbox.py`、`sandbox_runner.py`（`function` = `call` / `catalog` / `preview` / `run`）
 - 表单和对话：`apps/web/chat_run.py`（`start_form_tool`、`_execute_module_tool`）

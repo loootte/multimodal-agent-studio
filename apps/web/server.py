@@ -24,7 +24,7 @@ if ROOT not in sys.path:
 if WEB_DIR not in sys.path:
     sys.path.insert(0, WEB_DIR)
 
-import content_guard
+from services.runtime import content_guard
 import module_tools
 import chat_run
 import desktop_notify
@@ -77,6 +77,10 @@ class App:
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
         # 14.B（#79）：上下文压缩设置，非法项回退默认值。
         self.context = store.ContextSettingsStore(os.path.join(data_dir, "context.json"))
+        # #93：工具安全策略（MCP 出站控制等）。没有文件 = 最严格的默认值。
+        from services.tools import policy as _tool_policy
+
+        _tool_policy.PATH = os.path.join(data_dir, "tool_policy.json")
         self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
         # 12.F（#62）：本地存储加密。打不开（缺密钥、密钥不对、要先迁移）就抛 StorageError，不悄悄退回明文。
         self.storage = storage if storage is not None else storage_crypto.open_storage(data_dir)
@@ -110,6 +114,9 @@ def make_httpd(app: App, host: str = "127.0.0.1", port: int = 8766) -> Threading
     handler = _handler(app)
     httpd = QuietHTTPServer((host, port), handler)
     httpd.daemon_threads = True
+    from services.tools import policy as _tool_policy
+
+    _tool_policy.HOST_PORTS.add(httpd.server_address[1])  # #93：MCP 放行回环时也不许连本程序自己
     return httpd
 
 
@@ -679,6 +686,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _audit_config_write("context", fields + (["reset"] if body.get("reset") else []))
             _send_json(handler, 200, view)
             return
+        if path in ("/api/tool-policy", "/api/tool-policy/secret"):
+            _tool_policy_route(handler, method, path)
+            return
         if path == "/api/tools" and method == "GET":
             view = app.tools.listing()
             view["form_tools"] = module_tools.form_tools()  # #86：表单工具（entry.kind=module）
@@ -993,17 +1003,75 @@ def _mcp_route(handler, packs, name: str, method: str, rest: list) -> None:
             if rest == ["refresh"]:
                 view = mcp_client.refresh(pack)
             elif rest == ["enable"]:
-                view = mcp_client.enable(pack, str(body.get("tool") or ""), body.get("digest"))
+                view = mcp_client.enable(pack, str(body.get("tool") or ""), body.get("digest"),
+                                         acknowledge=body.get("acknowledge"))
             else:
                 view = mcp_client.disable(pack, str(body.get("tool") or ""))
             _audit_config_write("toolpack_mcp", ["mcp_" + rest[0]])
             _send_json(handler, 200, {"ok": True, "mcp": view})
             return
+    except mcp_client.AcknowledgeRequired as exc:
+        _send_json(handler, 409, {"code": exc.code, "message": exc.message, "fields": exc.fields})
+        return
     except mcp_client.McpError as exc:
         status = 404 if exc.code == "not_found" else 400
         _send_json(handler, status, {"code": exc.code, "message": exc.message})
         return
     _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
+def _tool_policy_route(handler, method: str, path: str) -> None:
+    """#93 工具安全策略：GET 看（含默认值、锁定项、warnings）；PUT 改（{policy} 或 {reset: true}）。
+    写只给本机同源请求（跨站 403），每次写记 security.config_changed（只记字段路径）；
+    新出现的放宽项另记 security.policy_relaxed（只记字段名）。
+    /secret：把某个 MCP 包的认证密钥写进本机钥匙串（只写不读；没有任何接口返回原值）。"""
+    from services.tools import policy
+
+    if method == "GET" and path == "/api/tool-policy":
+        _send_json(handler, 200, policy.public())
+        return
+    if method != "PUT":
+        _send_json(handler, 405, {"code": "method_not_allowed", "message": "不支持。"})
+        return
+    if not _config_write_allowed(handler, "tool_policy"):
+        return
+    body = _read_json(handler)
+    if path == "/api/tool-policy/secret":
+        try:
+            policy.set_secret(str(body.get("pack") or ""), None if body.get("clear") else body.get("value"))
+        except policy.PolicyError as exc:
+            status = 409 if exc.code == "keychain_unavailable" else 400
+            _send_json(handler, status, {"code": exc.code, "message": exc.message})
+            return
+        except Exception as exc:  # noqa: BLE001 钥匙串后端错误：不带细节（可能含条目信息）
+            _send_json(handler, 500, {"code": "keychain_error", "message": f"写入钥匙串失败（{type(exc).__name__}）。"})
+            return
+        _audit_config_write("tool_policy", ["auth_secret_clear" if body.get("clear") else "auth_secret"])
+        _send_json(handler, 200, {"ok": True})
+        return
+    before = policy.current()
+    if body.get("reset"):
+        policy.reset()
+        after, warnings = policy.current(), []
+    else:
+        try:
+            after, warnings = policy.save(body.get("policy"))
+        except policy.PolicyError as exc:
+            _send_json(handler, 400, {"code": exc.code, "message": exc.message})
+            return
+    fields = policy.changed_fields(before, after)
+    _audit_config_write("tool_policy", fields + (["reset"] if body.get("reset") else []))
+    newly = sorted(set(policy.relaxed_fields(after)) - set(policy.relaxed_fields(before)))
+    if newly:
+        try:
+            telemetry.record("security.policy_relaxed", trace_id="pol_" + uuid.uuid4().hex, stage="policy",
+                             fields=newly)
+        except Exception:
+            pass
+    view = policy.public()
+    view["warnings"] = sorted(set(view["warnings"]) | set(warnings))
+    view["changed"] = fields
+    _send_json(handler, 200, view)
 
 
 def _agent_route(handler: BaseHTTPRequestHandler, method: str, path: str) -> None:

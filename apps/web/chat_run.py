@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-import content_guard
+from services.runtime import content_guard
 import module_tools
 import image_run
 import skill_page

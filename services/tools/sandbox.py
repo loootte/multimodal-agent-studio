@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(HERE, "sandbox_runner.py")
@@ -121,10 +122,16 @@ def _is_loopback(host: str) -> bool:
                (getattr(a, "ipv4_mapped", None) is not None and a.ipv4_mapped.is_loopback) for a in addresses)
 
 
-def decide(tool: str, granted: set, host: str, port) -> tuple[bool, str | None]:
-    """宿主对子进程一次出网的裁决。返回 (放行, 原因码)。"""
+def decide(tool: str, granted: set, host: str, port, rules: dict | None = None) -> tuple[bool, str | None]:
+    """宿主对子进程一次出网的裁决。返回 (放行, 原因码)。
+    rules：#93 MCP 包的生效策略（services/tools/policy.py）。给了就按它的地址类别裁决（默认连局域网也拒）；
+    没给（普通第三方工具包）保持原来的规则：回环 / 链路本地 / 解析不了的拒绝。"""
     if "network" not in granted:
         return False, "permission_denied"
+    if rules is not None:
+        from services.tools import policy
+
+        return policy.address_decision(rules, host, port)
     if _is_loopback(host):
         return False, "egress_policy_denied"
     return True, None
@@ -165,7 +172,7 @@ def _error(tool: str, code: str, message: str) -> dict:
 FUNCTIONS = ("call", "catalog", "preview", "run", "mcp")  # mcp：14.A stdio MCP server，一次喂一批 JSON-RPC 消息
 
 
-def run(pack, arguments: dict, config: dict, granted: set, function: str = "call") -> dict:
+def run(pack, arguments: dict, config: dict, granted: set, function: str = "call", rules: dict | None = None) -> dict:
     """在子进程里调用第三方包的 call(arguments, config)。granted 是宿主核对过的生效权限（清单 ∩ 授权）。
     #86：entry.kind=module 的表单工具按工具代码契约调用 catalog(ctx) / preview(fields, ctx) / run(args, ctx)，
     这时 config 位置传的是宿主给的 ctx（纯 JSON）。"""
@@ -237,7 +244,7 @@ def run(pack, arguments: dict, config: dict, granted: set, function: str = "call
                 break
             if message.get("t") == "egress":
                 host = str(message.get("host") or "")
-                allowed, reason = decide(name, granted, host, message.get("port"))
+                allowed, reason = decide(name, granted, host, message.get("port"), rules)
                 if audited < MAX_AUDIT:
                     _audit(name, host, message.get("port"), allowed, reason)
                     audited += 1
@@ -288,3 +295,105 @@ def run(pack, arguments: dict, config: dict, granted: set, function: str = "call
     if not isinstance(result, dict):
         return _error(name, "tool_error", "工具没有返回对象。")
     return result
+
+
+# ---------- #93 stdio MCP 的命令模式 ----------
+# 策略（services/tools/policy.py 的 stdio_commands）显式放行某个命令（如 npx）后，MCP 包可以用
+# entry.command + entry.args 启动 server。它不是 Python，12.D 的审计钩子管不到：能读写用户能读写的文件、
+# 能自己联网（代理变量只是提示）。宿主能做的只有：环境变量白名单（加 PATH 才找得到命令）、工作目录设为包目录、
+# 超时、输出上限，以及每条发给它的消息照样先过出站检查、它回的内容照样不可信。安装审阅里明确写这一点。
+COMMAND_ENV_KEEP = ("PATH", "PATHEXT", "COMSPEC", "SYSTEMDRIVE")
+COMMAND_ARG = r"^[A-Za-z0-9@._/:=+,~-]{1,256}$"  # 不含 % 和 cmd 元字符：Windows 上 .cmd（npx.cmd）经 cmd 解析
+
+
+def run_command(name: str, executable: str, args: list, messages: list, network: bool, cwd: str) -> dict:
+    """启动命令，按行发 JSON-RPC：每条带 id 的请求等到对应回复再发下一条。返回 {"ok", "lines"} 或错误。
+    工作目录是包目录（args 里可以写包里的相对路径；包里的文件被改了，授权指纹会变，包就停用）。"""
+    import re as _re
+
+    if not all(isinstance(a, str) and _re.match(COMMAND_ARG, a) for a in args):
+        return _error(name, "policy_denied", "命令参数含不允许的字符。")
+    scratch = tempfile.mkdtemp(prefix="mas-cmd-")
+    env = child_env(scratch, network)
+    env.pop("MAS_SANDBOX", None)
+    for key in COMMAND_ENV_KEEP:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        proc = subprocess.Popen([executable, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, cwd=cwd, env=env, text=True, encoding="utf-8",
+                                errors="replace", creationflags=flags)
+    except OSError as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
+        return _error(name, "sandbox_error", f"命令启动失败（{type(exc).__name__}）。")
+    lines: queue.Queue = queue.Queue()
+
+    def pump():
+        size = 0
+        try:
+            for line in proc.stdout:
+                size += len(line)
+                if size > MAX_OUTPUT:
+                    lines.put("\0too_large")
+                    break
+                lines.put(line.strip())
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = time.monotonic() + timeout()
+    out: list[str] = []
+    error = None
+    try:
+        for message in messages:
+            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+            if "id" not in message:
+                continue
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    error = "tool_timeout"
+                    break
+                try:
+                    line = lines.get(timeout=left)
+                except queue.Empty:
+                    error = "tool_timeout"
+                    break
+                if line is None:
+                    error = "tool_error"
+                    break
+                if line == "\0too_large":
+                    error = "tool_error"
+                    break
+                if not line:
+                    continue
+                out.append(line)
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(data, dict) and data.get("id") == message["id"] and "method" not in data:
+                    break
+            if error:
+                break
+    except OSError:
+        error = error or "tool_error"
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        shutil.rmtree(scratch, ignore_errors=True)
+    if error == "tool_timeout":
+        return {"ok": False, "lines": out, "error": {"code": "tool_timeout", "message": f"MCP server 超时（{int(timeout())} 秒），已停止。"}}
+    return {"ok": error is None, "lines": out}
