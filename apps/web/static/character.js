@@ -74,7 +74,20 @@
     }
     input.setAttribute("list", list.id);
     input.addEventListener("input", schedule);
-    input.addEventListener("focus", () => input.select());
+    // datalist 会按输入框当前值过滤，已有值时只剩一个选项。
+    // 聚焦时先清空（原值放进占位提示），这样下拉显示全部预设；没选新值就还原。
+    input.addEventListener("focus", () => {
+      input.dataset.prev = input.value;
+      if (input.value) {
+        input.placeholder = input.value;
+        input.value = "";
+      }
+    });
+    input.addEventListener("blur", () => {
+      if (!input.value && input.dataset.prev) input.value = input.dataset.prev;
+      input.placeholder = `搜索预设或自己写${spec.label}`;
+      delete input.dataset.prev;
+    });
     wrap.append(input, list);
     target.append(wrap);
     controls[spec.name] = { input, field: spec };
@@ -101,7 +114,7 @@
   function fields() {
     const out = {};
     for (const [name, c] of Object.entries(controls)) {
-      const text = c.input.value.trim();
+      const text = (c.input.value || c.input.dataset.prev || "").trim();
       if (text) out[name] = text;
     }
     return out;
