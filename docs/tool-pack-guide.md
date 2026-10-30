@@ -2,7 +2,7 @@
 
 这份指南写给想给本项目**加一个新工具**的人：什么样的工具能装、包里放什么、`tool.json` 每个字段怎么写、入口函数怎么写、怎么在网页里安装、配置、在对话里用、导出和卸载，以及常见报错怎么改。
 
-字段的简明参考见 [tool-packs.md](tool-packs.md)，沙箱细节见 [tool-sandbox.md](tool-sandbox.md)。本文内容以代码为准：`poc/tools/packs.py`（清单校验、安装、授权）、`poc/tools/sandbox.py` 和 `poc/tools/sandbox_runner.py`（子进程沙箱）、`poc/tools/registry.py`（注册和调用）、`poc/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
+字段的简明参考见 [tool-packs.md](tool-packs.md)，沙箱细节见 [tool-sandbox.md](tool-sandbox.md)，表单工具（`entry.kind: "module"`，例如角色定制）的函数约定见 [tool-code-contract.md](tool-code-contract.md)。本文内容以代码为准：`poc/tools/packs.py`（清单校验、安装、授权）、`poc/tools/sandbox.py` 和 `poc/tools/sandbox_runner.py`（子进程沙箱）、`poc/tools/registry.py`（注册和调用）、`poc/tools/schema.py`（参数校验）、`apps/web/tool_config.py`（配置）。
 
 ## 1. 工具包是什么
 
@@ -164,7 +164,9 @@ return {"ok": False, "executed": False, "error": {"code": "bad_input", "message"
 - “沙箱限制”：子进程运行、拿不到环境变量、不能读会话、不能起程序等几条；
 - 缺依赖时列出缺什么。
 
-每个权限都勾上，“同意这些权限并安装”按钮才可用；点“取消”什么都不装。同意的权限和**包内容的摘要**一起写进包目录的 `.granted.json`（`mas.grant/2`）。每次调用都会核对：
+审阅里还有两项要单独勾选：包里有代码（python 工具都有）时的“包含代码”，`content.rating=adult` 的表单工具的“成人分级”。包会被复制到仓库的 `toolpacks/installed/<名字>/`（被 git 忽略）。
+
+每一项都勾上，“同意这些权限并安装”按钮才可用；点“取消”什么都不装。同意的权限和**包内容的摘要**一起写进包目录的 `.granted.json`（`mas.grant/2`）。每次调用都会核对：
 
 1. 授权记录存在、是新格式、包内容（`tool.json`、代码和其他文件）和安装时一样；
 2. 清单要的权限都在授权记录里。
@@ -236,7 +238,7 @@ def call(arguments: dict, config: dict) -> dict:
 
 可以先在命令行试一下函数本身：`python -c "import tool; print(tool.call({'times': 3}, {'default_sides': 6}))"`。
 
-**第 4 步：安装。** 打开网页 → 右上角“工具” → 展开“安装工具包” → 填目录路径（如 `D:\toolpacks\dice_roll`）或 zip 路径 → “检查并安装” → 在下面展开的「权限审阅」里逐项看、逐项勾选 → “同意这些权限并安装”（这个包不要任何权限，直接点即可）。路径是**运行网页服务的那台机器**上的路径；不支持从浏览器上传。
+**第 4 步：安装。** 打开网页 → 右上角“工具” → 展开“安装工具包” → 填目录路径（如 `D:\toolpacks\dice_roll`）或 zip 路径 → “检查并安装” → 在下面展开的「权限审阅」里逐项看、逐项勾选 → “同意这些权限并安装”（这个包不要任何权限，只要勾上“包含代码”）。路径是**运行网页服务的那台机器**上的路径；不支持从浏览器上传。
 
 **第 5 步：配置。** 下拉框“工具”分组里选 `dice_roll`，能看到“版本 0.1.0 · 已安装 · 模型可调用 · 确认：不用确认”和“权限：无”。把“默认面数”改成 20，填一个演示密钥，保存。下一次调用就生效。
 
@@ -406,7 +408,7 @@ def call(arguments: dict, config: dict) -> dict:
 | permissions 只能包含布尔值的 …。 | 只用四个键，值用 `true`/`false` |
 | send_local_to_model 必须是 false：本地内容不能交给第三方模型。 | 改成 `false` |
 | 和内置工具重名。 / 和后端重名。 | 换个名字（同名的已安装包会被覆盖升级，这是允许的） |
-| 安装前要确认权限：… | 通过接口安装时 `accept_permissions` 要正好列出清单要的权限；在网页里把权限审阅里的每一项都勾上再点“同意这些权限并安装” |
+| 安装前要确认权限：… / 要勾选确认「包含代码」 / 声明了成人分级… | 通过接口安装时 `accept_permissions` 要正好列出 `inspect` 返回的 `accept`（清单要的权限，加上 `code`、`rating_adult`）；在网页里把权限审阅里的每一项都勾上再点“同意这些权限并安装” |
 
 装上以后调用时可能遇到：
 

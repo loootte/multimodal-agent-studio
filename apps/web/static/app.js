@@ -157,11 +157,12 @@ async function sendMessage() {
   }, text.trim(), attachments);
 }
 
-// #53 定制角色表单：同样的流式回合，只是请求发到 /character，不经过对话模型。
-async function sendCharacter(body, label) {
+// #53/#86 表单工具：同样的流式回合，只是请求发到 /tools/<name>/run，不经过对话模型。
+async function sendCharacter(body, label, tool) {
   if (state.sending) return false;
   if (!state.currentId) await createSession(false);
-  await runTurn(`/api/sessions/${state.currentId}/character`, body, label, []);
+  const name = encodeURIComponent(tool || "character_image");
+  await runTurn(`/api/sessions/${state.currentId}/tools/${name}/run`, body, label, []);
   return true;
 }
 window.sendCharacter = sendCharacter;
@@ -2045,6 +2046,21 @@ function showToolPackReview(source, info) {
   const review = info.review || { permissions: [], not_granted: [], sandbox: [] };
   document.querySelector("#toolpack-review-title").textContent = `权限审阅：${info.name} ${info.version}`;
   document.querySelector("#toolpack-review-desc").textContent = info.description || "";
+  const adult = info.rating === "adult";
+  document.querySelector("#toolpack-review").classList.toggle("rated", adult);
+  const facts = [
+    `包含代码：${info.code ? "是（只在沙箱子进程里运行）" : "否"}`,
+    `分级：${adult ? `成人（rating=adult），${info.min_age} 岁以上，只能本机 ComfyUI 出图，结果标记为成人内容` : "通用（rating=general）"}`,
+    `装到：${info.target || "toolpacks/installed/" + info.name}`,
+  ];
+  document.querySelector("#toolpack-review-facts").replaceChildren(...facts.map((text) => {
+    const row = document.createElement("li");
+    row.textContent = text;
+    return row;
+  }));
+  const confirmText = document.querySelector("#toolpack-review-confirm");
+  confirmText.hidden = !(adult && info.confirm);
+  confirmText.textContent = adult ? info.confirm || "" : "";
   const perms = document.querySelector("#toolpack-review-perms");
   perms.replaceChildren();
   for (const item of review.permissions || []) {
@@ -2099,7 +2115,8 @@ async function acceptToolPack() {
     await api("POST", "/api/toolpacks/install", { source, accept_permissions: accepted });
     closeToolPackReview();
     await refreshToolList(info.name);
-    toolNote(`已安装 ${info.name}（在沙箱子进程里运行）。`);
+    const where = info.code ? "代码在沙箱子进程里运行" : "不含代码";
+    toolNote(`已安装 ${info.name}（${where}${info.ui && info.ui.form ? "；在「定制角色」表单顶部选它" : ""}）。`);
   } catch (error) {
     toolNote(error.message || "安装失败。");
   }

@@ -24,7 +24,8 @@ if ROOT not in sys.path:
 if WEB_DIR not in sys.path:
     sys.path.insert(0, WEB_DIR)
 
-import character
+import content_guard
+import module_tools
 import chat_run
 import desktop_notify
 import image_run
@@ -38,6 +39,7 @@ from services.gateway import egress
 
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_CHARACTER = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/character$")
+_SESSION_TOOL_RUN = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/tools/([a-z][a-z0-9_]{1,47})/run$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
@@ -357,7 +359,10 @@ def _resource_route(handler, app, method, path, query) -> None:
                 raise resources.ResourceError(400, "invalid_query", "type 不合法。")
             if session and not re.fullmatch(r"s_[0-9a-f]{32}", session):
                 raise resources.ResourceError(400, "invalid_query", "session 不合法。")
-            _send_json(handler, 200, resources.inventory(app, kind, session, one("q") or None))
+            rating = one("rating") or None
+            if rating and rating not in resources.RATINGS:
+                raise resources.ResourceError(400, "invalid_query", "rating 只能是 adult 或 general。")
+            _send_json(handler, 200, resources.inventory(app, kind, session, one("q") or None, rating))
             return
         if path == "/api/resources/preview" and method == "GET":
             _send_json(handler, 200, resources.preview_text(app, one("id")))
@@ -625,7 +630,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _send_json(handler, 200, view)
             return
         if path == "/api/tools" and method == "GET":
-            _send_json(handler, 200, app.tools.listing())
+            view = app.tools.listing()
+            view["form_tools"] = module_tools.form_tools()  # #86：表单工具（entry.kind=module）
+            _send_json(handler, 200, view)
             return
         if path.startswith("/api/toolpacks"):
             _toolpack_route(handler, app, method, path)
@@ -636,6 +643,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
         if path.startswith("/api/tools/"):
             parts = path[len("/api/tools/"):].split("/")
             name = urllib.parse.unquote(parts[0]) if parts else ""
+            if parts[1:] in (["catalog"], ["preview"]):
+                _form_tool_route(handler, app, method, name, parts[1])
+                return
             if name not in tool_config.declarations():  # 工具名或后端名
                 _send_json(handler, 404, {"code": "not_found", "message": "没有这个工具。"})
                 return
@@ -673,20 +683,22 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
                 return
             _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
             return
-        if path == "/api/character" and method == "GET":
-            _send_json(handler, 200, character.catalog(chat_run._character_config(app)))
+        if path == "/api/character" and method == "GET":  # 旧接口 = /api/tools/character_image/catalog
+            _form_tool_route(handler, app, "GET", "character_image", "catalog")
             return
-        if path == "/api/character/preview" and method == "POST":
-            body = _read_json(handler)
-            try:
-                _send_json(handler, 200, character.compose(body.get("fields") or {}, chat_run._character_config(app)))
-            except character.CharacterError as exc:
-                _send_json(handler, 400, exc.public())
+        if path == "/api/character/preview" and method == "POST":  # 旧接口 = /api/tools/character_image/preview
+            _form_tool_route(handler, app, "POST", "character_image", "preview")
             return
         matched = _SESSION_CHARACTER.fullmatch(path)
-        if matched and method == "POST":
+        if matched and method == "POST":  # 旧接口 = /api/sessions/<id>/tools/character_image/run
             session = _owned_session(app, matched.group(1))
             run = chat_run.start_character(app, session["session_id"], _read_json(handler))
+            _send_sse(handler, run, 0)
+            return
+        matched = _SESSION_TOOL_RUN.fullmatch(path)
+        if matched and method == "POST":
+            session = _owned_session(app, matched.group(1))
+            run = chat_run.start_form_tool(app, session["session_id"], matched.group(2), _read_json(handler))
             _send_sse(handler, run, 0)
             return
         if path == "/api/sessions" and method == "GET":
@@ -816,20 +828,47 @@ def _owned_session(app: App, session_id: str) -> dict:
     return session
 
 
+def _form_tool_route(handler: BaseHTTPRequestHandler, app, method: str, name: str, action: str) -> None:
+    """#86：表单工具（entry.kind=module）的目录和预览。都过宿主守卫（content_guard）。"""
+    pack = module_tools.get(name)
+    if pack is None:
+        _send_json(handler, 404, {"code": "not_found", "message": "没有这个表单工具。"})
+        return
+    config = chat_run._tool_config(app, name)
+    try:
+        if action == "catalog" and method == "GET":
+            _send_json(handler, 200, module_tools.catalog(pack, config))
+            return
+        if action == "preview" and method == "POST":
+            body = _read_json(handler)
+            _send_json(handler, 200, module_tools.compose(pack, body.get("fields") or {}, config, phase="preview"))
+            return
+    except content_guard.GuardError as exc:
+        _send_json(handler, 400, exc.public())
+        return
+    _send_json(handler, 405, {"code": "method_not_allowed", "message": "不支持这个方法。"})
+
+
 def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str) -> None:
-    """工具包：检查 / 安装 / 卸载 / 导出。source 是本机目录或 .zip 路径（服务只听 127.0.0.1）。"""
+    """工具包：检查 / 安装 / 卸载 / 导出。source 是本机目录或 .zip 路径（服务只听 127.0.0.1）。
+    安装 = 复制到仓库的 toolpacks/installed/<name>（不进 git）。accept_permissions 要和检查结果的 accept 完全一致：
+    声明的权限 + "code"（包里有代码）+ "rating_adult"（rating=adult）。旧的 pack.json 预设包不再支持。"""
     packs = tool_config._packs()
     try:
         if path == "/api/toolpacks/inspect" and method == "POST":
             body = _read_json(handler)
-            _send_json(handler, 200, packs.inspect(str(body.get("source") or "")))
+            info = packs.inspect(str(body.get("source") or ""))
+            info["type"] = "tool"
+            _send_json(handler, 200, info)
             return
         if path == "/api/toolpacks/install" and method == "POST":
             if not _config_write_allowed(handler, "toolpack_install"):
                 return
             body = _read_json(handler)
             summary = packs.install(str(body.get("source") or ""), body.get("accept_permissions"))
-            _audit_config_write("toolpack_install", ["permissions"])
+            fields = ["permissions"] + (["code"] if summary.get("code") else []) + (
+                ["rating"] if summary.get("rating") == "adult" else [])
+            _audit_config_write("toolpack_install", fields)
             _send_json(handler, 200, {"ok": True, "installed": summary})
             return
         parts = path[len("/api/toolpacks/"):].split("/")

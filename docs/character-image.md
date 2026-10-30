@@ -101,13 +101,17 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ## 接口
 
+`character_image` 是一个按[工具代码契约](tool-code-contract.md)实现的表单工具（`entry.kind: "module"`），走通用接口：
+
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/character` | 十二个字段的预设和生效默认值 |
-| `POST /api/character/preview` | `{fields}` → `{prompt, fields, used_defaults, minor, summary}`，不安全时 400 + `code` |
-| `POST /api/sessions/{id}/character` | `{fields, count, aspect_ratio, seed?, backend, privacy}`，返回和发消息相同的事件流 |
+| `GET /api/tools/character_image/catalog` | 核心字段和扩展字段的预设、生效默认值 |
+| `POST /api/tools/character_image/preview` | `{fields}` → `{prompt, summary, fields, used_defaults, rating}`，不安全时 400 + `code` |
+| `POST /api/sessions/{id}/tools/character_image/run` | `{fields, count, aspect_ratio, seed?, backend, privacy, confirmed?}`，返回和发消息相同的事件流 |
 
-宿主工具 `character_image` 的参数：十二个字段（字符串，可省略；`reference` 默认可空）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
+旧接口 `GET /api/character`、`POST /api/character/preview`、`POST /api/sessions/{id}/character` 保留，等于上面三个。
+
+工具参数：十二个核心字段 + 八个扩展字段（字符串，可省略；`reference` 默认可空）+ `mode`（`model` 默认 / `chat`）。返回 `content_handle`、`summary`、`used_defaults`、`prompt`。
 
 ## 不做
 
@@ -115,8 +119,74 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ## 代码
 
-- 工具包：`toolpacks/builtin/character_image/`（`tool.json`、`presets.json`）
-- 拼提示词和安全规则：`apps/web/character.py`
-- 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_character`、`start_character`）
-- 页面：`apps/web/static/character.js`
-- 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`；评测 `image.character`
+- 工具：`toolpacks/builtin/character_image/`（`tool.json` 1.3.0、`tool.py`、`presets.json`）。拼提示词的代码就在工具目录的 `tool.py` 里，宿主不再有专门的代码；`apps/web/character.py` 只剩一个转发到 `tool.py` 的兼容壳（旧的 import 还能用）。
+- 通用的表单工具调用：`apps/web/module_tools.py`；分级守卫：`apps/web/content_guard.py`
+- 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_module_tool`、`start_form_tool`）
+- 页面：`apps/web/static/character.js`（通用表单，按 `GET /api/tools` 的 `form_tools` 列出可用的表单工具）
+- 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`、`_pack_character_cases`、`_tool_install_cases`；评测 `image.character*`、`image.form_tool_*`、`image.install_*`
+
+## 摄像机位、光照与独立工具（#86）
+
+### 新字段（SFW 也能用）
+
+| 字段 | 名字 | 例子 |
+| --- | --- | --- |
+| 景别 | `shot` | 全身 / 七分身 / 膝上 / 半身 / 胸像 / 特写 / 远景 |
+| 角度 | `angle` | 平视 / 仰视 / 俯视 / 鸟瞰 / 侧面 / 背面 / 四分之三侧 / 倾斜 / 第一人称 |
+| 构图 | `composition` | 居中 / 三分法 / 对称 / 对角线 / 浅景深 / 框中框 / 留白 |
+| 光照类型 | `light_type` | 自然光 / 柔光 / 影棚光 / 黄金时刻 / 霓虹灯 / 烛光 / 月光 / 电影光 / 窗光 |
+| 光照方向 | `light_direction` | 正面光 / 侧光 / 逆光 / 顶光 / 底光 / 伦勃朗光 / 分割光 |
+| 氛围 | `light_mood` | 明亮 / 温暖 / 冷调 / 戏剧性 / 低调暗沉 / 梦幻 / 浪漫 / 神秘 |
+| 表情 | `expression` | 微笑 / 大笑 / 严肃 / 平静 / 害羞 / 自信 … |
+| 动作/场景 | `scene` | 自由文字，例如“在雨中撑伞” |
+
+这些字段默认都是“自动”（不加任何词），所以默认提示词和 #53 一字不差。选了景别时，画质词里的 `full body` 会去掉，避免冲突。
+
+提示词顺序：风格 → 画质 → 性别/年龄/人种/体型 → 发型发色瞳色 → 表情 → 服装 → 姿势 → 动作/场景 → 摄像机位（景别/角度/构图）→ 光照（类型/方向/氛围）→ 背景 → 参考 → 安全尾注。工具自己的 `presets.json` 里用 `added` 声明的新字段，紧跟在它的 `after` 字段后面。
+
+表单里每个字段是“可搜索下拉 + 自定义输入”：输入能筛选预设（中文标签），也能直接写自己的描述；清空就用默认。提示词预览实时更新。
+
+### 独立的工具（不进代码库）
+
+代码库里只有通用的 SFW 工具。个人用的版本（包括分级内容）做成**独立的工具包**：一个工具目录，里面是 `tool.json`（`entry.kind: "module"`、`ui.form: true`、`content.rating`）、`tool.py`（按[工具代码契约](tool-code-contract.md)实现，可以直接复制内置的 `tool.py`）和它自己的 `presets.json`。工具目录放在仓库外，用页面安装：
+
+1. 打开“工具配置”，展开“安装工具包”，填工具目录或 .zip 的路径，点“检查并安装”。
+2. 审阅里列出：装到哪（仓库的 `toolpacks/installed/<name>/`，已被 git 忽略）、权限、**包含代码**、`rating=adult` 时的**成人分级**（年龄下限、只能本机出图、确认文字）。
+3. “包含代码”和“成人分级”都要各自勾选，少一项就不装（`code_not_accepted` / `rating_not_accepted`）。
+4. 装好后不用重启：打开“定制”，顶部的工具下拉里就有它。选中分级工具会先弹它的 `content.confirm`，出图后端锁在本机 ComfyUI。
+5. 卸载：在工具列表里点它后面的“卸载”。
+
+安装后的代码只在沙箱子进程里跑；改了包里任何文件，授权作废，要重新安装。只有 `pack.json` 的旧预设包不再支持（`preset_pack_unsupported`），之前的“预设来源”下拉和 `MAS_LOCAL_TOOLPACKS` / `MAS_PRESET_PACKS_DIR` 都已去掉。
+
+**对话里用**：分级工具写了 `content.chat_keywords` 时，模型可以调它，但只有用户**这一句**出现关键词之一才放行，否则 `confirm_required`。没写关键词就只能在表单里用。
+
+### 分级守卫（宿主硬拦，工具代码改不了）
+
+`apps/web/content_guard.py` 对**任何** `content.rating=adult` 的工具生效（内置还是安装、代码有没有自己检查都一样），调用前查每个字段、调用后再查最终提示词：
+
+| 规则 | 代码 |
+| --- | --- |
+| 年龄低于 18（未成年）或低于工具的 `min_age`，阿拉伯数字、中文数字、`age 19`、年龄栏纯数字都算 | `minor_unsafe` |
+| 少女、萝莉、正太、小孩、幼女、儿童、学生、loli、shota、child、teen、underage、schoolgirl 等 | `minor_unsafe` |
+| 校服 / 教室 / 学生类内容 | `minor_unsafe`（说明原因） |
+| 幼态体型：娇小、幼态、平胸幼体等 | `minor_unsafe`（说明原因） |
+| 真人、明星、熟人、版权角色（词表 + 《作品名》、@账号、英文人名规则） | `not_original_character`，“请只描述原创角色” |
+| 分级内容发第三方出图 | `nsfw_backend_not_allowed`，说明可能违反服务条款；记一条 `egress.blocked` |
+| 表单没确认 / 对话这一句没关键词 | `confirm_required` |
+
+拒绝原因里用工具的 `content.label`（例如“XX不能画未成年角色”）。表单目录里，过不了守卫或标了 `minor` 的预设会被去掉；结果的 `rating` 以清单为准，工具自称 `general` 也会改成 `adult`。
+
+普通（general）工具：#53 的规则照旧，自定义文字露骨一律 `unsafe_content`，拼出的提示词露骨也拒绝。另外有一条通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，不许发第三方、结果打 `rating: adult`。
+
+### 结果标记
+
+分级图出图后：工件记录写 `rating: "adult"`，文件改名加 `adult_` 前缀；SSE `artifact` 事件和工具结果带 `rating`。本地资源面板有“分级”筛选（`GET /api/resources?rating=adult|general`），条目带 `rating` 和 `file_name`。
+
+### 检查
+
+`apps/web/check.py`：
+
+- `_pack_character_cases`（评测 `form_tool`）：discover、path_escape_rejected、minor_refused、school_uniform_refused、original_only、adult_code_host_guarded（一个**不做任何检查**的分级工具，证明拦截在宿主）、default_sfw、prompt_order、camera_light_prompt、generic_catalog_route、form_local_rating、chat_consent、adult_remote_refused。
+- `_tool_install_cases`（评测 `form_tool_install`）：install_ok、legacy_preset_pack_rejected、code_and_adult_confirm、uninstall、git_clean（真装进 `toolpacks/installed/` 一个随机名字的中性夹具，前后 `git status` 一致，再卸掉）。
+
+检查开始时把 `MAS_TOOLPACKS_DIR` 设成临时目录，夹具都是临时目录里的中性工具，不碰用户自己装的工具。

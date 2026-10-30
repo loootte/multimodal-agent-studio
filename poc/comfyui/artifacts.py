@@ -341,6 +341,30 @@ class ArtifactStore:
         os.replace(temporary, record_path)
         return self.publish(record)
 
+    def mark_rating(self, session_id: str, artifact_id: str, rating: str) -> dict | None:
+        """#86：给已保存的工件打分级。adult 时文件名加 adult_ 前缀（记录里的 file 跟着改），记录里写 rating。"""
+        if rating not in ("adult", "general"):
+            raise ArtifactError("rating 只能是 adult 或 general。")
+        record = self.get(session_id, artifact_id)
+        if record is None:
+            return None
+        name = record.get("file")
+        if not isinstance(name, str) or os.path.basename(name) != name:
+            raise ArtifactError("工件文件不在库里。")
+        folder = self._session_dir(session_id)
+        if rating == "adult" and not name.startswith("adult_"):
+            new_name = "adult_" + name
+            os.replace(os.path.join(folder, "files", name), os.path.join(folder, "files", new_name))
+            record["file"] = new_name
+        record["rating"] = rating
+        record_path = self._record_path(session_id, artifact_id)
+        temporary = record_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary, record_path)
+        return self.publish(record)
+
     def publish(self, record: dict) -> dict:
         shown = {key: value for key, value in record.items() if key != "file"}
         shown["url"] = self.display_url(record["session_id"], record["artifact_id"])

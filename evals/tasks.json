@@ -290,6 +290,132 @@
       "fake_only": true
     },
     {
+      "id": "image.form_tool_discover",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "discover"
+    },
+    {
+      "id": "image.form_tool_path_escape_rejected",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "path_escape"
+    },
+    {
+      "id": "image.form_tool_minor_refused",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "minor"
+    },
+    {
+      "id": "image.form_tool_school_uniform_refused",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "school"
+    },
+    {
+      "id": "image.form_tool_original_only",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "original"
+    },
+    {
+      "id": "image.form_tool_adult_code_host_guarded",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "adult_code"
+    },
+    {
+      "id": "image.character_default_sfw",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "default_sfw"
+    },
+    {
+      "id": "image.character_prompt_order",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "order"
+    },
+    {
+      "id": "image.character_camera_light_prompt",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "camera_light"
+    },
+    {
+      "id": "image.form_tool_generic_catalog_route",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "catalog_route"
+    },
+    {
+      "id": "image.form_tool_form_local_rating",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "form"
+    },
+    {
+      "id": "image.form_tool_chat_consent",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "chat"
+    },
+    {
+      "id": "image.form_tool_adult_remote_refused",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "adult_remote"
+    },
+    {
+      "id": "image.install_form_tool_ok",
+      "category": "image",
+      "kind": "form_tool_install",
+      "fake_only": true,
+      "case": "install_ok"
+    },
+    {
+      "id": "image.install_legacy_preset_pack_rejected",
+      "category": "image",
+      "kind": "form_tool_install",
+      "fake_only": true,
+      "case": "legacy_rejected"
+    },
+    {
+      "id": "image.install_form_tool_code_and_adult_confirm",
+      "category": "image",
+      "kind": "form_tool_install",
+      "fake_only": true,
+      "case": "adult_requires_confirm"
+    },
+    {
+      "id": "image.uninstall_form_tool",
+      "category": "image",
+      "kind": "form_tool_install",
+      "fake_only": true,
+      "case": "uninstall"
+    },
+    {
+      "id": "image.install_form_tool_git_clean",
+      "category": "image",
+      "kind": "form_tool_install",
+      "fake_only": true,
+      "case": "git_clean"
+    },
+    {
       "id": "security.storage_encrypted_at_rest",
       "category": "security",
       "kind": "storage_encryption",

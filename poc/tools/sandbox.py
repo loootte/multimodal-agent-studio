@@ -162,8 +162,15 @@ def _error(tool: str, code: str, message: str) -> dict:
     return {"ok": False, "tool": tool, "error": {"code": code, "message": message}}
 
 
-def run(pack, arguments: dict, config: dict, granted: set) -> dict:
-    """在子进程里调用第三方包的 call(arguments, config)。granted 是宿主核对过的生效权限（清单 ∩ 授权）。"""
+FUNCTIONS = ("call", "catalog", "preview", "run")
+
+
+def run(pack, arguments: dict, config: dict, granted: set, function: str = "call") -> dict:
+    """在子进程里调用第三方包的 call(arguments, config)。granted 是宿主核对过的生效权限（清单 ∩ 授权）。
+    #86：entry.kind=module 的表单工具按工具代码契约调用 catalog(ctx) / preview(fields, ctx) / run(args, ctx)，
+    这时 config 位置传的是宿主给的 ctx（纯 JSON）。"""
+    if function not in FUNCTIONS:
+        return _error(pack.name, "tool_error", f"不能调用 {function}。")
     name = pack.name
     scratch = tempfile.mkdtemp(prefix="mas-sbx-")
     write_roots = [scratch]
@@ -175,7 +182,7 @@ def run(pack, arguments: dict, config: dict, granted: set) -> dict:
         "module": pack.manifest["entry"]["module"], "pack_dir": pack.folder,
         "arguments": arguments, "config": config, "permissions": sorted(granted),
         "write_roots": write_roots, "deny_roots": data_dirs(), "scratch": scratch,
-        "extra_paths": _site_paths(),
+        "extra_paths": _site_paths(), "function": function,
     }
     env = child_env(scratch, "network" in granted)
     if len(write_roots) > 1:
@@ -273,6 +280,8 @@ def run(pack, arguments: dict, config: dict, granted: set) -> dict:
     if final.get("t") == "error":
         error = final.get("error") or "Exception"
         if error == "NoCall":
+            if function != "call":
+                return _error(name, "tool_error", f"工具包的入口没有 {function}()（见 docs/tool-code-contract.md）。")
             return _error(name, "tool_error", "工具包的入口没有 call(arguments, config)。")
         return _error(name, "tool_error", f"工具运行出错（{error}）。")
     result = final.get("result")

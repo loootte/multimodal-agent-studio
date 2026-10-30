@@ -92,8 +92,13 @@ def _label_path(gen_store, session_id: str, artifact_id: str) -> str | None:
         return None
 
 
-def inventory(app, kind: str | None = None, session: str | None = None, q: str | None = None) -> dict:
-    """列表。没有正文、没有路径。总占用按去重后的字节算。"""
+RATINGS = ("adult", "general")
+
+
+def inventory(app, kind: str | None = None, session: str | None = None, q: str | None = None,
+              rating: str | None = None) -> dict:
+    """列表。没有正文、没有路径。总占用按去重后的字节算。
+    rating（#86）：生成的工件带 adult / general；rating=adult 只看成人图，general 只看其余。"""
     sessions = app.sessions.all_sessions()
     titles = {s["session_id"]: s.get("title") or "" for s in sessions}
     running = {s["session_id"]: app.sessions.view(s)["running"] for s in sessions}
@@ -170,6 +175,8 @@ def inventory(app, kind: str | None = None, session: str | None = None, q: str |
                 "name": record.get("title") or "", "created_at": created or s.get("created_at"),
                 "sessions": ref_list(sid), "mentions": _mentions(s, aid), "shared": False,
                 "running": bool(running.get(sid)),
+                "rating": "adult" if record.get("rating") == "adult" else "general",
+                "file_name": os.path.basename(path) if path else "",
             })
     total = {"bytes": sum(blob_sizes.values()) + text_bytes + gen_bytes,
              "blobs": sum(blob_sizes.values()), "texts": text_bytes, "generated": gen_bytes, "count": len(items)}
@@ -178,6 +185,10 @@ def inventory(app, kind: str | None = None, session: str | None = None, q: str |
         items = [i for i in items if i["type"] == kind]
     if session:
         items = [i for i in items if any(r["session_id"] == session for r in i["sessions"])]
+    if rating == "adult":
+        items = [i for i in items if i.get("rating") == "adult"]
+    elif rating == "general":
+        items = [i for i in items if i.get("rating") != "adult"]
     if q:
         needle = q.lower()
         items = [i for i in items if needle in (i["label"] + " " + i["name"] + " " + i["handle"] + " " + i["media_type"]).lower()]
