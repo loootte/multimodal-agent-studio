@@ -153,6 +153,7 @@ def self_check() -> None:
         if item["ok"] or "workflow" in json.dumps(item):
             comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
     _check_mcp(specs)
+    _check_mcp_client()
     _check_video_whitelist()
     artifacts.self_check()
     _check_artifact_handoff()
@@ -185,6 +186,169 @@ def _check_mcp(specs: list[dict]) -> None:
     missing = handle({"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
     if not missing or missing.get("error", {}).get("code") != -32601:
         comfy_poc.fail(f"未知 MCP 方法没有拒绝：{missing}")
+
+
+def _check_mcp_client() -> None:
+    """14.A #78：MCP 客户端（entry.kind=mcp）。清单校验、默认停用、摘要绑定、参数黑名单、出站方法白名单、
+    stdio 走沙箱、HTTP 不连回环、安装时不带启用记录、项目名不能当包名卸载。"""
+    import base64
+    import importlib.util
+    import shutil
+    import tempfile
+
+    from services.gateway import egress
+    from services.tools import mcp_client, packs, sandbox
+    from services.runtime.tools import confirm_every_call, openai_tools, tool_mutates
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    spec = importlib.util.spec_from_file_location("mas_mcp_fake", os.path.join(root, "evals", "fixtures", "mcp_fake.py"))
+    fake_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fake_mod)
+
+    def problems(**change):
+        data = fake_mod.manifest()
+        for key, value in change.items():
+            data[key] = value
+        return packs.validate_manifest(data)
+
+    if problems():
+        comfy_poc.fail(f"合格的 HTTP MCP 清单被拒：{problems()}")
+    http = fake_mod.manifest()["entry"]
+    for label, change in (
+        ("confirm 不是 always", {"confirm": "never"}),
+        ("带 parameters", {"parameters": {"type": "object", "properties": {}}}),
+        ("http 没有联网权限", {"permissions": dict(fake_mod.manifest()["permissions"], network=False)}),
+        ("http:// 地址", {"entry": dict(http, url="http://203.0.113.10/mcp")}),
+        ("带用户名的地址", {"entry": dict(http, url="https://u:p@203.0.113.10/mcp")}),
+        ("stdio 指向包外", {"entry": {"kind": "mcp", "transport": "stdio", "module": "../x.py"}}),
+        ("stdio 带 command", {"entry": {"kind": "mcp", "transport": "stdio", "module": "s.py", "command": "npx"}}),
+        ("不认识的传输", {"entry": {"kind": "mcp", "transport": "ws", "url": "https://x.example/"}}),
+        ("名字带 __", {"name": "bad__name"}),
+        ("带 config", {"config": [{"name": "api_key", "type": "secret"}]}),
+    ):
+        if not problems(**change):
+            comfy_poc.fail(f"MCP 清单{label}也通过了")
+    if not packs.validate_manifest(fake_mod.manifest(), builtin=True):
+        comfy_poc.fail("内置工具声明 kind=mcp 也通过了")
+
+    # tools/list 投影：参数黑名单、坏 schema、坏名字都标 blocked；additionalProperties 一律 false；摘要随说明变。
+    listed = [
+        {"name": "ok", "description": "d", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}},
+        {"name": "leak", "description": "d", "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}}}},
+        {"name": "bad name!", "inputSchema": {"type": "object"}},
+        {"name": "noschema", "inputSchema": {"type": "array"}},
+    ]
+    items = mcp_client.project("mcp_unit", listed)
+    if [i["blocked"] for i in items] != [None, "blocked_param", "bad_name", "bad_schema"]:
+        comfy_poc.fail(f"MCP 工具投影不对：{[i['blocked'] for i in items]}")
+    if items[0]["schema"].get("additionalProperties") is not False or items[0]["name"] != "mcp_unit__ok":
+        comfy_poc.fail(f"MCP 工具 schema 没收紧：{items[0]}")
+    if mcp_client.digest_of(listed[0]) == mcp_client.digest_of(dict(listed[0], description="d2")):
+        comfy_poc.fail("工具说明变了摘要没变")
+
+    # 出站方法白名单：toolpack 通道只放 MCP 的四个方法。
+    if egress.check_policy("toolpack", {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {}}) is None:
+        comfy_poc.fail("toolpack 通道放行了白名单外的 MCP 方法")
+    if egress.check_policy("toolpack", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}) is not None:
+        comfy_poc.fail("toolpack 通道拦了 tools/call")
+    if "mcp" not in sandbox.FUNCTIONS:
+        comfy_poc.fail("沙箱没有 mcp 函数")
+
+    saved_dir = os.environ.get("MAS_TOOLPACKS_DIR")
+    saved_post = mcp_client.HTTP_POST
+    temp = tempfile.mkdtemp(prefix="mas-mcp-check-")
+    source = tempfile.mkdtemp(prefix="mas-mcp-src-")
+    os.environ["MAS_TOOLPACKS_DIR"] = temp
+    try:
+        fake = fake_mod.FakeMcpHttp()
+        mcp_client.HTTP_POST = fake
+        folder = fake_mod.write_pack(source)
+        with open(os.path.join(folder, mcp_client.ENABLED_FILE), "w", encoding="utf-8") as handle:
+            json.dump({"schema": "mas.mcp.enabled/1", "tools": {"lookup": {"digest": "x", "name": "mcp_fake__lookup"}}}, handle)
+        packs.install(folder, ["network"])
+        pack = packs.find("mcp_fake")
+        if mcp_client.enabled(pack):
+            comfy_poc.fail("安装把包里自带的启用记录也带进来了")
+        if not packs.review(pack.manifest).get("confirm_every_call") or not packs.review(pack.manifest).get("mcp"):
+            comfy_poc.fail("MCP 包审阅没有说明每次确认")
+        view = mcp_client.refresh(pack)
+        row = view["tools"][0]
+        names = lambda: [t["function"]["name"] for t in openai_tools()]
+        if row["state"] != "disabled" or "mcp_fake__lookup" in names():
+            comfy_poc.fail(f"远端工具默认就启用了：{row}")
+        try:
+            mcp_client.enable(pack, "lookup", "0" * 64)
+            comfy_poc.fail("摘要不符也启用了")
+        except mcp_client.McpError as exc:
+            if exc.code != "digest_mismatch":
+                comfy_poc.fail(f"摘要不符的错误码不对：{exc.code}")
+        mcp_client.enable(pack, "lookup", row["digest"])
+        if "mcp_fake__lookup" not in names() or not confirm_every_call("mcp_fake__lookup") \
+                or not tool_mutates("mcp_fake__lookup", {"query": "x"}):
+            comfy_poc.fail("启用后 MCP 工具不在工具表，或者不是每次确认")
+        for bad in ("mcp_fake__lookup",):
+            for action in (packs.uninstall, packs.export):
+                try:
+                    action(bad)
+                    comfy_poc.fail(f"{action.__name__} 接受了投影工具名 {bad}")
+                except packs.PackError:
+                    pass
+        result = mcp_client.call(packs.find_tool("mcp_fake__lookup"), {"query": "abc"})
+        if not result.get("ok") or result.get("trust") != "untrusted" or result.get("omitted") != 1:
+            comfy_poc.fail(f"MCP 结果没标不可信或没丢非文字内容：{result}")
+        # 本地正文（含 base64）在连接前拦下。
+        body = "本地正文 LOCAL-MCP-UNIT-77"
+        before = len(fake.calls)
+        encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+        blocked = _mcp_call_with_bodies(mcp_client, egress, packs, body, {"query": encoded})
+        if blocked.get("ok") or (blocked.get("error") or {}).get("code") != "egress_blocked" or len(fake.calls) != before:
+            comfy_poc.fail(f"本地正文（base64）没在连接前拦下：{blocked} {fake.calls[before:]}")
+        # 改了说明 -> reauth_required，tools/call 不发。
+        fake.tools[0] = dict(fake.tools[0], description="变了")
+        before = fake.calls.count("tools/call")
+        changed = mcp_client.call(packs.find_tool("mcp_fake__lookup"), {"query": "abc"})
+        if (changed.get("error") or {}).get("code") != "reauth_required" or fake.calls.count("tools/call") != before \
+                or "mcp_fake__lookup" in names():
+            comfy_poc.fail(f"清单变了没要求重新授权：{changed}")
+        # 回环地址不连。
+        os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        allowed, _ = sandbox.decide("mcp_fake", {"network"}, "127.0.0.1", 443)
+        if allowed:
+            comfy_poc.fail("MCP HTTP 能连回环地址")
+        os.environ["MAS_TOOLPACKS_DIR"] = temp
+        # stdio：示例 echo 在沙箱子进程里跑。
+        packs.install(os.path.join(root, "toolpacks", "examples", "mcp_echo"), ["code"])
+        echo = packs.find("mcp_echo")
+        rows = {r["remote"]: r for r in mcp_client.refresh(echo)["tools"]}
+        mcp_client.enable(echo, "echo", rows["echo"]["digest"])
+        said = mcp_client.call(packs.find_tool("mcp_echo__echo"), {"message": "hi"})
+        if not said.get("ok") or "hi" not in json.dumps(said, ensure_ascii=False) or said.get("trust") != "untrusted":
+            comfy_poc.fail(f"stdio MCP 调用不对：{said}")
+        if packs.find_tool("mcp_echo__reverse") is not None and "mcp_echo__reverse" in names():
+            comfy_poc.fail("没启用的 stdio 工具进了工具表")
+    finally:
+        mcp_client.HTTP_POST = saved_post
+        if saved_dir is None:
+            os.environ.pop("MAS_TOOLPACKS_DIR", None)
+        else:
+            os.environ["MAS_TOOLPACKS_DIR"] = saved_dir
+        shutil.rmtree(temp, ignore_errors=True)
+        shutil.rmtree(source, ignore_errors=True)
+
+
+def _mcp_call_with_bodies(mcp_client, egress, packs, body: str, arguments: dict) -> dict:
+    """在一条登记了本地正文的运行里调 MCP 工具（模拟网页 chat_run 的 egress.attach）。"""
+    from services import telemetry
+
+    trace_id = "t_mcp_unit"
+    previous = telemetry.current()
+    egress.attach(trace_id, session_id="s_mcp_unit", local_bodies=lambda: egress.LocalBodies([body]))
+    telemetry.bind(trace_id)
+    try:
+        return mcp_client.call(packs.find_tool("mcp_fake__lookup"), arguments)
+    finally:
+        telemetry.bind(previous)
+        egress.detach(trace_id)
 
 
 def _check_video_whitelist() -> None:

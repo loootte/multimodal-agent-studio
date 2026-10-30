@@ -937,6 +937,9 @@ def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str
             _audit_config_write("toolpack_uninstall", ["pack"])
             _send_json(handler, 200, {"ok": True, "removed": name})
             return
+        if name and parts[1:2] == ["mcp"]:
+            _mcp_route(handler, packs, name, method, parts[2:])
+            return
         if name and parts[1:] == ["export"] and method == "GET":
             raw = packs.export(name)
             handler.send_response(200)
@@ -950,6 +953,39 @@ def _toolpack_route(handler: BaseHTTPRequestHandler, app, method: str, path: str
     except packs.PackError as exc:
         status = 404 if exc.code == "not_found" else 400
         _send_json(handler, status, exc.payload())
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
+def _mcp_route(handler, packs, name: str, method: str, rest: list) -> None:
+    """14.A（#78）MCP 工具包的远端工具：看列表 / 刷新（连 server 拿 tools/list）/ 逐个启用（带摘要）/ 停用。
+    刷新、启用、停用都算配置写入：只给本机同源请求，记 security.config_changed。"""
+    from services.tools import mcp_client
+
+    pack = packs.find(name)
+    if not packs.is_mcp(pack):
+        _send_json(handler, 404, {"code": "not_found", "message": "没有这个 MCP 工具包。"})
+        return
+    try:
+        if rest == [] and method == "GET":
+            _send_json(handler, 200, {"ok": True, "mcp": mcp_client.view(pack)})
+            return
+        if rest in (["refresh"], ["enable"], ["disable"]) and method == "POST":
+            if not _config_write_allowed(handler, "toolpack_mcp"):
+                return
+            body = _read_json(handler) if rest != ["refresh"] else {}
+            if rest == ["refresh"]:
+                view = mcp_client.refresh(pack)
+            elif rest == ["enable"]:
+                view = mcp_client.enable(pack, str(body.get("tool") or ""), body.get("digest"))
+            else:
+                view = mcp_client.disable(pack, str(body.get("tool") or ""))
+            _audit_config_write("toolpack_mcp", ["mcp_" + rest[0]])
+            _send_json(handler, 200, {"ok": True, "mcp": view})
+            return
+    except mcp_client.McpError as exc:
+        status = 404 if exc.code == "not_found" else 400
+        _send_json(handler, status, {"code": exc.code, "message": exc.message})
         return
     _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
 

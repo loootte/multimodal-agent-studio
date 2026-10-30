@@ -76,7 +76,11 @@
         "security.desktop_navigation_blocked": true,
         "security.desktop_ipc_denied": true,
         "security.desktop_external_link_confirm": true,
-        "security.desktop_token_env_only": true
+        "security.desktop_token_env_only": true,
+        "security.mcp_local_content_blocked": true,
+        "security.mcp_schema_change_reauth": true,
+        "security.mcp_confirm_always": true,
+        "security.mcp_untrusted_result": true
       }
     }
   }

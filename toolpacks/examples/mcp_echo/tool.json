@@ -1,0 +1,13 @@
+{
+  "schema": "mas.tool/1",
+  "name": "mcp_echo",
+  "version": "0.1.0",
+  "description": "示例 MCP 工具包（stdio）：一个只用标准库写的 MCP server，提供 echo 和 reverse 两个远端工具。不联网、不读本机内容，在沙箱子进程里跑。",
+  "order": 910,
+  "parameters": null,
+  "mutating": true,
+  "confirm": "always",
+  "entry": {"kind": "mcp", "transport": "stdio", "module": "server.py"},
+  "requires": {"backends": [], "python": []},
+  "permissions": {"read_local_content": false, "network": false, "write_files": false, "send_local_to_model": false}
+}

@@ -1,0 +1,13 @@
+{
+  "schema": "mas.tool/1",
+  "name": "mcp_deepwiki",
+  "version": "0.1.0",
+  "description": "示例 MCP 工具包（HTTP）：连公开的 DeepWiki MCP server（https://mcp.deepwiki.com/mcp），查 GitHub 公开仓库的文档。会联网，参数会发给第三方。",
+  "order": 911,
+  "parameters": null,
+  "mutating": true,
+  "confirm": "always",
+  "entry": {"kind": "mcp", "transport": "http", "url": "https://mcp.deepwiki.com/mcp"},
+  "requires": {"backends": [], "python": []},
+  "permissions": {"read_local_content": false, "network": true, "write_files": false, "send_local_to_model": false}
+}

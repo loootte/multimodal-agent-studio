@@ -13,6 +13,9 @@ entry.kind（#86）：
 - module  表单工具：代码是工具目录里的 .py（契约见 docs/tool-code-contract.md：catalog / preview / run），
           内置的在宿主进程里跑（受信任），第三方的在沙箱子进程里跑。content.rating=adult 的工具不管代码写了什么，
           宿主的 content_guard 都会在调用前后强制检查。
+- mcp     外部 MCP server（14.A #78，ADR 0011）：只给第三方包。transport=stdio 时 server 是工具目录里的 .py，
+          在 12.D 沙箱子进程里跑；transport=http 时宿主经 toolpack 渠道出站（见 services/tools/mcp_client.py）。
+          远端工具默认不启用，逐个启用时把描述和参数模式的摘要绑进启用记录，变了要重新启用。
 
 清单字段见 docs/tool-packs.md。这里负责：读清单、校验、发现、安装、卸载、导出。
 配置值和密钥不在包里：它们存在数据目录的 tools.json，导出时不会带走。
@@ -56,7 +59,9 @@ _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _FIELDS = {"schema", "name", "version", "description", "order", "parameters", "mutating", "confirm",
            "confirm_args", "entry", "config", "requires", "permissions", "parameter_sources", "mcp",
            "ui", "content"}
-ENTRY_KINDS = ("python", "host", "module")
+ENTRY_KINDS = ("python", "host", "module", "mcp")
+MCP_TRANSPORTS = ("stdio", "http")
+MCP_SEPARATOR = "__"  # 远端工具投影成 <包名>__<工具名>；第三方包名里不许出现
 RATINGS = ("general", "adult")
 # 「包含代码」：入口是 python/module，或包里带任何可执行的文件。安装时要单独勾选确认。
 CODE_SUFFIXES = (".py", ".pyc", ".pyd", ".pyw", ".so", ".dll", ".exe", ".bat", ".cmd", ".ps1", ".sh", ".js")
@@ -147,6 +152,8 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     name = data.get("name")
     if not isinstance(name, str) or not _NAME.match(name):
         problems.append("name 必须是小写字母开头的 2-48 位 [a-z0-9_]。")
+    elif not builtin and MCP_SEPARATOR in name:
+        problems.append("第三方工具包的 name 不能含连续两个下划线（留给 MCP 远端工具的投影名）。")
     if not isinstance(data.get("version"), str) or not _VERSION.match(data.get("version") or ""):
         problems.append("version 必须是 主.次.修 三段数字。")
     if not isinstance(data.get("description"), str) or not data.get("description", "").strip():
@@ -183,7 +190,7 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
             problems.append("confirm=by_args 时 confirm_args 必须是非空的参数名列表。")
     entry = data.get("entry")
     if not isinstance(entry, dict) or entry.get("kind") not in ENTRY_KINDS:
-        problems.append("entry.kind 只能是 python、host 或 module。")
+        problems.append("entry.kind 只能是 python、host、module 或 mcp。")
     elif entry["kind"] == "host" and not builtin:
         problems.append("只有内置工具可以用 entry.kind=host。")
     elif entry["kind"] == "host" and data.get("name") not in HOST_TOOLS:
@@ -191,6 +198,8 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif entry["kind"] == "python" and builtin and (
             data.get("name") not in BUILTIN_PYTHON or entry.get("module") != BUILTIN_ENTRY):
         problems.append(f"内置 python 工具只限名单（packs.BUILTIN_PYTHON），入口必须是工具目录里的 {BUILTIN_ENTRY}。")
+    elif entry["kind"] == "mcp":
+        problems.extend(_mcp_problems(data, entry, builtin))
     elif entry["kind"] == "module" and builtin and data.get("name") not in HOST_TOOLS:
         problems.append("内置 module 工具只限内置工具名单（packs.HOST_TOOLS）。")
     elif entry["kind"] in ("python", "module"):
@@ -225,6 +234,65 @@ def validate_manifest(data, *, builtin: bool = False) -> list[str]:
     elif perms.get("send_local_to_model"):
         problems.append("send_local_to_model 必须是 false：本地内容不能交给第三方模型。")
     return problems
+
+
+def _mcp_problems(data: dict, entry: dict, builtin: bool) -> list[str]:
+    """14.A：kind=mcp 的清单。远端工具的说明和参数来自 tools/list，所以 parameters 必须是 null；
+    远端工具做什么宿主看不见，所以一律 confirm=always（比 12.E 只要求联网 / 读本地的更严）。"""
+    out = []
+    if builtin:
+        return ["内置工具不能是 entry.kind=mcp。"]
+    if data.get("confirm") != "always":
+        out.append("MCP 工具包必须 confirm=always（远端工具每次调用都要确认）。")
+    if data.get("parameters") is not None:
+        out.append("MCP 工具包的 parameters 必须是 null（远端工具的参数来自 tools/list，逐个启用）。")
+    if data.get("config"):
+        out.append("MCP 工具包暂不支持 config（密钥、请求头见 docs/mcp-client.md 的待定项）。")
+    transport = entry.get("transport")
+    if transport not in MCP_TRANSPORTS:
+        return out + ["entry.transport 只能是 stdio 或 http。"]
+    if transport == "stdio":
+        if set(entry) - {"kind", "transport", "module"}:
+            out.append("stdio 的 entry 只能有 kind、transport、module（不能写任意命令）。")
+        module = entry.get("module")
+        if not isinstance(module, str) or not module.endswith(".py"):
+            out.append("stdio 的 entry.module 必须是工具目录里的 .py（在 12.D 沙箱里跑）。")
+        elif not _relative_inside(module):
+            out.append("entry.module 必须是工具目录里的相对路径（不能是绝对路径，不能有 ..）。")
+    else:
+        if set(entry) - {"kind", "transport", "url"}:
+            out.append("http 的 entry 只能有 kind、transport、url。")
+        url = entry.get("url")
+        problem = mcp_url_problem(url)
+        if problem:
+            out.append(problem)
+        perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+        if perms.get("network") is not True:
+            out.append("http 传输的 MCP 工具包必须声明 permissions.network=true。")
+    return out
+
+
+def mcp_url_problem(url) -> str | None:
+    """HTTP MCP server 的地址：只许 https、不带用户名密码和片段；本机 / 回环地址在连接时另行拒绝。"""
+    import urllib.parse
+
+    if not isinstance(url, str) or not url or len(url) > 512 or any(ord(ch) < 33 or ord(ch) == 127 for ch in url):
+        return "entry.url 必须是 512 字以内、不含空白和控制字符的地址。"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        return "entry.url 不是合法地址。"
+    if parts.scheme != "https":
+        return "entry.url 只能是 https://（不支持明文 http）。"
+    if not host or parts.username or parts.password or parts.fragment:
+        return "entry.url 要有主机名，不能带用户名、密码或 # 片段。"
+    return None
+
+
+def is_mcp(pack) -> bool:
+    return bool(pack is not None and (pack.manifest.get("entry") or {}).get("kind") == "mcp")
 
 
 def _relative_inside(module: str) -> bool:
@@ -356,7 +424,7 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
     """入口代码必须是工具目录里真实存在的文件（解开符号链接以后也还在目录里）。
     内置和第三方一样按工具目录查（#89：内置 python 工具的代码也在自己的目录里）。"""
     entry = data.get("entry") or {}
-    if entry.get("kind") not in ("python", "module"):
+    if entry.get("kind") not in ("python", "module") and not _mcp_stdio(data):
         return None
     try:
         panel_files(folder, data)
@@ -375,8 +443,13 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
     return None
 
 
+def _mcp_stdio(data: dict) -> bool:
+    entry = data.get("entry") if isinstance(data, dict) else None
+    return isinstance(entry, dict) and entry.get("kind") == "mcp" and entry.get("transport") == "stdio"
+
+
 def has_code(folder: str, data: dict) -> bool:
-    if ((data.get("entry") or {}).get("kind")) in ("python", "module"):
+    if ((data.get("entry") or {}).get("kind")) in ("python", "module") or _mcp_stdio(data):
         return True
     for _base, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -489,7 +562,7 @@ class Pack:
 
     def module_path(self) -> str | None:
         entry = self.manifest["entry"]
-        if entry["kind"] not in ("python", "module"):
+        if entry["kind"] not in ("python", "module") and not _mcp_stdio(self.manifest):
             return None
         # 代码一律在工具自己的目录里（内置 python 工具也是，#89）。
         return os.path.normpath(os.path.join(self.folder, entry["module"]))
@@ -581,6 +654,20 @@ def find(name: str) -> Pack | None:
     return None
 
 
+def find_tool(name: str) -> Pack | None:
+    """按工具名找：普通工具就是它的包；MCP 远端工具（<包名>__<工具名>）给一个只读的派生 Pack，
+    清单是宿主按启用记录生成的（confirm=always、mutating=true），授权仍看服务端包本身。没启用或摘要变了返回 None。"""
+    pack = find(name)
+    if pack is not None or not isinstance(name, str) or MCP_SEPARATOR not in name:
+        return pack
+    server = find(name.split(MCP_SEPARATOR, 1)[0])
+    if not is_mcp(server):
+        return None
+    from services.tools import mcp_client
+
+    return mcp_client.tool_pack(server, name)
+
+
 # ---------- 运行时检查 ----------
 
 def config_for(pack: Pack) -> dict:
@@ -667,6 +754,14 @@ def review(data: dict, code: bool = False, panel: list | None = None) -> dict:
     out = {"permissions": items, "not_granted": denied, "sandbox": list(SANDBOX_FACTS), "mode": "subprocess"}
     # 12.E：联网 / 读本地内容的包每次调用都弹确认，同一轮里也不复用上一次的同意。
     out["confirm_every_call"] = _sensitive(data)
+    entry = data.get("entry") if isinstance(data.get("entry"), dict) else {}
+    if entry.get("kind") == "mcp":
+        from services.tools import mcp_client
+
+        out["confirm_every_call"] = True
+        out["mcp"] = mcp_client.review_facts(entry)
+        if entry.get("transport") == "http":
+            out["mode"] = "host_http"
     return out
 
 
@@ -916,5 +1011,12 @@ def summary(pack: Pack) -> dict:
         "grant": pack.grant_state(),
         "rating": pack.rating,
         "form": bool((m.get("ui") or {}).get("form")),
-        "code": m["entry"]["kind"] in ("python", "module") and not pack.builtin,
+        "code": (m["entry"]["kind"] in ("python", "module") or _mcp_stdio(m)) and not pack.builtin,
+        **({"mcp": _mcp_summary(pack)} if is_mcp(pack) else {}),
     }
+
+
+def _mcp_summary(pack: Pack) -> dict:
+    from services.tools import mcp_client
+
+    return mcp_client.summary(pack)

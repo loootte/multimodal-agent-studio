@@ -79,6 +79,16 @@
 | 5.10 | 桌面安全审计接口 `/api/desktop/security_event` 只认请求头令牌（不认 Cookie），事件名 / 字段白名单；页面脚本无法伪造（#77） | 自动：`security.desktop_navigation_blocked` |
 | 5.11 | 发布构建关闭 devtools（pywebview 看 `apps/desktop/RELEASE` 标记；Tauri `devtools(cfg!(debug_assertions))`）；令牌不进进程命令行（#77） | 自动：`security.desktop_navigation_blocked`、`security.desktop_token_env_only`；手工：发布包里按 F12 无反应 |
 
+## 6. 外部 MCP（14.A）
+
+| 编号 | 要求 | 验证 |
+| --- | --- | --- |
+| 6.1 | MCP 包只能是第三方，必须 `confirm: always`、`parameters: null`，不带 `config`；HTTP 只收 https，并且要声明 `network`；stdio 入口只能是包内 .py，在 12.D 沙箱里跑（#78） | 自动：`services/tools/check.py` 的 `_check_mcp_client` |
+| 6.2 | 远端工具默认停用，按摘要逐个启用；摘要变了状态变成 `changed`，工具退出模型工具表，调用返回 `reauth_required`，不发 `tools/call`（#78） | 自动：`security.mcp_schema_change_reauth` |
+| 6.3 | 每次调用都弹宿主模板确认卡，server 写的说明不进卡片（#78） | 自动：`security.mcp_confirm_always` |
+| 6.4 | 本地正文及其编码变体在连接 MCP server 前就被拦（`egress.blocked`，渠道 `toolpack`），server 不会被启动（#78） | 自动：`security.mcp_local_content_blocked` |
+| 6.5 | MCP 结果标 `untrusted` 回传，非文字内容丢掉；出站 JSON-RPC 有字段和方法白名单（#78） | 自动：`security.mcp_untrusted_result`、`_check_mcp_client` |
+
 ## 4. 发布前
 
 1. `python apps/web/check.py` 输出 `check ok`；`python -m services.tools.check` 输出 `tools check ok`。

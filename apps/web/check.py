@@ -372,11 +372,12 @@ class ProviderHandler(BaseHTTPRequestHandler):
             self._emit_tool("lookup_demo", {"topic": "runtime"})
             return
         if mode == "probe":  # 12.D：模型调用装好的探针工具包，参数来自 server.probe
-            if self._tool_result_count("sandbox_probe") >= int(getattr(self.server, "probe_times", 1) or 1):
+            tool = getattr(self.server, "probe_tool", None) or "sandbox_probe"  # 14.A：MCP 评测换成远端工具名
+            if self._tool_result_count(tool) >= int(getattr(self.server, "probe_times", 1) or 1):
                 self._piece(_delta(content="探针完成"))
                 self._done()
                 return
-            self._emit_tool("sandbox_probe", dict(getattr(self.server, "probe", None) or {"act": "scratch"}))
+            self._emit_tool(tool, dict(getattr(self.server, "probe", None) or {"act": "scratch"}))
             return
         if mode == "confirm":
             user = self._last_user()

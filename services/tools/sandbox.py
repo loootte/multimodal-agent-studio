@@ -162,7 +162,7 @@ def _error(tool: str, code: str, message: str) -> dict:
     return {"ok": False, "tool": tool, "error": {"code": code, "message": message}}
 
 
-FUNCTIONS = ("call", "catalog", "preview", "run")
+FUNCTIONS = ("call", "catalog", "preview", "run", "mcp")  # mcp：14.A stdio MCP server，一次喂一批 JSON-RPC 消息
 
 
 def run(pack, arguments: dict, config: dict, granted: set, function: str = "call") -> dict:
