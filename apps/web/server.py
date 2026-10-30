@@ -111,9 +111,12 @@ def make_httpd(app: App, host: str = "127.0.0.1", port: int = 8766) -> Threading
     return httpd
 
 
-def _resolve_desktop_token(cli_value: str | None) -> str | None:
-    """桌面令牌：命令行 --desktop-token 优先，否则环境变量 MAS_DESKTOP_TOKEN。空 = 不启用。"""
-    raw = (cli_value if cli_value is not None else os.environ.get("MAS_DESKTOP_TOKEN") or "").strip()
+def _resolve_desktop_token(cli_value: str | None = None) -> str | None:
+    """桌面令牌只经环境变量 MAS_DESKTOP_TOKEN 传入（13.D）：命令行参数会出现在进程列表里，同机其他用户可见。
+    空 = 不启用（Web 模式）。"""
+    if cli_value is not None:
+        raise SystemExit("--desktop-token 已停用：令牌请用环境变量 MAS_DESKTOP_TOKEN 传入（不出现在进程命令行里）。")
+    raw = (os.environ.get("MAS_DESKTOP_TOKEN") or "").strip()
     return raw or None
 
 
@@ -128,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--desktop-token",
         default=None,
-        help="桌面壳启动令牌；设置后无令牌请求返回 401。也可用环境变量 MAS_DESKTOP_TOKEN",
+        help=argparse.SUPPRESS,  # 13.D 停用：令牌只走环境变量 MAS_DESKTOP_TOKEN
     )
     parser.add_argument(
         "--ready-file",
@@ -465,6 +468,21 @@ def _meta_candidates(handler, app, query, candidate_id: str | None = None) -> No
 
 
 
+def _desktop_shell_guard():
+    """apps/desktop/shell_guard.py（事件白名单）；惰性按文件路径加载，不改 sys.path（apps/desktop 里有同名 check.py）。"""
+    cached = sys.modules.get("shell_guard")
+    if cached is not None:
+        return cached
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "shell_guard", os.path.join(os.path.dirname(WEB_DIR), "desktop", "shell_guard.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules["shell_guard"] = module
+    return module
+
+
 def _desktop_token_ok(handler: BaseHTTPRequestHandler, app: App, query: dict) -> bool:
     """桌面令牌校验。Web 模式（无令牌）直接通过。"""
     expected = app.desktop_token
@@ -551,6 +569,21 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             if method == "POST" and path == "/api/desktop/stop":
                 stopped = chat_run.stop_all(app)
                 _send_json(handler, 200, {"ok": True, "stopped": stopped})
+                return
+            if method == "POST" and path == "/api/desktop/security_event":
+                # 13.D：桌面壳安全审计。只认请求头令牌（壳进程才有），不认 Cookie / 查询串，
+                # 所以 WebView 里的脚本伪造不了；事件名和字段走白名单。
+                header = (handler.headers.get("X-MAS-Desktop-Token") or "").strip()
+                if header != app.desktop_token:
+                    _send_json(handler, 403, {"code": "shell_only", "message": "只有桌面壳进程能写安全审计。"})
+                    return
+                cleaned = _desktop_shell_guard().clean_event(_read_json(handler))
+                if cleaned is None:
+                    _send_json(handler, 400, {"code": "invalid_event", "message": "不认识的桌面安全事件。"})
+                    return
+                event, fields = cleaned
+                telemetry.record(event, trace_id="desk_" + uuid.uuid4().hex, via="desktop_shell", **fields)
+                _send_json(handler, 200, {"ok": True})
                 return
             if method == "GET" and path == "/api/desktop/notifications":
                 # 13.B：托盘通知轮询。只有模板文本（工具名 + 状态 + 张数），没有正文和文件名。
@@ -1002,7 +1035,8 @@ def _send_file(handler: BaseHTTPRequestHandler, path: str, content_type: str) ->
     if content_type.startswith("text/html"):
         handler.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'",
+            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
         )
         handler.send_header("Referrer-Policy", "no-referrer")
     handler.end_headers()

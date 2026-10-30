@@ -1080,6 +1080,54 @@ function desktopApi() {
   return (window.pywebview && window.pywebview.api) || null;
 }
 
+// 13.D（#77）：桌面壳里，指向本机界面以外的链接（模型 / 工具结果里的链接都算不可信）一律不在 WebView 里打开，
+// 交给宿主 open_external：宿主确认卡显示完整地址，确认后用系统浏览器打开。Web 模式（没有 pywebview）行为不变。
+function isExternalHref(href) {
+  try {
+    const url = new URL(href, window.location.href);
+    if (url.protocol === "blob:" || url.protocol === "about:") return false;
+    return url.origin !== window.location.origin;
+  } catch (error) {
+    return true;
+  }
+}
+
+async function openExternalLink(href) {
+  const native = desktopApi();
+  if (!native || typeof native.open_external !== "function") {
+    showNote("桌面壳还没就绪，外部链接暂时不能打开。");
+    return;
+  }
+  const result = await native.open_external(href);
+  if (result && result.ok) return;
+  if (result && result.code === "cancelled") return;
+  showNote(result && result.code === "link_not_allowed" ? "这个链接不能打开（只支持 http / https / mailto）。" : "没能打开外部链接。");
+}
+
+function guardDesktopLinks(event) {
+  if (!window.pywebview) return;
+  const anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+  if (!anchor || anchor.hasAttribute("download")) return;
+  const href = anchor.getAttribute("href") || "";
+  if (!isExternalHref(href)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.type === "click" || event.button === 1) openExternalLink(anchor.href || href);
+}
+
+document.addEventListener("click", guardDesktopLinks, true);
+document.addEventListener("auxclick", guardDesktopLinks, true);
+(function guardWindowOpen() {
+  const original = window.open;
+  window.open = function (href, ...rest) {
+    if (window.pywebview && href && isExternalHref(String(href))) {
+      openExternalLink(String(href));
+      return null;
+    }
+    return original.call(window, href, ...rest);
+  };
+})();
+
 async function pickNativeFile(message, request, pick, button) {
   const runId = message.run_id || request.run_id;
   const native = desktopApi();

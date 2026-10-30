@@ -118,6 +118,8 @@ Get-ChildItem $App -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recu
 Get-ChildItem $App -Recurse -Directory -Filter "toolpacks\installed" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $App "apps\desktop\src-tauri") -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $App "apps\desktop\dist") -ErrorAction SilentlyContinue
+# 13.D: release marker - launcher turns devtools off regardless of MAS_DESKTOP_DEVTOOLS.
+Set-Content -Path (Join-Path $App "apps\desktop\RELEASE") -Value "release build: devtools off" -Encoding ASCII
 
 # Entrypoints at layout root.
 # Smoke (SMOKE_RUNTIME.txt): always use .bat shims → SourcePython.

@@ -7,6 +7,9 @@
   服务端存进本地工件库、只给模型一个句柄；返回给 JS 的只有 ok / 错误码 / 字节数，不含路径和文件名，
   上传里也不带文件名。
 - 通知文本只来自 apps/web/desktop_notify.py 的宿主模板（工具名 + 状态 + 张数）。
+- 13.D（#77）：白名单 = JS_METHODS。别的名字（含直接走 pywebview 桥调用的）一律拒绝并记
+  security.desktop_ipc_denied；当前页面不是 sidecar 同源（被导航到外站）时白名单方法也拒绝。
+  钥匙串读写不在白名单里：只有 sidecar（keychain_tool / desktop_env）按名读写。
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ import urllib.request
 RUN_ID = re.compile(r"r_[0-9a-f]{32}")
 SESSION_ID = re.compile(r"s_[0-9a-f]{32}")
 MAX_LOCAL_FILE = 262144  # 与 apps/web/store.MAX_FILE 一致
-JS_METHODS = ("capabilities", "pick_local_file", "save_egress_export")
+JS_METHODS = ("capabilities", "pick_local_file", "save_egress_export", "open_external", "open_data_dir")
 
 
 def _request(base: str, token: str, method: str, path: str, body: dict | None = None,
@@ -54,18 +57,82 @@ def _code(raw: bytes, default: str) -> str:
 class DesktopApi:
     """pywebview js_api。公开方法 = JS_METHODS；其余全部私有。"""
 
-    def __init__(self, base: str, token: str, open_dialog=None, save_dialog=None):
+    def __init__(self, base: str, token: str, open_dialog=None, save_dialog=None, *, audit=None,
+                 links=None, current_url=None, open_folder=None):
+        import shell_guard
+
         self._base = base
         self._token = token
         self._open_dialog = open_dialog
         self._save_dialog = save_dialog
+        self._audit = audit if audit is not None else shell_guard.Audit(base, token)
+        self._links = links  # shell_guard.ExternalLinks；None = 外链不可用
+        self._current_url = current_url  # () -> 当前页面地址；None = 不核对（测试 / 无窗口）
+        self._open_folder = open_folder  # () -> bool，打开数据目录；路径只在宿主这边
+
+    def __getattr__(self, name: str):
+        # 只在正常属性找不到时进来：下划线名照常报 AttributeError（pywebview 内部探测用）；
+        # 其余名字一律当成越权 IPC，返回拒绝函数并记审计。
+        if name.startswith("_"):
+            raise AttributeError(name)
+        audit = self.__dict__.get("_audit")
+
+        def denied(*_args, **_kwargs):
+            if audit is not None:
+                audit.record("security.desktop_ipc_denied", reason="not_whitelisted", method=name)
+            return {"ok": False, "code": "ipc_denied"}
+
+        return denied
+
+    def __dir__(self):
+        return sorted(set(object.__dir__(self)))
+
+    def _page_ok(self, method: str) -> bool:
+        if self._current_url is None:
+            return True
+        import shell_guard
+
+        try:
+            url = self._current_url()
+        except Exception:
+            url = None
+        if shell_guard.navigation_allowed(url, self._base):
+            return True
+        self._audit.record("security.desktop_ipc_denied", reason="foreign_origin", method=method,
+                           **shell_guard.url_scheme_host(url))
+        return False
 
     def capabilities(self) -> dict:
+        if not self._page_ok("capabilities"):
+            return {"ok": False, "code": "ipc_denied"}
         return {"native_file_dialog": self._open_dialog is not None,
-                "native_save_dialog": self._save_dialog is not None}
+                "native_save_dialog": self._save_dialog is not None,
+                "external_links": self._links is not None,
+                "open_data_dir": self._open_folder is not None}
+
+    def open_external(self, url) -> dict:
+        """模型 / 工具结果里的链接：宿主确认卡显示完整地址，确认后交给系统浏览器。不在 WebView 里打开。"""
+        if not self._page_ok("open_external"):
+            return {"ok": False, "code": "ipc_denied"}
+        if self._links is None:
+            return {"ok": False, "code": "unavailable"}
+        return self._links.open(url)
+
+    def open_data_dir(self) -> dict:
+        """在系统文件管理器里打开数据目录。路径不回给 JS。"""
+        if not self._page_ok("open_data_dir"):
+            return {"ok": False, "code": "ipc_denied"}
+        if self._open_folder is None:
+            return {"ok": False, "code": "unavailable"}
+        try:
+            return {"ok": bool(self._open_folder())}
+        except Exception:
+            return {"ok": False, "code": "open_failed"}
 
     def pick_local_file(self, run_id) -> dict:
         """弹系统「打开文件」对话框，把选中的文件作为本机内容提交给等待中的运行。"""
+        if not self._page_ok("pick_local_file"):
+            return {"ok": False, "code": "ipc_denied"}
         if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
             return {"ok": False, "code": "invalid_run_id"}
         if self._open_dialog is None:
@@ -96,6 +163,8 @@ class DesktopApi:
 
     def save_egress_export(self, session_id=None) -> dict:
         """出站审计导出用系统「另存为」对话框（只导出这一种，白名单）。"""
+        if not self._page_ok("save_egress_export"):
+            return {"ok": False, "code": "ipc_denied"}
         if session_id is not None and (not isinstance(session_id, str) or not SESSION_ID.fullmatch(session_id)):
             return {"ok": False, "code": "invalid_session_id"}
         if self._save_dialog is None:
@@ -126,6 +195,39 @@ def public_surface(api: DesktopApi) -> dict:
             continue
         out[name] = getattr(api, name)
     return out
+
+
+def open_folder(path: str) -> bool:
+    """系统文件管理器打开目录（路径由宿主给，不来自 JS）。"""
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
+def webview_confirm(window_ref: list):
+    """宿主确认卡：pywebview 原生确认框；没有就用 Windows MessageBox；都没有就当「取消」。"""
+
+    def confirm(title: str, body: str) -> bool:
+        window = window_ref[0]
+        dialog = getattr(window, "create_confirmation_dialog", None) if window is not None else None
+        if dialog is not None:
+            return bool(dialog(title, body))
+        if sys.platform == "win32":
+            import ctypes
+
+            return ctypes.windll.user32.MessageBoxW(None, body, title, 0x04 | 0x30 | 0x100) == 6  # YES/NO，默认「否」
+        return False
+
+    return confirm
 
 
 def webview_dialogs(webview_module, window_ref: list):

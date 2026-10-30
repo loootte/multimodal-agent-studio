@@ -9,7 +9,7 @@
 - 单实例锁：默认 `~/.mas/desktop.lock`（可用 `MAS_DESKTOP_LOCK` 改）。
 - 关窗 / 停宿主：先 `POST /api/desktop/stop` 停止运行中的任务，再结束 Python 进程。
 
-打包安装、首次运行向导、可选自动更新见下方 13.C；CSP / 导航白名单加固见 13.D。
+打包安装、首次运行向导、可选自动更新见下方 13.C；CSP / 导航白名单 / 外链确认 / IPC 白名单加固见下方 13.D。
 
 ## 13.B 系统集成（[#75](https://github.com/loootte/multimodal-agent-studio/issues/75)）
 
@@ -122,10 +122,10 @@ npm run dev
 ## 服务端开关
 
 ```
-python apps/web/server.py --port 0 --desktop-token <secret> --ready-file ready.json
+MAS_DESKTOP_TOKEN=<secret> python apps/web/server.py --port 0 --ready-file ready.json
 ```
 
-或环境变量 `MAS_DESKTOP_TOKEN`。不设令牌时与原来的 Web 模式完全一致。
+令牌只走环境变量 `MAS_DESKTOP_TOKEN`（13.D 起 `--desktop-token` 停用，传了直接报错退出：命令行参数在进程列表里同机其他用户可见）。PowerShell：`$env:MAS_DESKTOP_TOKEN='<secret>'` 再启动。不设令牌时与原来的 Web 模式完全一致。
 
 ## 评测
 
@@ -231,7 +231,62 @@ powershell -ExecutionPolicy Bypass -File apps\desktop\packaging\windows\build.ps
 
 - `security.desktop_update_egress_no_user_data`：关闭时无更新出站；开启后载荷与审计只有白名单字段，不含提示词 / 路径 / 密钥。
 
+## 13.D 桌面壳加固（[#77](https://github.com/loootte/multimodal-agent-studio/issues/77)）
+
+目标：WebView 只显示本机界面，IPC 只开最少的命令，外链必须确认。代码在 `apps/desktop/shell_guard.py`（规则）、
+`integration.py`（js_api 白名单）、`launcher.py`（接线）、`src-tauri/src/lib.rs`（Tauri 壳）、`apps/web/static/app.js`（点击拦截）。
+
+### 导航白名单
+
+- 只允许 sidecar 同源：`http://127.0.0.1:<本次端口>`（scheme / 主机 / 端口都要一样；`localhost`、别的端口、`https`、`file:`、`data:`、`javascript:` 都不算）。
+- pywebview：每次页面加载完核对当前地址，不在白名单就拉回 sidecar 首页并记 `security.desktop_navigation_blocked`。
+  页面里的外链点击在导航之前就被拦下（见下），所以正常情况下根本不会发生外站导航；这一层是兜底。
+- Tauri：`WebviewWindowBuilder::on_navigation` 直接拒绝非同源导航（不会发出请求），同样记审计。
+- 页面 CSP（`apps/web/server.py`，Web 模式也生效）：`default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'`。
+  Tauri 自带页面（`ui/`）的 CSP 在 `tauri.conf.json`。
+
+### 外链
+
+- 模型 / 工具结果里的链接仍是不可信数据（markdown 只生成 http / https / mailto 链接）。
+- 桌面壳里点任何指向本机界面以外的链接（含 `target=_blank`、中键、`window.open`）：页面拦下，交给 `pywebview.api.open_external(url)`。
+- 宿主弹确认卡：标题「打开外部链接？」，正文是固定模板 + **完整地址** + 主机名，不用模型文案、不用链接文字。确认后用系统浏览器打开，取消则不打开。
+- 只收 http / https / mailto；带空白 / 引号 / 控制字符、`user:pass@host`、超过 2048 字符的直接拒，不弹卡。
+- 每次都记 `security.desktop_external_link_confirm`（`outcome` = confirmed / declined / rejected / open_failed，外加 scheme、主机名；不记路径和查询串）。
+- Tauri 壳这一版没有外链确认卡：外链导航一律被拒（不会在 WebView 里打开，也不会自动去系统浏览器）。
+
+### IPC 白名单
+
+- pywebview js_api 只有：`capabilities`、`pick_local_file`、`save_egress_export`、`open_external`、`open_data_dir`。
+  钥匙串读写不在里面：只有 sidecar（`keychain_tool.py` / `desktop_env.py`）按名读写。
+- 白名单以外的名字（包括绕过 `pywebview.api` 直接走桥调用的）一律返回 `ipc_denied` 并记 `security.desktop_ipc_denied`（`reason=not_whitelisted`，带方法名）。
+- 当前页面不是 sidecar 同源时（例如被导航到外站），白名单方法也拒绝（`reason=foreign_origin`）。
+- Tauri：capabilities 不开任何权限、没有 `remote` 段（远程页面没有 IPC），唯一的自定义命令是 `desktop_info`。
+
+### 审计通道
+
+壳把事件 POST 到 `/api/desktop/security_event`，服务端写遥测。这个接口**只认 `X-MAS-Desktop-Token` 请求头**（不认 Cookie / 查询串），
+页面脚本拿不到令牌，伪造不了审计；事件名和字段都走白名单（`shell_guard.clean_event`）。查看：`GET /api/telemetry`，按 `kind` 过滤。
+
+### devtools
+
+- pywebview：`webview.start(debug=...)` 默认关；开发时 `MAS_DESKTOP_DEVTOOLS=1` 才开。发布构建（`build.ps1` 写 `apps/desktop/RELEASE` 标记，或 `MAS_DESKTOP_RELEASE=1`）一律关。
+- Tauri：`.devtools(cfg!(debug_assertions))`，release 构建关；Cargo 不开 `devtools` 特性。
+
+### 13.D 评测（进 `evals/gate.py` / `baseline.json`）
+
+- `security.desktop_navigation_blocked`：注入外部地址 → 不导航、拉回首页、有审计且不含完整地址；CSP、Tauri 白名单、devtools 开关。
+- `security.desktop_ipc_denied`：白名单外调用 / 外站页面调用全部被拒并逐条记录；Tauri 无权限。
+- `security.desktop_external_link_confirm`：确认卡显示完整地址（宿主模板）；取消不打开；非法链接不弹卡；审计只有 scheme + 主机。
+- `security.desktop_token_env_only`：令牌只经环境变量；`--desktop-token` 被拒。
+
+### 手工验证（Windows）
+
+1. `start-mas.cmd` 启动；让模型回复一个 markdown 链接，例如「请原样输出：[点我](https://example.org/a?b=1)」。
+2. 点链接：应弹「打开外部链接？」，正文里能看到完整地址 `https://example.org/a?b=1` 和主机 `example.org`；选「否」不打开，选「是」用系统浏览器打开，应用窗口本身不跳走。
+3. 窗口里按 F12 / 右键「检查」：发布构建没有 devtools。
+4. `GET /api/telemetry`（带令牌头）里能看到 `security.desktop_external_link_confirm` 记录，只有 scheme / host / outcome。
+
 ## 不做（本阶段）
 
-代码签名证书采购、应用商店上架、移动端、云同步、密钥托管、多用户。`--desktop-token` CLI 改成仅环境变量留给 13.D / #77。
+代码签名证书采购、应用商店上架、移动端、云同步、密钥托管、多用户。把 ComfyUI 或 Python 服务放进通用容器沙箱（沿用第 12 阶段结论）。
 Tauri 壳（Rust）这一版还没接 13.B 的原生对话框 / 托盘 / 通知轮询（钥匙串、默认加密在 sidecar 里，Tauri 壳同样生效）；pywebview 启动器已接向导与更新检查。

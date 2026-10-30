@@ -51,6 +51,8 @@
 
 13.C 实现记录（[#76](https://github.com/loootte/multimodal-agent-studio/issues/76)）：Windows 安装布局用 `apps/desktop/packaging/windows/`（NSIS + 可选 embeddable Python），**不用**已废弃的 PyInstaller onefile。首次运行向导写 `desktop.json`（无密钥）；ComfyUI 探测只打用户填写或本机默认 `127.0.0.1:8188`，不扫网段。自动更新默认关，开启后走出站渠道 `update`，载荷与审计仅 `version`+`platform`，清单需 Ed25519 验签。卸载默认保留数据目录与钥匙串。未采购代码签名证书；SmartScreen 警告风险仍适用。`--desktop-token` CLI 改仅环境变量留给 13.D / #77。
 
+13.D 实现记录（[#77](https://github.com/loootte/multimodal-agent-studio/issues/77)）：WebView 导航只放行 sidecar 同源（pywebview 加载后核对 + 页面点击拦截；Tauri `on_navigation`）；外链经宿主确认卡（固定模板 + 完整地址）交给系统浏览器；js_api 白名单之外与外站页面的调用一律拒绝并审计；审计接口只认请求头令牌；页面 CSP 收紧；发布构建关 devtools；桌面令牌只走环境变量 `MAS_DESKTOP_TOKEN`。
+
 ## 后果
 
 - 新增 `apps/desktop/` 和对应构建流水线；Windows 优先，macOS / Linux 随后。

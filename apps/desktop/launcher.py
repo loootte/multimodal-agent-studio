@@ -83,6 +83,7 @@ def _spawn_host(root: Path, python: str):
     deadline = time.time() + 45
     url = base = token = None
     server_pid = None
+    data_dir = None
     while time.time() < deadline:
         line = proc.stdout.readline()
         if not line and proc.poll() is not None:
@@ -109,13 +110,14 @@ def _spawn_host(root: Path, python: str):
             base = info["base"]
             token = url.split("desktop_token=", 1)[-1].split("&", 1)[0]
             server_pid = int(info.get("server_pid") or 0)
+            data_dir = info.get("data_dir") or None
             if not token:
                 continue
             break
     if not url or not token:
         proc.kill()
         raise SystemExit("sidecar 未在超时前就绪（无 MAS_READY）")
-    return proc, url, base, token, server_pid
+    return proc, url, base, token, server_pid, data_dir
 
 
 def _http_stop(python: str, base: str, token: str) -> None:
@@ -155,6 +157,7 @@ def main() -> int:
     import integration  # 13.B：原生对话框 / 通知 / 托盘
     import wizard  # 13.C：首次运行向导
     import updater  # 13.C：可选更新检查（默认关）
+    import shell_guard  # 13.D：导航白名单 / 外链确认 / IPC 拒绝审计
 
     # 首次运行：选数据目录 / 确认加密 / 探测 ComfyUI / 可选 API key
     if (os.environ.get("MAS_SKIP_WIZARD") or "").strip().lower() not in ("1", "on", "true", "yes"):
@@ -180,7 +183,7 @@ def main() -> int:
         pass
 
     try:
-        proc, url, base, token, server_pid = _spawn_host(root, python)
+        proc, url, base, token, server_pid, data_dir = _spawn_host(root, python)
     except HostStartError as exc:
         text = exc.message + ("\n\n" + "\n".join(exc.commands) if exc.commands else "")
         integration.show_error("Multimodal Agent Studio 无法启动", text)
@@ -228,10 +231,25 @@ def main() -> int:
 
     try:
         if use_webview:
+            import webbrowser
+
             window_ref: list = [None]
             open_dialog, save_dialog = integration.webview_dialogs(webview, window_ref)
-            # js_api 只有白名单方法（选本机文件 / 另存出站审计）；令牌等都是私有属性，JS 拿不到。
-            api = integration.DesktopApi(base, token, open_dialog, save_dialog)
+            audit = shell_guard.Audit(base, token)
+            links = shell_guard.ExternalLinks(integration.webview_confirm(window_ref), webbrowser.open, audit)
+
+            def current_url():
+                window = window_ref[0]
+                return window.get_current_url() if window is not None else None
+
+            # js_api 只有白名单方法（选本机文件 / 另存出站审计 / 外链确认 / 打开数据目录）；
+            # 令牌等都是私有属性，JS 拿不到；别的调用拒绝并审计。
+            api = integration.DesktopApi(base, token, open_dialog, save_dialog, audit=audit, links=links,
+                                         current_url=current_url,
+                                         open_folder=(lambda: integration.open_folder(data_dir)) if data_dir else None)
+            # 外链由页面里的点击拦截交给 open_external（宿主确认卡）。pywebview 自带的
+            # OPEN_EXTERNAL_LINKS_IN_BROWSER 保持默认开：万一拦截没生效，target=_blank 也只会去系统浏览器，
+            # 不会在新的 WebView 窗口里打开外站。
             window = webview.create_window(
                 "Multimodal Agent Studio",
                 url,
@@ -240,6 +258,18 @@ def main() -> int:
                 js_api=api,
             )
             window_ref[0] = window
+            guard = shell_guard.NavigationGuard(base, audit, lambda home: window.load_url(home))
+
+            def on_loaded(*_args):
+                try:
+                    guard.check(window.get_current_url())
+                except Exception:
+                    pass
+
+            try:
+                window.events.loaded += on_loaded
+            except Exception:
+                pass
             quitting = {"now": False}
 
             def on_show():
@@ -273,7 +303,7 @@ def main() -> int:
                 window.events.closing += on_closing
             except Exception:
                 pass
-            webview.start(start_tray)
+            webview.start(start_tray, debug=shell_guard.devtools_enabled(root))
         else:
             import webbrowser
 

@@ -557,6 +557,34 @@
       "kind": "desktop_security",
       "fake_only": true,
       "check": "update_egress_no_user_data"
+    },
+    {
+      "id": "security.desktop_navigation_blocked",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "navigation_blocked"
+    },
+    {
+      "id": "security.desktop_ipc_denied",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "ipc_denied"
+    },
+    {
+      "id": "security.desktop_external_link_confirm",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "external_link_confirm"
+    },
+    {
+      "id": "security.desktop_token_env_only",
+      "category": "security",
+      "kind": "desktop_security",
+      "fake_only": true,
+      "check": "token_env_only"
     }
   ]
 }
