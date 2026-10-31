@@ -169,3 +169,13 @@ MCP 出站控制和工具安全检查的开关，统一放在一份配置里：`
 - 内容审核只作用于表单工具（`entry.kind=module`）。对话里直接调 `generate_image` 写露骨提示词，一直没有审核和底线检查，只按 `looks_adult` 做路由（默认只走本机）；已记进 ROADMAP。
 - `adult_remote_hosts` 按主机名匹配，不区分端口和路径；成人内容识别（`looks_adult`）是关键词规则，可能漏判。
 - `sensitive_confirm_every_call` 只放宽「一轮内复用」，不能关掉第一次确认；`confirm=always` 的策略收紧优先于它。
+
+### 保存反馈与浏览器端到端检查
+
+- 设置页底部的主「保存」会一起保存模型、上下文压缩和工具安全策略：策略表单或高级 JSON 有改动才发 `PUT /api/tool-policy`。
+  放宽时先弹页内确认（409）；取消或失败时设置页不关，红字写明「模型和上下文已保存；工具安全策略没有保存」和原因；
+  成功时关闭设置页并在页面底部提示改了哪些字段；没改策略会提示「工具安全策略没有改动」。区块内的「保存策略」按钮照旧单独保存。
+- 工具页每个工具的「保存」：保存中会禁用按钮，放宽隐私的设置（如 generate_image 的 `remote_local_prompt=confirm`）走同一个页内确认弹窗，
+  结果提示「已保存 / 没有变化 / 没能保存：原因」。工具的安全策略不在工具页，在「设置 → 工具安全策略」，单个工具用高级 JSON 的 `tools.<工具名>`。
+- 浏览器端到端：`apps/web/e2e/settings_policy.cjs`（需要 `npm i puppeteer-core` 和 Chrome；只对临时服务跑，它会改并恢复策略和工具配置）：
+  `MAS_URL=http://127.0.0.1:18799 CHROME=<chrome 路径> node apps/web/e2e/settings_policy.cjs`。

@@ -621,3 +621,8 @@ dialog select { font: inherit; padding: 0.35rem; }
 .policy-form details { border: 1px dashed currentColor; border-radius: 6px; padding: 6px 8px; opacity: 0.9; }
 #tool-policy-locked-box { margin-top: 10px; }
 #policy-ack ul { margin: 8px 0; padding-left: 18px; display: grid; gap: 4px; }
+
+.save-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(640px, 90vw);
+  background: var(--fg, #222); color: var(--bg, #fff); padding: 10px 16px; border-radius: 8px; z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2); margin: 0; }
+#settings-status { font-weight: 600; }

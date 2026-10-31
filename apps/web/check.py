@@ -5612,6 +5612,19 @@ def _tool_policy_ui_case(base: str) -> None:
     for needle in ("acknowledge_required", "askPolicyAcknowledge", "toolPolicyFromForm", "put(fields)", "saveToolPolicyJson", "delete entry.auth.available"):
         if needle not in script:
             fail(f"app.js 缺放宽确认流程：{needle}")
+    # 用户路径（#93 复测）：改了表单直接点设置页底部的主「保存」。主保存必须带上工具安全策略（走 409 确认），
+    # 取消 / 失败要留在设置页说明原因，成功 / 没变化都要有看得见的提示；工具配置的 409 也走页内弹窗。
+    save_settings = script[script.find("async function saveSettings("):script.find("function showSettingsStatus(")]
+    for needle in ("toolPolicyPending()", "await putToolPolicy(", '"cancelled"', "showToast(", "工具安全策略没有改动"):
+        if needle not in save_settings:
+            fail(f"主「保存」没带上工具安全策略或没给反馈：{needle}")
+    save_tool = script[script.find("async function saveToolConfig("):script.find("async function resetToolConfig(")]
+    if "askPolicyAcknowledge(" not in save_tool or "window.confirm" in save_tool or "没有变化" not in save_tool \
+            or "没能保存" not in save_tool:
+        fail("工具配置保存没用页内 409 确认或缺少成功 / 没变化 / 失败提示")
+    for needle in ('id="settings-status"', 'id="save-toast"', 'id="policy-ack-intro"'):
+        if needle not in html:
+            fail(f"缺保存反馈节点：{needle}")
     # 表单只改 global：内容审核选 off、其他保持默认时提交的就是这一份
     policy = {"global": {"content_guard": "off"}}
     status, body = request("PUT", base + "/api/tool-policy", {"policy": policy})

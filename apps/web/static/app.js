@@ -1610,6 +1610,7 @@ const POLICY_SWITCHES = ["untrusted_results", "schema_reauth", "mcp_confirm_ever
 const POLICY_ADDRESSES = ["http_loopback", "http_link_local", "http_private"];
 const POLICY_LISTS = ["adult_remote_hosts", "stdio_commands", "params_block", "params_allow"];
 let toolPolicyView = null;
+let toolPolicyBaseline = null;  // 打开 / 保存后表单和 JSON 的样子，用来判断主「保存」时策略有没有改
 
 async function refreshToolPolicy() {
   try {
@@ -1672,6 +1673,11 @@ function fillToolPolicy(view, note) {
   const form = document.querySelector("#settings-form");
   form.elements.policy_json.value = toolPolicyText(view && view.policy);
   fillToolPolicyForm(view);
+  try {
+    toolPolicyBaseline = { form: JSON.stringify(toolPolicyFromForm()), json: form.elements.policy_json.value };
+  } catch (error) {
+    toolPolicyBaseline = null;
+  }
   const locked = document.querySelector("#tool-policy-locked");
   locked.replaceChildren(...((view && view.locked) || []).map((item) => {
     const li = document.createElement("li");
@@ -1735,9 +1741,13 @@ function toolPolicyFromForm() {
 
 // #93 决定 7：放不放宽由宿主判断。宿主回 409 acknowledge_required 时用页内弹窗把放宽字段和说明原样给人看，
 // 同意了才带 acknowledge 重发；收紧和恢复默认不用确认。
-function askPolicyAcknowledge(fields, texts) {
+function askPolicyAcknowledge(fields, texts, options) {
   const dialog = document.querySelector("#policy-ack");
   const list = document.querySelector("#policy-ack-fields");
+  const opts = options || {};
+  document.querySelector("#policy-ack-title").textContent = opts.title || "确认放宽工具安全策略";
+  document.querySelector("#policy-ack-intro").textContent = opts.intro
+    || "服务端判断这份策略放宽了下面这些字段（409 acknowledge_required）。确认后才会保存，并记一条只含字段名的审计。";
   list.replaceChildren(...fields.map((field) => {
     const li = document.createElement("li");
     const code = document.createElement("code");
@@ -1768,14 +1778,17 @@ function askPolicyAcknowledge(fields, texts) {
   });
 }
 
+// 返回 {status, message}：status 是 saved / unchanged / cancelled / failed，主「保存」按它决定关不关设置页。
 async function putToolPolicy(policy) {
   const hint = document.querySelector("#tool-policy-hint");
   const put = (acknowledge) => api("PUT", "/api/tool-policy", acknowledge ? { policy, acknowledge } : { policy });
   const buttons = ["#tool-policy-save", "#tool-policy-save-json", "#tool-policy-reset"].map((id) => document.querySelector(id));
   buttons.forEach((button) => { button.disabled = true; });
   hint.textContent = "保存中…";
+  let result;
   try {
     let view;
+    let acknowledged = [];
     try {
       view = await put(null);
     } catch (error) {
@@ -1783,16 +1796,46 @@ async function putToolPolicy(policy) {
       const payload = error.payload || {};
       const fields = payload.fields || [];
       if (!(await askPolicyAcknowledge(fields, payload.texts || {}))) {
-        hint.textContent = "没有保存：放宽工具安全策略需要你确认（服务端返回了 409）。";
-        return;
+        result = { status: "cancelled", message: `工具安全策略没有保存：放宽 ${fields.join("、")} 需要你确认（服务端返回了 409）。` };
+        hint.textContent = result.message;
+        return result;
       }
+      acknowledged = fields;
       view = await put(fields);
     }
-    fillToolPolicy(view, (view.changed || []).length ? "已保存。已启用的 MCP 工具如受影响，需要到工具页重新启用。" : "没有变化。");
+    const changed = view.changed || [];
+    result = changed.length
+      ? { status: "saved", message: `工具安全策略已保存（${changed.join("、")}${acknowledged.length ? "；已确认放宽 " + acknowledged.join("、") : ""}）。已启用的 MCP 工具如受影响，需要到工具页重新启用。` }
+      : { status: "unchanged", message: "工具安全策略没有变化。" };
+    fillToolPolicy(view, result.message);
+    if ((view.warnings || []).length) result.status = "warned";
+    return result;
   } catch (error) {
-    hint.textContent = error.message || "没能保存。";
+    result = { status: "failed", message: `工具安全策略没能保存：${error.message || "未知错误"}` };
+    hint.textContent = result.message;
+    return result;
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+// 主「保存」也要带上工具安全策略：JSON 改过就按 JSON，表单改过就按表单，都没改就不发。
+function toolPolicyPending() {
+  if (!toolPolicyView || !toolPolicyBaseline) return null;
+  const form = document.querySelector("#settings-form");
+  const text = form.elements.policy_json.value;
+  if (text !== toolPolicyBaseline.json) {
+    try {
+      return { policy: text.trim() ? JSON.parse(text) : {} };
+    } catch (error) {
+      return { error: "高级 JSON 不是合法的 JSON，工具安全策略没有保存。" };
+    }
+  }
+  try {
+    const policy = toolPolicyFromForm();
+    return JSON.stringify(policy) === toolPolicyBaseline.form ? null : { policy };
+  } catch (error) {
+    return { error: error.message };
   }
 }
 
@@ -1875,12 +1918,21 @@ async function saveSettings(event) {
   event.preventDefault();
   const form = event.currentTarget;
   showSettingsError("");
+  const submit = form.querySelector('button[type="submit"]');
   const body = {
     base_url: form.elements.base_url.value.trim(),
     model: form.elements.model.value.trim(),
   };
   const key = form.elements.api_key.value.trim();
   if (key) body.api_key = key;
+  const pending = toolPolicyPending();
+  if (pending && pending.error) {
+    showSettingsError(pending.error);
+    document.querySelector("#tool-policy-hint").textContent = pending.error;
+    return;
+  }
+  if (submit) submit.disabled = true;
+  showSettingsStatus("保存中…");
   try {
     state.provider = await api("PUT", "/api/provider", body);
     const context = await api("PUT", "/api/context", { values: contextValues(form) });
@@ -1889,11 +1941,52 @@ async function saveSettings(event) {
     document.querySelector("#key-hint").textContent = keyHint(state.provider);
     if (state.provider.configured) showNote("");
     renderChrome();
-    if ((context.warnings || []).length) return;  // 有回退的项：留在设置页让用户看到
+    const parts = ["模型和上下文压缩已保存。"];
+    if (pending) {
+      const policy = await putToolPolicy(pending.policy);
+      if (policy.status === "cancelled" || policy.status === "failed") {
+        // 放宽没确认 / 保存失败：留在设置页，把原因摆在眼前，不假装保存了
+        showSettingsStatus("");
+        showSettingsError(`${parts[0]}${policy.message}`);
+        document.querySelector("#tool-policy").scrollIntoView({ block: "start" });
+        return;
+      }
+      parts.push(policy.message);
+      if (policy.status === "warned") {
+        showSettingsStatus(parts.join(" "));
+        return;
+      }
+    } else {
+      parts.push("工具安全策略没有改动。");
+    }
+    if ((context.warnings || []).length) {  // 有回退的项：留在设置页让用户看到
+      showSettingsStatus(parts.join(" "));
+      return;
+    }
+    showSettingsStatus("");
     settings.close();
+    showToast(parts.join(" "));
   } catch (error) {
+    showSettingsStatus("");
     showSettingsError(error.message || "没能保存。");
+  } finally {
+    if (submit) submit.disabled = false;
   }
+}
+
+function showSettingsStatus(message) {
+  const line = document.querySelector("#settings-status");
+  line.hidden = !message;
+  line.textContent = message || "";
+}
+
+let toastTimer = null;
+function showToast(message) {
+  const toast = document.querySelector("#save-toast");
+  toast.textContent = message;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 6000);
 }
 
 async function clearKey() {
@@ -1922,6 +2015,7 @@ function showSettingsError(message) {
   }
   error.hidden = false;
   error.textContent = message;
+  if (typeof error.scrollIntoView === "function") error.scrollIntoView({ block: "nearest" });
 }
 
 function keyHint(provider) {
@@ -2280,27 +2374,39 @@ async function saveToolConfig(event) {
   const view = state.toolView;
   if (!view) return;
   const values = toolFormValues();
+  const before = JSON.stringify(Object.fromEntries(Object.entries(view.values || {}).map(([name, item]) => [name, item && item.value])));
   const put = (acknowledge) =>
     api("PUT", `/api/tools/${encodeURIComponent(view.name)}/config`, acknowledge ? { values, acknowledge } : { values });
+  const button = document.querySelector("#tool-save");
+  button.disabled = true;
+  toolNote("保存中…");
   try {
     try {
       state.toolView = await put(null);
     } catch (error) {
-      // 宿主要求显式确认放宽隐私的设置：把宿主给的警示原样给人看，同意了才带 acknowledge 重发。
+      // 宿主要求显式确认放宽隐私的设置（409）：用页内弹窗把宿主给的警示原样给人看，同意了才带 acknowledge 重发。
       if (error.code !== "acknowledge_required") throw error;
       const warnings = (error.payload && error.payload.warnings) || {};
-      const text = Object.values(warnings).join("\n");
-      if (!window.confirm(`${text}\n\n确定要放宽这项隐私设置吗？`)) {
-        toolNote("没有保存：放宽隐私的设置需要你确认。");
+      const fields = Object.keys(warnings);
+      const ok = await askPolicyAcknowledge(fields, warnings, {
+        title: "确认放宽隐私设置",
+        intro: `服务端判断 ${view.name} 的这些设置放宽了隐私保护（409 acknowledge_required）。确认后才会保存。`,
+      });
+      if (!ok) {
+        toolNote(`没有保存：放宽 ${fields.join("、")} 需要你确认（服务端返回了 409）。`);
         return;
       }
-      state.toolView = await put(Object.keys(warnings));
+      state.toolView = await put(fields);
     }
     renderToolForm(state.toolView);
-    toolNote("已保存，下一次运行就会用新配置。");
+    const after = JSON.stringify(Object.fromEntries(Object.entries(state.toolView.values || {}).map(([name, item]) => [name, item && item.value])));
+    const secret = Object.keys(values).some((name) => (view.fields || []).some((f) => f.name === name && f.type === "secret"));
+    toolNote(after === before && !secret ? "没有变化。" : `已保存 ${view.name}，下一次运行就会用新配置。`);
   } catch (error) {
     renderToolForm(view, error.errors);
-    toolNote(error.message || "保存失败。");
+    toolNote(`没能保存：${error.message || "保存失败。"}`);
+  } finally {
+    button.disabled = false;
   }
 }
 

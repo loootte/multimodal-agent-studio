@@ -172,6 +172,7 @@
       <h2>本地存储</h2>
       <p id="storage-status" class="hint">读取中…</p>
       <p class="hint">加密、迁移、备份和恢复主密钥只走命令行 <code>python apps/web/storage_tool.py</code>，密钥不经过网页。见 docs/storage-encryption.md。</p>
+      <p id="settings-status" class="hint" role="status" aria-live="polite" hidden></p>
       <div class="dialog-actions">
         <button type="submit">保存</button>
         <button type="button" id="clear-key">清除本机密钥</button>
@@ -179,9 +180,10 @@
       </div>
     </form>
   </dialog>
+  <p id="save-toast" class="save-toast" role="status" aria-live="polite" hidden></p>
   <dialog id="policy-ack" aria-labelledby="policy-ack-title">
     <h2 id="policy-ack-title">确认放宽工具安全策略</h2>
-    <p class="hint">服务端判断这份策略放宽了下面这些字段（409 acknowledge_required）。确认后才会保存，并记一条只含字段名的审计。</p>
+    <p id="policy-ack-intro" class="hint">服务端判断这份策略放宽了下面这些字段（409 acknowledge_required）。确认后才会保存，并记一条只含字段名的审计。</p>
     <ul id="policy-ack-fields"></ul>
     <div class="dialog-actions">
       <button type="button" id="policy-ack-ok">确认放宽并保存</button>
@@ -198,7 +200,8 @@
       <p id="tool-description" class="hint"></p>
       <div id="tool-meta" class="tool-meta" hidden></div>
       <div id="tool-fields" class="tool-fields"></div>
-      <p id="tool-note" class="note" hidden></p>
+      <p id="tool-note" class="note" role="status" aria-live="polite" hidden></p>
+      <p class="hint">这里是工具自己的配置。工具的安全策略（内容审核级别、成人内容路由、MCP 出站、每次调用确认）在「设置 → 工具安全策略」里改；只想改某一个工具，用那里的高级 JSON 写 <code>tools.&lt;工具名&gt;</code>。</p>
       <div class="dialog-actions">
         <button type="submit" id="tool-save">保存</button>
         <button type="button" id="tool-test">测试连接</button>
