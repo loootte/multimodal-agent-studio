@@ -347,6 +347,12 @@ class ProviderHandler(BaseHTTPRequestHandler):
             system = _user_text(messages[0].get("content")) if messages[0].get("role") == "system" else ""
             if "你是编排者" in system:
                 forced = (body.get("tool_choice") or {}) if isinstance(body.get("tool_choice"), dict) else {}
+                if forced.get("function", {}).get("name") == "todo_write":
+                    # 14.C：被强制先拆任务时，像真实模型一样列清单。
+                    self._emit_tool("todo_write", {"items": [
+                        {"text": "提纲", "status": "in_progress"}, {"text": "起草", "status": "pending"},
+                        {"text": "审稿", "status": "pending"}, {"text": "汇总", "status": "pending"}]})
+                    return
                 hint = re.search(r"下一步委托 (\w+)", system)
                 if forced.get("function", {}).get("name") == "delegate" and hint:
                     self._emit_tool("delegate", {"tasks": [{"agent": hint.group(1), "task": "城市骑行：" + hint.group(1)}]})
@@ -362,6 +368,22 @@ class ProviderHandler(BaseHTTPRequestHandler):
                     return
             self._piece(_delta(content="不该被调用"))
             self._done()
+            return
+        if mode == "planweb":
+            # 14.C：plan 模式下先试写操作（应被拒）、再读、再交计划；确认后的执行轮只回文字。
+            messages = self.server.requests[-1]["body"].get("messages") or [{}]
+            system = _user_text(messages[0].get("content")) if messages[0].get("role") == "system" else ""
+            if "用户已确认上面的计划" in system:
+                self._piece(_delta(content="按计划做完了"))
+                self._done()
+                return
+            if self._tool_result_count("generate_image") == 0:
+                self._emit_tool("generate_image", {"content_handle": "c_" + "ab" * 16, "aspect_ratio": "1:1"})
+                return
+            if self._tool_result_count("list_local_content") == 0:
+                self._emit_tool("list_local_content", {})
+                return
+            self._emit_tool("plan_submit", {"summary": "先看本地内容再出一张图", "steps": ["列出本地内容", "出一张图"]})
             return
         if mode == "demo":
             user = self._last_user()
@@ -2288,6 +2310,7 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
     _multi_agent_turn(base, provider)
     _multi_text_turn(base, provider)
     _forced_delegation(base, provider)
+    _plan_mode_case(base, provider)
     _markdown_checks(base)
     _stop_case(base, session_id, provider)
     _hold_case(base, session_id, provider)
@@ -2811,8 +2834,16 @@ def _forced_delegation(base: str, provider) -> None:
     if nodes != ["planner", "writer", "reviewer"]:
         fail(f"编排者一步答完没有被强制委托：{nodes}")
     first = provider.requests[sent]["body"]
-    if first.get("tool_choice") != {"type": "function", "function": {"name": "delegate"}}:
-        fail(f"多智能体文字任务第一步没有强制 delegate：{first.get('tool_choice')}")
+    # 14.C（#80）：文字任务先强制 todo_write 拆分，再强制 delegate。
+    if first.get("tool_choice") != {"type": "function", "function": {"name": "todo_write"}}:
+        fail(f"多智能体文字任务第一步没有先强制 todo_write：{first.get('tool_choice')}")
+    second = provider.requests[sent + 1]["body"]
+    if second.get("tool_choice") != {"type": "function", "function": {"name": "delegate"}}:
+        fail(f"拆完任务后没有强制 delegate：{second.get('tool_choice')}")
+    todos = [e for e in events if e.get("type") == "planning.todo"]
+    done = [(e.get("counts") or {}).get("completed") for e in todos]
+    if not todos or done != sorted(done) or done[-1] != 3 or [i["status"] for i in todos[-1]["items"]][-1] != "in_progress":
+        fail(f"多智能体文字任务的清单没有逐项完成：{done}")
     sent = len(provider.requests)
     events = _speak(base, session_id, "你好", timeout=30, mode="multi")
     if _assistant_text(events) != "你好！" or any(e.get("type") == "agent" for e in events):
@@ -2824,6 +2855,66 @@ def _forced_delegation(base: str, provider) -> None:
     single = provider.requests[sent:]
     if not single or any(r["body"].get("tool_choice") != "auto" for r in single):
         fail("单 Agent 模式的 tool_choice 变了")
+    if any(_names(r["body"]) & {"todo_write", "goal_set", "goal_done", "plan_submit"} for r in single):
+        fail("单 Agent 不开 plan 模式时多出了规划工具")
+
+
+def _names(body) -> set:
+    return {(item.get("function") or {}).get("name") for item in body.get("tools") or [] if isinstance(item, dict)}
+
+
+def _plan_mode_case(base: str, provider) -> dict:
+    """14.C（#80）plan 模式：只给只读工具；写操作不执行、不弹确认；plan_submit 交计划后这一轮结束；
+    用户点「按计划执行」（approve_plan）才执行，清单按计划播种；伪造的 approve_plan 被拒。"""
+    session_id = _fresh_session(base)
+    provider.mode = "planweb"
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "帮我规划一下怎么出一张图", timeout=30, extra={"plan": True})
+    tools = _names(provider.requests[sent]["body"])
+    if "generate_image" in tools or "stage_prompt" in tools or "plan_submit" not in tools or "list_local_content" not in tools:
+        fail(f"plan 模式的工具契约不对：{sorted(t for t in tools if t)}")
+    if any(e.get("type") == "tool.confirm" for e in events):
+        fail("plan 模式下弹了确认卡")
+    blob = json.dumps(provider.requests[-1]["body"], ensure_ascii=False)
+    if "plan_mode_readonly" not in blob:
+        fail("plan 模式拒绝写操作时模型没有收到 plan_mode_readonly")
+    plans = [e for e in events if e.get("type") == "plan.proposed"]
+    if len(plans) != 1 or plans[0].get("steps") != ["列出本地内容", "出一张图"] or "计划：" not in _assistant_text(events):
+        fail(f"plan 模式没有交出计划：{plans} {_assistant_text(events)}")
+    if any(e.get("type") == "artifact" for e in events):
+        fail("plan 模式出了图")
+    message_id = plans[0].get("message_id")
+    status, body = request("POST", base + f"/api/sessions/{session_id}/messages",
+                           {"text": "执行", "approve_plan": "m_forged"})
+    if status != 400 or json.loads(body).get("code") != "plan_not_found":
+        fail(f"伪造的 approve_plan 没被拒：{status} {body}")
+    sent = len(provider.requests)
+    events = _speak(base, session_id, "按上面的计划执行。", timeout=30, extra={"approve_plan": message_id})
+    todos = [e for e in events if e.get("type") == "planning.todo"]
+    if not todos or [i["text"] for i in todos[0]["items"]] != ["列出本地内容", "出一张图"]:
+        fail(f"按计划执行没有用计划播种清单：{todos}")
+    if "plan_submit" in _names(provider.requests[sent]["body"]) or _assistant_text(events) != "按计划做完了":
+        fail("执行轮还在 plan 模式")
+    return {"tools": len(tools)}
+
+
+def _planning_settings_case(base: str) -> None:
+    """14.C：规划设置 API。默认最严；合法项保存；非法项回退默认值并警告；reset 恢复默认。"""
+    status, body = request("GET", base + "/api/planning")
+    view = json.loads(body)
+    values = view.get("values") or {}
+    if status != 200 or values != view.get("defaults") or values.get("goal_auto_continue") is not False \
+            or values.get("single_agent_tools") is not False:
+        fail(f"规划设置默认值不对：{status} {body}")
+    status, body = request("PUT", base + "/api/planning", {"values": {"goal_max_rounds": 5, "goal_tokens": -1, "nope": 1}})
+    view = json.loads(body)
+    if status != 200 or view["values"]["goal_max_rounds"] != 5 or view["values"]["goal_tokens"] != 200000 \
+            or not {"goal_tokens", "nope"} <= set(view["warnings"]):
+        fail(f"规划设置的校验 / 回退不对：{status} {body}")
+    status, body = request("PUT", base + "/api/planning", {"reset": True, "values": {}})
+    if status != 200 or json.loads(body)["values"] != json.loads(body)["defaults"]:
+        fail(f"规划设置 reset 没恢复默认：{body}")
+    print("planning settings ok")
 
 
 def _unsafe_inner_html(script: str) -> bool:
@@ -2971,7 +3062,7 @@ def _post_confirm(base: str, run_id: str, allowed: bool = True, acknowledge=None
 
 
 def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: str | None = None, attachments=None,
-           mode=None):
+           mode=None, extra=None):
     def on_event(event):
         if event.get("type") == "tool.confirm":
             _post_confirm(base, event.get("run_id") or "", True, _ack_of(event))
@@ -2983,6 +3074,8 @@ def _speak(base: str, session_id: str, text: str, timeout: float = 8, content: s
         payload["attachments"] = attachments
     if mode:
         payload["mode"] = mode
+    if extra:
+        payload.update(extra)
     status, raw, events = read_sse(
         site_port(base),
         f"/api/sessions/{session_id}/messages",
@@ -5625,10 +5718,11 @@ def _config_origin_case(base: str) -> dict:
             fail(f"跨站写配置没被拒：{headers} {status} {body}")
     for path, body_ in (("/api/provider", {"base_url": "https://evil.example/v1", "model": "x"}),
                         ("/api/context", {"values": {"enabled": False}}),
+                        ("/api/planning", {"values": {"goal_auto_continue": True}}),
                         ("/api/tool-policy", {"schema": "mas.toolpolicy/1", "global": {}}),
                         ("/api/toolpacks/install", {"source": "/tmp/nowhere"}),
                         ("/api/toolpacks/x/uninstall", {})):
-        method = "PUT" if path in ("/api/provider", "/api/context", "/api/tool-policy") else "POST"
+        method = "PUT" if path in ("/api/provider", "/api/context", "/api/planning", "/api/tool-policy") else "POST"
         status, _ = _request_headers(method, base + path, body_, {"Origin": "https://evil.example"})
         if status != 403:
             fail(f"跨站写 {path} 没被拒：{status}")
@@ -5740,6 +5834,7 @@ def _injection_cases(base: str, directory: str) -> None:
     _config_scope_unit(directory)
     _config_origin_case(base)
     _context_settings_case(base)
+    _planning_settings_case(base)
     _tool_policy_settings_case(base, directory)
     print("injection guard ok")
 

@@ -77,6 +77,8 @@ class App:
         self.identity = store.IdentityStore(os.path.join(data_dir, "identity.json"))
         # 14.B（#79）：上下文压缩设置，非法项回退默认值。
         self.context = store.ContextSettingsStore(os.path.join(data_dir, "context.json"))
+        # 14.C（#80）：规划设置（目标续跑、单 Agent 规划工具），默认最严。
+        self.planning = store.ContextSettingsStore(os.path.join(data_dir, "planning.json"), module="planning")
         self.artifacts = ArtifactStore(os.path.join(data_dir, "artifacts"))
         # 12.F（#62）：本地存储加密。打不开（缺密钥、密钥不对、要先迁移）就抛 StorageError，不悄悄退回明文。
         self.storage = storage if storage is not None else storage_crypto.open_storage(data_dir)
@@ -719,6 +721,20 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _audit_config_write("context", fields + (["reset"] if body.get("reset") else []))
             _send_json(handler, 200, view)
             return
+        if path == "/api/planning" and method == "GET":
+            _send_json(handler, 200, app.planning.public())
+            return
+        if path == "/api/planning" and method == "PUT":
+            if not _config_write_allowed(handler, "planning"):
+                return
+            body = _read_json(handler)
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            view = app.planning.update(values, reset=bool(body.get("reset")))
+            from services.runtime import planning as _planning
+            fields = [key for key in values if key in _planning.DEFAULTS]  # 审计只记已知字段名，不记取值
+            _audit_config_write("planning", fields + (["reset"] if body.get("reset") else []))
+            _send_json(handler, 200, view)
+            return
         if path == "/api/tool-policy" and method in ("GET", "PUT"):
             _tool_policy_http(handler, method)
             return
@@ -810,7 +826,8 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
         if matched and method == "POST":
             session = _owned_session(app, matched.group(1))
             body = _read_json(handler)
-            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"), body.get("mode"))
+            run = chat_run.start(app, session["session_id"], body.get("text"), body.get("attachments"), body.get("mode"),
+                                 plan=body.get("plan") is True, approve_plan=body.get("approve_plan"))
             _send_sse(handler, run, 0)
             return
         matched = _SESSION_STOP.fullmatch(path)

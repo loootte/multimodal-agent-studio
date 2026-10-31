@@ -90,7 +90,14 @@
         "runtime.compaction_session_query": true,
         "security.compaction_model_summary": true,
         "runtime.compaction_settings": true,
-        "security.compaction_cross_run": true
+        "security.compaction_cross_run": true,
+        "runtime.todo_progress": true,
+        "runtime.plan_mode_readonly": true,
+        "runtime.goal_budget_stop": true,
+        "runtime.todo_quantity_ignored": true,
+        "security.planning_no_local_body": true,
+        "multi.text_task_delegates": true,
+        "runtime.plan_mode_approve": true
       }
     }
   }

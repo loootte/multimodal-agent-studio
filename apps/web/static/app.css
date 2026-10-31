@@ -639,3 +639,10 @@ dialog select { font: inherit; padding: 0.35rem; }
 .context-settings { border: 0; padding: 0; margin: 0; display: grid; gap: 6px; }
 .context-settings label { display: grid; gap: 2px; }
 .context-settings label:has(input[type="checkbox"]) { display: flex; gap: 6px; align-items: center; }
+
+/* 14.C（#80）：助手消息旁的任务清单 / 目标 / 计划 */
+.planning-panel { margin: 0.5rem 0; padding: 0.4rem 0.6rem; border-left: 3px solid #8aa; background: rgba(120, 150, 160, 0.08); }
+.planning-goal { margin: 0 0 0.3rem; font-size: 0.9rem; }
+.planning-todo { list-style: none; margin: 0.2rem 0; padding: 0; font-size: 0.9rem; }
+.planning-todo li[data-status="completed"] { opacity: 0.7; text-decoration: line-through; }
+.planning-todo li[data-status="in_progress"] { font-weight: 600; }

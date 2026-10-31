@@ -62,6 +62,7 @@ def _run(
     choose=None,
     compaction=None,
     archive=None,
+    planning=None,
 ):
     """产出统一事件。模型文本里说已经执行，不算执行。
 
@@ -77,6 +78,10 @@ def _run(
 
     archive 可选：调用方传进来的 compaction.Archive（例如网页从本地会话记录读回的），压缩时往里加原文，
     session_query 也能取回之前运行存下的；调用方在运行后把 archive.added 写回本地。没传就只在本次运行内存里。
+
+    planning（14.C #80）可选：planning.Planner。传了才在契约里多出 todo_write / goal_set / goal_done
+    （plan 模式还有 plan_submit，且只留只读工具），由运行时自己执行；plan 模式下非只读调用不执行、不弹确认，
+    结果是 plan_mode_readonly。目标续跑在调用方的 resume 之后判断，另有预算。没传时行为和以前一致。
     """
     req = normalize(request)
     run_id = run_id or new_run_id()
@@ -112,12 +117,21 @@ def _run(
     summarize = _summary_call(req, compactor, api_key=api_key, timeout_sec=timeout_sec, cancel=cancel,
                               artifacts=artifacts, local_bodies=local_bodies, base_url=base_url)
     forcing = callable(choose)
+    planner = planning
+    if planner is not None:
+        req = dict(req)
+        req["tools"] = planner.filter_tools(req.get("tools") or []) + planner.contracts()
+        note = planner.system_note()
+        if note:
+            req["system"] = ((req.get("system") or "") + " " + note).strip()
     while True:
         if cancel is not None and cancel.is_set():
+            yield from _planning_stop(run_id, planner, "cancelled")
             yield _failed(run_id, "cancelled", HUMAN["cancelled"])
             return
         reason = clock.check()
         if reason:
+            yield from _planning_stop(run_id, planner, "budget_exceeded")
             yield _failed(run_id, "budget_exceeded", reason)
             return
         clock.add_step()
@@ -187,6 +201,8 @@ def _run(
             return
         elapsed = int((time.monotonic() - started) * 1000)
         clock.tokens_used = _tokens_in(messages) + _tokens("".join(text_parts))
+        if planner is not None:
+            planner.note_tokens(clock.tokens_used)
         trace.add(run_id, {
             "type": "model",
             "run_id": run_id,
@@ -199,6 +215,10 @@ def _run(
             spoken = "".join(text_parts)
             # 模型没调工具就收尾时，调用方可以给一句续写指令（比如连续出图还没到张数），在同一个循环里接着做。
             note = resume(spoken) if callable(resume) else None
+            if not note and planner is not None and not (cancel is not None and cancel.is_set()):
+                note = planner.resume(spoken)
+                for event in planner.drain():
+                    yield {**event, "run_id": run_id}
             if note:
                 messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or "（未完成）"}]})
                 messages.append({"role": "user", "parts": [{"type": "text", "text": note}]})
@@ -218,6 +238,12 @@ def _run(
             _query(run_id, messages, tool_call, "".join(text_parts), archive, local_bodies)
             clock.started += time.monotonic() - tool_started
             continue
+        if planner is not None:
+            done = yield from _planning_tool(run_id, messages, tool_call, "".join(text_parts), planner)
+            if done == "completed":
+                return
+            if done:
+                continue
         stopped = yield from _use_tool(
             run_id,
             messages,
@@ -234,6 +260,51 @@ def _run(
         clock.started += time.monotonic() - tool_started
         if stopped:
             return
+
+
+def _planning_stop(run_id, planner, reason):
+    event = planner.stop(reason) if planner is not None else None
+    if event:
+        yield {**event, "run_id": run_id}
+
+
+def _planning_tool(run_id, messages, tool_call, spoken, planner):
+    """14.C：规划宿主工具由运行时执行；plan 模式下非只读工具直接拒绝（不执行、不弹确认）。
+    返回 None 表示不归这里管，True 表示已处理、接着循环，"completed" 表示 plan_submit 交了计划、这一轮结束。"""
+    from services.runtime import planning as plan_mod
+
+    name = tool_call.get("name")
+    arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+    if planner.handles(name):
+        yield {"type": EVENT_TOOL_REQUESTED, "run_id": run_id, "name": name, "arguments": {},
+               "call_id": tool_call.get("call_id")}
+        started = time.monotonic()
+        result, event = planner.call(name, arguments)
+        trace.add(run_id, {"type": "tool", "run_id": run_id, "name": name,
+                           "ms": int((time.monotonic() - started) * 1000), "ok": bool(result.get("ok"))})
+        messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
+        messages.append(injection.tool_result_message(name, result))
+        if event:
+            yield {**event, "run_id": run_id}
+        if name == plan_mod.PLAN_SUBMIT and result.get("ok"):
+            text = (spoken + "\n\n" if spoken else "") + planner.plan_text()
+            if not spoken:
+                yield {"type": EVENT_MESSAGE_DELTA, "text": planner.plan_text(), "run_id": run_id}
+            else:
+                yield {"type": EVENT_MESSAGE_DELTA, "text": "\n\n" + planner.plan_text(), "run_id": run_id}
+            yield {"type": EVENT_MESSAGE_COMPLETED, "run_id": run_id, "text": text}
+            return "completed"
+        return True
+    if not planner.allows(name, arguments):
+        yield {"type": EVENT_TOOL_REQUESTED, "run_id": run_id, "name": name, "arguments": {},
+               "call_id": tool_call.get("call_id")}
+        result = plan_mod.readonly_denied(name)
+        trace.add(run_id, {"type": "tool", "run_id": run_id, "name": name, "ms": 0, "ok": False})
+        telemetry.record("planning.denied", name=str(name)[:80], error_code="plan_mode_readonly")
+        messages.append({"role": "assistant", "parts": [{"type": "text", "text": spoken or f"调用 {name}"}]})
+        messages.append(injection.tool_result_message(name, result))
+        return True
+    return None
 
 
 def _offers(req, name) -> bool:

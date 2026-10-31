@@ -42,6 +42,9 @@
           <label class="multi-toggle" title="勾上后这一轮交给编排者，由它委托规划 / 出图 / 检查子 Agent">
             <input type="checkbox" id="multi-agent"> 多智能体
           </label>
+          <label class="multi-toggle" title="勾上后这一轮只用只读工具做计划，你确认后才执行">
+            <input type="checkbox" id="plan-mode"> 先出计划
+          </label>
           <button type="submit" id="send">发送</button>
           <button type="button" id="stop" disabled>停止</button>
         </div>
@@ -166,6 +169,16 @@
         <label><input type="checkbox" name="ctx_session_query"> 压缩后允许模型按引用取回原文（session_query）</label>
       </fieldset>
       <p id="context-hint" class="hint">非法取值会回退默认值。</p>
+      <h2>规划与目标</h2>
+      <fieldset id="planning-settings" class="context-settings">
+        <label><input type="checkbox" name="pl_single_agent_tools"> 单 Agent 模式也提供任务清单和目标工具（todo_write / goal_set / goal_done）</label>
+        <label><input type="checkbox" name="pl_orchestrator_todo"> 多智能体编排者先用任务清单拆分文字 / 研究任务再委托</label>
+        <label><input type="checkbox" name="pl_goal_auto_continue"> 目标没完成时自动续跑（不会自动确认任何调用）</label>
+        <label>续跑最多几轮（1–20）<input name="pl_goal_max_rounds" type="number" min="1" max="20"></label>
+        <label>续跑时间预算（秒，30–3600）<input name="pl_goal_time_sec" type="number" min="30" max="3600"></label>
+        <label>续跑 token 预算（1000–2000000）<input name="pl_goal_tokens" type="number" min="1000" max="2000000" step="1000"></label>
+      </fieldset>
+      <p id="planning-hint" class="hint">默认最严：单 Agent 不加工具，目标不自动续跑。非法取值会回退默认值。</p>
       <h2>本地存储</h2>
       <p id="storage-status" class="hint">读取中…</p>
       <p class="hint">加密、迁移、备份和恢复主密钥只走命令行 <code>python apps/web/storage_tool.py</code>，密钥不经过网页。见 docs/storage-encryption.md。</p>

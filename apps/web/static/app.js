@@ -166,7 +166,21 @@ async function sendMessage() {
     text,
     attachments: attachments.map((item) => ({ handle: item.handle })),
     ...(document.querySelector("#multi-agent").checked ? { mode: "multi" } : {}),
+    ...(document.querySelector("#plan-mode").checked ? { plan: true } : {}),
   }, text.trim(), attachments);
+}
+
+// 14.C（#80）：用户点「按计划执行」才开始执行；服务端只认这条消息上真有的计划。
+async function approvePlan(messageId) {
+  if (state.sending || !state.currentId || !messageId) return;
+  document.querySelector("#plan-mode").checked = false;
+  const text = "按上面的计划执行。";
+  await runTurn(`/api/sessions/${state.currentId}/messages`, {
+    text,
+    attachments: [],
+    approve_plan: messageId,
+    ...(document.querySelector("#multi-agent").checked ? { mode: "multi" } : {}),
+  }, text, []);
 }
 
 // #53/#86 表单工具：同样的流式回合，只是请求发到 /tools/<name>/run，不经过对话模型。
@@ -281,7 +295,10 @@ function onEvent(event) {
     event.type === "error" ||
     event.type === "content_request" ||
     event.type === "image_config" ||
-    event.type === "agent"
+    event.type === "agent" ||
+    event.type === "planning.todo" ||
+    event.type === "planning.goal" ||
+    event.type === "plan.proposed"
   ) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
     if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
@@ -947,6 +964,8 @@ function bubble(message) {
   for (const attachment of message.attachments || []) {
     item.append(attachmentView(attachment));
   }
+  const planning = planningPanel(message, events);
+  if (planning) item.append(planning);
   const calls = events.filter((entry) => entry.type === "tool_call");
   if (calls.length) item.append(toolTimeline(message, calls));
   // 只显示仍在进行中的进度：其后已有成片或新的工具调用时，旧进度不再显示。
@@ -993,6 +1012,56 @@ function bubble(message) {
     item.append(retryRow(message));
   }
   return item;
+}
+
+// 14.C（#80）：助手消息旁的任务清单、目标状态和待确认的计划。文字都用 textContent，不当 HTML。
+const TODO_MARK = { pending: "☐", in_progress: "▶", completed: "☑", cancelled: "✕" };
+const GOAL_LABEL = { active: "进行中", achieved: "已完成", blocked: "做不到", stopped: "已停下" };
+
+function planningPanel(message, events) {
+  const todo = events.filter((entry) => entry.type === "planning.todo").pop();
+  const goal = events.filter((entry) => entry.type === "planning.goal").pop();
+  const plan = events.filter((entry) => entry.type === "plan.proposed").pop();
+  if (!todo && !goal && !plan) return null;
+  const box = document.createElement("div");
+  box.className = "planning-panel";
+  if (goal) {
+    const line = document.createElement("p");
+    line.className = "planning-goal";
+    const label = GOAL_LABEL[goal.status] || goal.status || "";
+    line.textContent = `目标：${goal.objective || ""} · ${label}` + (goal.message ? ` · ${goal.message}` : "")
+      + (goal.note ? ` · ${goal.note}` : "");
+    box.append(line);
+  }
+  if (todo && (todo.items || []).length) {
+    const list = document.createElement("ul");
+    list.className = "planning-todo";
+    for (const entry of todo.items) {
+      const row = document.createElement("li");
+      row.dataset.status = entry.status || "";
+      row.textContent = `${TODO_MARK[entry.status] || "☐"} ${entry.text || ""}`;
+      list.append(row);
+    }
+    const counts = todo.counts || {};
+    const head = document.createElement("p");
+    head.className = "status-line";
+    head.textContent = `任务清单：完成 ${counts.completed || 0}/${todo.items.length}`;
+    box.append(head, list);
+  }
+  if (plan) {
+    const later = state.session.messages.slice(state.session.messages.indexOf(message) + 1);
+    const used = later.some((entry) => entry.role === "assistant");
+    const row = document.createElement("div");
+    row.className = "confirm-row";
+    const go = document.createElement("button");
+    go.type = "button";
+    go.textContent = used ? "计划已处理" : "按计划执行";
+    go.disabled = used || state.sending || message.status === "running";
+    go.addEventListener("click", () => approvePlan(plan.message_id || message.message_id));
+    row.append(go);
+    box.append(row);
+  }
+  return box;
 }
 
 function localEntry(message, request) {
@@ -1569,6 +1638,7 @@ function openSettings() {
   showSettingsError("");
   refreshStorage();
   refreshContext();
+  refreshPlanning();
   refreshToolPolicy();
   settings.showModal();
 }
@@ -1921,6 +1991,45 @@ function contextValues(form) {
   return values;
 }
 
+// 14.C（#80）：规划设置。默认最严，非法取值由服务端回退默认值。
+const PLANNING_FIELDS = ["single_agent_tools", "orchestrator_todo", "goal_auto_continue", "goal_max_rounds", "goal_time_sec", "goal_tokens"];
+
+async function refreshPlanning() {
+  try {
+    fillPlanning(await api("GET", "/api/planning"));
+  } catch (error) {
+    const hint = document.querySelector("#planning-hint");
+    if (hint) hint.textContent = "读不到规划设置。";
+  }
+}
+
+function fillPlanning(view) {
+  const form = document.querySelector("#settings-form");
+  const values = (view && view.values) || {};
+  for (const key of PLANNING_FIELDS) {
+    const input = form.elements["pl_" + key];
+    if (!input) continue;
+    if (input.type === "checkbox") input.checked = Boolean(values[key]);
+    else input.value = values[key] === null || values[key] === undefined ? "" : String(values[key]);
+  }
+  const warnings = (view && view.warnings) || [];
+  const hint = document.querySelector("#planning-hint");
+  if (hint) hint.textContent = warnings.length
+    ? `这些项取值不合法，已回退默认值：${warnings.join("、")}。`
+    : "默认最严：单 Agent 不加工具，目标不自动续跑。非法取值会回退默认值。";
+}
+
+function planningValues(form) {
+  const values = {};
+  for (const key of PLANNING_FIELDS) {
+    const input = form.elements["pl_" + key];
+    if (!input) continue;
+    if (input.type === "checkbox") values[key] = input.checked;
+    else values[key] = input.value.trim() === "" ? null : Number(input.value);
+  }
+  return values;
+}
+
 // 12.F（#62）：本地存储状态。只显示模式、算法、key_id，不显示密钥和路径。
 async function refreshStorage() {
   const node = document.querySelector("#storage-status");
@@ -1963,11 +2072,13 @@ async function saveSettings(event) {
     state.provider = await api("PUT", "/api/provider", body);
     const context = await api("PUT", "/api/context", { values: contextValues(form) });
     fillContext(context);
+    const planning = await api("PUT", "/api/planning", { values: planningValues(form) });
+    fillPlanning(planning);
     form.elements.api_key.value = "";
     document.querySelector("#key-hint").textContent = keyHint(state.provider);
     if (state.provider.configured) showNote("");
     renderChrome();
-    if ((context.warnings || []).length) return;  // 有回退的项：留在设置页让用户看到
+    if ((context.warnings || []).length || (planning.warnings || []).length) return;  // 有回退的项：留在设置页让用户看到
     settings.close();
   } catch (error) {
     showSettingsError(error.message || "没能保存。");

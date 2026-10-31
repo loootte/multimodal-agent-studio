@@ -154,7 +154,7 @@
 
 状态：已完成（PR #37）。设计见 [ADR 0005](docs/adr/0005-multi-agent.md) 和 [docs/agents.md](docs/agents.md)。交付：Agent 清单与校验、五个内置 Agent（编排者、planner、image、writer、reviewer）、delegate、越权拒绝、分层预算、有限并行与后端串行、停止传播、确认冒泡、Agent 树、agent span、Markdown 渲染、检查和评测。已知缺口：
 
-- 用真实模型时，多智能体模式下的文字任务仍可能一步答完；研究类任务还没有委托流程。见 [issue #38](https://github.com/loootte/multimodal-agent-studio/issues/38)。
+- 用真实模型时，多智能体模式下的文字任务仍可能一步答完；研究类任务还没有委托流程。见 [issue #38](https://github.com/loootte/multimodal-agent-studio/issues/38)。14.C（#80，`issue-80` 分支）让文字 / 研究任务先强制 `todo_write` 拆分再强制委托，仍待真实模型验证。
 - reviewer 看不到图片内容；只有编排者和 planner 能读取技能全文。
 - 评测只用假的模型服务和假的 ComfyUI；生图编排在真实环境手动试过。
 
@@ -272,6 +272,8 @@
    - 层：运行时宿主工具和网页 todo 面板；编排者用 todo 拆分文字和研究任务。
    - 句柄隔离：不破坏。todo 和 goal 文字过指纹；todo 里的数量不算张数，张数仍只由 `plan_images` 决定；不做 Code 模式。
    - 验收：plan 模式下改状态的工具被拒；goal 碰到预算就停并写明原因；真实模型下长文字任务先拆分再委托（#38 遗留关闭）。
+   - 进度：实现在 `issue-80` 分支，见 [docs/planning.md](docs/planning.md)。宿主工具 `todo_write` / `goal_set` / `goal_done` 和 plan 模式的 `plan_submit` 在 `services/runtime/planning.py`；plan 模式只给只读工具（按工具包声明和权限判定，MCP / 敏感 / 要确认的都不算），写工具被拒且不弹确认，用户点「按计划执行」才执行；目标续跑默认关，开了也受轮数 / 时间 / token 预算约束，停下时写明原因，从不替用户确认；多智能体的文字 / 研究任务先强制 `todo_write` 再强制委托，每次委托完成宿主推进一项；单 Agent 默认不给规划工具；设置在「设置 → 规划与目标」（`data/planning.json`）。
+   - 后续（未做）：用真实模型验证编排者拆分质量后再关闭 #38 的遗留项；plan 模式里是否允许只读 MCP 工具（要先有可信的只读声明）；目标跨会话保留。
 4. [#81](https://github.com/loootte/multimodal-agent-studio/issues/81) **14.D** 只存本机的长期记忆（P1）
    - 层：存储（`mas.memory/1`，分 preference 和 content）、运行时（`remember` / `recall` / `forget`）、网页记忆面板（默认关闭，每条写入要确认）。
    - 句柄隔离：容易破坏，约束最严。只有 preference 的文字能进上下文并要过指纹；content 类只存句柄形态（purpose `memory`）并加密，跨会话由宿主重新签发句柄，12.B 的跨会话不可消费规则不变。
