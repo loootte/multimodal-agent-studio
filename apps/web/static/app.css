@@ -614,4 +614,10 @@ dialog select { font: inherit; padding: 0.35rem; }
 /* 14.B 上下文压缩设置 */
 .context-settings { border: 0; padding: 0; margin: 0; display: grid; gap: 6px; }
 .context-settings label { display: grid; gap: 2px; }
-.context-settings label:has(input[type="checkbox"]) { display: flex; gap: 6px; align-items: center; }
+.context-settings label:has(input[type="checkbox"]) { display: flex; flex-direction: row; gap: 6px; align-items: center; text-align: left; }
+.context-settings label > input[type="checkbox"] { width: auto; flex: none; margin: 0; }
+.policy-form legend { font-weight: 600; padding: 0; margin-bottom: 4px; }
+.policy-form > p.hint { margin: 8px 0 0; font-weight: 600; }
+.policy-form details { border: 1px dashed currentColor; border-radius: 6px; padding: 6px 8px; opacity: 0.9; }
+#tool-policy-locked-box { margin-top: 10px; }
+#policy-ack ul { margin: 8px 0; padding-left: 18px; display: grid; gap: 4px; }

@@ -121,14 +121,29 @@ MCP 出站控制和工具安全检查的开关，统一放在一份配置里：`
 | `PUT /api/tool-policy/secret` | body 是 `{"pack": "<包名>", "value": "<值>"}`，或 `{"pack": "<包名>", "clear": true}`，写入或清掉钥匙串里的值。返回里不含值 |
 
 - 写接口只接受本机同源请求，跨站一律 403 `config_write_forbidden`。工具执行期间也不能写。
-- 设置页的「工具安全策略」一节可以编辑 JSON、恢复默认，查看锁定项，以及写入 / 清除钥匙串里的认证值。是否放宽由服务端判断：收到 409 就弹确认，同意后带 `acknowledge` 重发。
+- 设置页的「工具安全策略」一节最上面是「可以配置的项（全局）」表单：内容审核级别（strict / standard / off）、成人内容第三方出图主机、四个开关（勾选 = 默认最严）、stdio 命令白名单、三类地址（回环 / 链路本地 / 局域网）、参数名黑名单追加 / 放行，以及按包的认证引用（包名、请求头、方案、来源、环境变量名）。表单只改 `global` 一层（认证只改 `packs.<包名>.auth`），其他层原样保留；要按包 / 按工具配置，展开「高级：直接编辑 JSON」。下面还有恢复默认、写入 / 清除钥匙串里的认证值。最下面折叠的是「不可配置的底线（只读）」，这些是故意锁定的，不会出现在表单里。
+- 是否放宽由服务端判断：保存时先不带 `acknowledge` 发；收到 409 `acknowledge_required` 就用页内弹窗「确认放宽工具安全策略」列出每个字段和说明，点「确认放宽并保存」才带 `acknowledge` 重发，点「取消」不保存。读回来的 `auth.available`（密钥在不在）是只读的，写回时页面会去掉。
+
+## 如何测试 409
+
+先确认打开的是当前代码：用浏览器开 `python apps/web/server.py` 起的地址（默认 http://127.0.0.1:8766）。`dist/mas-windows` 里打包好的桌面版是打包时的旧代码，要重新打包才会有这些控件。改了代码要重启服务，再强制刷新页面（Ctrl+F5）。
+
+1. 点右上角「设置」，滚到「工具安全策略」，看到「可以配置的项（全局）」表单，提示是「没改的项就是最严格的默认值。」。
+2. 把「内容审核级别」改成 `off`，点「保存策略」。
+3. 这时服务端回 409：页面弹出「确认放宽工具安全策略」，列出 `global.content_guard` 和说明。浏览器开发者工具的 Network 里能看到第一次 `PUT /api/tool-policy` 是 409，返回 `code: acknowledge_required`。
+4. 点「取消」：提示「没有保存」，策略没变（重新打开设置，内容审核仍是 strict）。
+5. 再保存一次，这次点「确认放宽并保存」：第二个 `PUT` 带 `"acknowledge": ["global.content_guard"]`，返回 200，提示「已保存」。服务端审计里多一条 `security.policy_relaxed`，只有字段名 `content_guard`。
+6. 原样再点一次「保存策略」不会再弹（已确认过的放宽不变）；再改别的放宽项（例如勾上「允许连局域网地址」）会只列出新的那一项。
+7. 点「恢复默认」回到最严格的默认值，不用确认。
+
+命令行也能测：`curl -X PUT -H "Content-Type: application/json" -d "{\"policy\":{\"global\":{\"content_guard\":\"off\"}}}" http://127.0.0.1:8766/api/tool-policy` 返回 409；body 加上 `"acknowledge":["global.content_guard"]` 返回 200；`-d "{\"reset\":true}"` 恢复默认。
 
 ## 评测
 
 - `evals/run.py` 里 kind 为 `tool_policy` 的七项：`security.tool_policy_default_block`、`security.tool_policy_explicit_relax`、`security.tool_policy_precedence`、`security.tool_policy_no_secret_leak`、`security.tool_policy_policy_change_reenable`、`security.tool_policy_unlocked_switches`（四个开关默认最严、放宽后行为、两项底线仍锁定）、`security.tool_policy_put_ack`（写策略的 409 确认）。
 - `image.route_moderation_split`（拆分）：默认等于旧行为（分级内容不发第三方、审核 strict）；放宽路由 / 审核 409 → 确认 → 审计只有字段名；放宽路由后发到放行主机每张图一张写主机的卡，拒绝不发，名单外主机照样拒；放宽路由不改审核；放宽路由后本地提示词仍被 `remote_local_prompt` 拒；关审核后露骨内容只走本机、本地提示词不出本机；`strict` / `standard` / `off` 下未成年 / 真人底线都拦，`standard` / `off` 不查版权角色。
 - 单元检查：`python -m services.tools.check` 里的 `_check_tool_policy`、`_check_policy_switches` 和 `_check_route_moderation_split`（各级别 × 分级 / 普通 × 底线矩阵）。
-- 网页：`apps/web/check.py` 里的 `_tool_policy_case`，以及跨站写入用例。
+- 网页：`apps/web/check.py` 里的 `_tool_policy_case`、`_tool_policy_ui_case`（设置页有全部可配置控件、在高级 JSON 和只读底线上面、有确认弹窗；按表单写法放宽 `content_guard=off` 先 409、策略不变，带 acknowledge 后 200、审计只有字段名，再恢复默认），以及跨站写入用例。
 
 ## 用户决定（#93）
 

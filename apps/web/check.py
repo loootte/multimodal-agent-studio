@@ -5584,6 +5584,59 @@ def _now_mark(base: str) -> float:
     return round(time.time(), 3) - 0.002
 
 
+def _tool_policy_ui_case(base: str) -> None:
+    """#93 设置页：可配置项是显眼的表单控件（在只读底线上面），JSON 只是高级选项；只读底线折叠在最下面并标注故意锁定；
+    放宽走页内确认弹窗。再按表单的写法把 global.content_guard 放宽成 off：先 409 列出字段、策略不变，带 acknowledge 重发才保存。"""
+    status, html = request("GET", base + "/")
+    _, script = request("GET", base + "/static/app.js")
+    if status != 200:
+        fail(f"首页打不开：{status}")
+    start = html.find('id="tool-policy"')
+    if start < 0:
+        fail("设置页没有工具安全策略区域")
+    names = ("pol_content_guard", "pol_adult_remote_hosts", "pol_untrusted_results", "pol_schema_reauth",
+             "pol_mcp_confirm_every_call", "pol_sensitive_confirm_every_call", "pol_stdio_commands", "pol_http_loopback",
+             "pol_http_link_local", "pol_http_private", "pol_params_block", "pol_params_allow", "pol_auth_pack",
+             "pol_auth_header", "pol_auth_scheme", "pol_auth_source", "pol_auth_env")
+    locked_at = html.find('id="tool-policy-locked-box"', start)
+    advanced_at = html.find('id="tool-policy-advanced"', start)
+    for name in names:
+        at = html.find(f'name="{name}"', start)
+        if at < 0 or not (at < advanced_at < locked_at):
+            fail(f"工具安全策略表单缺控件 {name}，或者不在高级 JSON / 只读底线上面")
+    if 'value="off"' not in html[start:locked_at] or "这些是故意锁定的" not in html[locked_at:locked_at + 300] \
+            or "<details" not in html[locked_at - 40:locked_at] or 'name="policy_json"' not in html[advanced_at:locked_at]:
+        fail("只读底线没折叠到下方并标注，或者 JSON 不在高级选项里")
+    if 'id="policy-ack"' not in html or 'id="policy-ack-ok"' not in html:
+        fail("缺放宽确认弹窗")
+    for needle in ("acknowledge_required", "askPolicyAcknowledge", "toolPolicyFromForm", "put(fields)", "saveToolPolicyJson", "delete entry.auth.available"):
+        if needle not in script:
+            fail(f"app.js 缺放宽确认流程：{needle}")
+    # 表单只改 global：内容审核选 off、其他保持默认时提交的就是这一份
+    policy = {"global": {"content_guard": "off"}}
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": policy})
+    refused = json.loads(body or "{}")
+    if status != 409 or refused.get("code") != "acknowledge_required" or refused.get("fields") != ["global.content_guard"] \
+            or not (refused.get("texts") or {}).get("global.content_guard"):
+        fail(f"界面放宽 content_guard=off 没有先 409：{status} {body[:300]}")
+    if json.loads(request("GET", base + "/api/tool-policy")[1])["policy"]["global"]:
+        fail("content_guard 的 409 之后策略被改了")
+    mark = _now_mark(base)
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": policy, "acknowledge": refused["fields"]})
+    view = json.loads(body or "{}")
+    if status != 200 or view["policy"]["global"].get("content_guard") != "off" or view["warnings"]:
+        fail(f"确认后 content_guard=off 没保存：{status} {body[:300]}")
+    relaxed = _config_audit_since(base, mark, "security.policy_relaxed")
+    if not relaxed or relaxed[-1].get("fields") != ["content_guard"] or '"off"' in json.dumps(relaxed[-1]):
+        fail(f"放宽 content_guard 的审计不对（应只有字段名）：{relaxed}")
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": policy})
+    if status != 200 or json.loads(body).get("changed"):
+        fail(f"已确认过的 content_guard=off 原样再存不该再确认：{status} {body[:300]}")
+    status, body = request("PUT", base + "/api/tool-policy", {"reset": True})
+    if status != 200 or json.loads(body)["policy"]["global"]:
+        fail(f"恢复默认失败：{status} {body[:300]}")
+
+
 def _tool_policy_case(base: str) -> None:
     """#93：工具安全策略 API。默认最严格；锁定项只读；坏值不存并给 warnings；放宽记 security.policy_relaxed（只有字段名）；
     写入审计只有字段路径（不带包名、取值）；网页模式没有钥匙串，写密钥回 409；reset 恢复默认。"""
@@ -5722,6 +5775,7 @@ def _injection_cases(base: str, directory: str) -> None:
     _config_origin_case(base)
     _context_settings_case(base)
     _tool_policy_case(base)
+    _tool_policy_ui_case(base)
     print("injection guard ok")
 
 

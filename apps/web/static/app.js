@@ -68,6 +68,7 @@ document.querySelector("#close-runtime").addEventListener("click", () => {
 document.querySelector("#settings-form").addEventListener("submit", saveSettings);
 document.querySelector("#clear-key").addEventListener("click", clearKey);
 document.querySelector("#tool-policy-save").addEventListener("click", saveToolPolicy);
+document.querySelector("#tool-policy-save-json").addEventListener("click", saveToolPolicyJson);
 document.querySelector("#tool-policy-reset").addEventListener("click", resetToolPolicy);
 document.querySelector("#tool-policy-secret").addEventListener("click", () => writeToolSecret(false));
 document.querySelector("#tool-policy-secret-clear").addEventListener("click", () => writeToolSecret(true));
@@ -1604,6 +1605,12 @@ function contextValues(form) {
 }
 
 // #93：工具安全策略。服务端校验：坏值不存、回退默认并列在 warnings；锁定项只读显示；认证密钥只写不读。
+// 显眼的表单控件只改 global 一层（auth 只能按包，改 packs.<包名>.auth）；JSON 编辑保留为高级选项，可写 packs / tools 层。
+const POLICY_SWITCHES = ["untrusted_results", "schema_reauth", "mcp_confirm_every_call", "sensitive_confirm_every_call"];
+const POLICY_ADDRESSES = ["http_loopback", "http_link_local", "http_private"];
+const POLICY_LISTS = ["adult_remote_hosts", "stdio_commands", "params_block", "params_allow"];
+let toolPolicyView = null;
+
 async function refreshToolPolicy() {
   try {
     fillToolPolicy(await api("GET", "/api/tool-policy"));
@@ -1612,8 +1619,18 @@ async function refreshToolPolicy() {
   }
 }
 
+// 读回来的 packs.<包名>.auth 带只读的 available（密钥在不在），写回时去掉，否则服务端会把整条 auth 当坏值丢掉。
+function editablePolicy(policy) {
+  const copy = JSON.parse(JSON.stringify(policy || {}));
+  for (const entry of Object.values(copy.packs || {})) {
+    if (entry && entry.auth && typeof entry.auth === "object") delete entry.auth.available;
+  }
+  return copy;
+}
+
 function toolPolicyText(policy) {
   const out = {};
+  policy = editablePolicy(policy);
   for (const level of ["global", "packs", "tools"]) {
     const value = (policy && policy[level]) || {};
     if (Object.keys(value).length) out[level] = value;
@@ -1621,9 +1638,40 @@ function toolPolicyText(policy) {
   return Object.keys(out).length ? JSON.stringify(out, null, 2) : "";
 }
 
+function policyListText(value) {
+  return Array.isArray(value) ? value.join(", ") : "";
+}
+
+function policyListValue(text) {
+  return String(text || "").split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function fillToolPolicyForm(view) {
+  const form = document.querySelector("#settings-form");
+  const global = (view && view.policy && view.policy.global) || {};
+  const defaults = (view && view.defaults) || {};
+  const pick = (key) => (key in global ? global[key] : defaults[key]);
+  form.elements.pol_content_guard.value = pick("content_guard") || "strict";
+  for (const key of POLICY_SWITCHES) form.elements["pol_" + key].checked = pick(key) !== false;
+  for (const key of POLICY_ADDRESSES) form.elements["pol_" + key].checked = pick(key) === true;
+  for (const key of POLICY_LISTS) form.elements["pol_" + key].value = policyListText(pick(key));
+  const packs = (view && view.policy && view.policy.packs) || {};
+  const current = form.elements.pol_auth_pack.value.trim();
+  let name = current && packs[current] && packs[current].auth ? current : "";
+  if (!name) name = Object.keys(packs).find((pack) => packs[pack] && packs[pack].auth) || current;
+  const auth = (name && packs[name] && packs[name].auth) || null;
+  form.elements.pol_auth_pack.value = name || "";
+  form.elements.pol_auth_header.value = (auth && auth.header) || "";
+  form.elements.pol_auth_scheme.value = (auth && auth.scheme) || "bearer";
+  form.elements.pol_auth_source.value = (auth && auth.source) || "";
+  form.elements.pol_auth_env.value = (auth && auth.env) || "";
+}
+
 function fillToolPolicy(view, note) {
+  toolPolicyView = view || null;
   const form = document.querySelector("#settings-form");
   form.elements.policy_json.value = toolPolicyText(view && view.policy);
+  fillToolPolicyForm(view);
   const locked = document.querySelector("#tool-policy-locked");
   locked.replaceChildren(...((view && view.locked) || []).map((item) => {
     const li = document.createElement("li");
@@ -1633,10 +1681,133 @@ function fillToolPolicy(view, note) {
   const warnings = (view && view.warnings) || [];
   document.querySelector("#tool-policy-hint").textContent = (note ? note + " " : "") + (warnings.length
     ? `这些项取值不合法或不可配置，已回退默认值：${warnings.join("、")}。`
-    : "未配置的项就是最严格的默认值。");
+    : "没改的项就是最严格的默认值。");
+}
+
+// 把表单控件合进当前策略：只动 global 的这些键（等于默认值就删掉），packs / tools 其他内容原样保留。
+function toolPolicyFromForm() {
+  const form = document.querySelector("#settings-form");
+  const view = toolPolicyView || {};
+  const defaults = view.defaults || {};
+  const base = editablePolicy(view.policy);
+  const policy = { global: base.global || {}, packs: base.packs || {}, tools: base.tools || {} };
+  const set = (key, value, isDefault) => {
+    if (isDefault) delete policy.global[key];
+    else policy.global[key] = value;
+  };
+  const guard = form.elements.pol_content_guard.value;
+  set("content_guard", guard, guard === (defaults.content_guard || "strict"));
+  for (const key of POLICY_SWITCHES) {
+    const on = form.elements["pol_" + key].checked;
+    set(key, on, on === (defaults[key] !== false));
+  }
+  for (const key of POLICY_ADDRESSES) {
+    const on = form.elements["pol_" + key].checked;
+    set(key, on, on === (defaults[key] === true));
+  }
+  for (const key of POLICY_LISTS) {
+    const items = policyListValue(form.elements["pol_" + key].value);
+    set(key, items, items.length === 0);
+  }
+  const pack = form.elements.pol_auth_pack.value.trim();
+  const source = form.elements.pol_auth_source.value;
+  if (pack) {
+    const entry = policy.packs[pack] || {};
+    if (source) {
+      const auth = {
+        header: form.elements.pol_auth_header.value.trim() || "Authorization",
+        scheme: form.elements.pol_auth_scheme.value || "bearer",
+        source,
+      };
+      if (source === "env") auth.env = form.elements.pol_auth_env.value.trim();
+      entry.auth = auth;
+    } else {
+      delete entry.auth;
+    }
+    if (Object.keys(entry).length) policy.packs[pack] = entry;
+    else delete policy.packs[pack];
+  } else if (source) {
+    throw new Error("认证引用要填包名（auth 只能按包配置），没有保存。");
+  }
+  for (const level of ["global", "packs", "tools"]) if (!Object.keys(policy[level]).length) delete policy[level];
+  return policy;
+}
+
+// #93 决定 7：放不放宽由宿主判断。宿主回 409 acknowledge_required 时用页内弹窗把放宽字段和说明原样给人看，
+// 同意了才带 acknowledge 重发；收紧和恢复默认不用确认。
+function askPolicyAcknowledge(fields, texts) {
+  const dialog = document.querySelector("#policy-ack");
+  const list = document.querySelector("#policy-ack-fields");
+  list.replaceChildren(...fields.map((field) => {
+    const li = document.createElement("li");
+    const code = document.createElement("code");
+    code.textContent = field;
+    li.append(code, document.createTextNode(texts[field] ? "：" + texts[field] : ""));
+    return li;
+  }));
+  return new Promise((resolve) => {
+    const ok = document.querySelector("#policy-ack-ok");
+    const cancel = document.querySelector("#policy-ack-cancel");
+    const done = (value) => {
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onOk = () => done(true);
+    const onCancel = (event) => {
+      if (event) event.preventDefault();
+      done(false);
+    };
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    dialog.addEventListener("cancel", onCancel);
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else done(window.confirm(`这份策略放宽了：\n${fields.join("\n")}\n\n确定保存？`));
+  });
+}
+
+async function putToolPolicy(policy) {
+  const hint = document.querySelector("#tool-policy-hint");
+  const put = (acknowledge) => api("PUT", "/api/tool-policy", acknowledge ? { policy, acknowledge } : { policy });
+  const buttons = ["#tool-policy-save", "#tool-policy-save-json", "#tool-policy-reset"].map((id) => document.querySelector(id));
+  buttons.forEach((button) => { button.disabled = true; });
+  hint.textContent = "保存中…";
+  try {
+    let view;
+    try {
+      view = await put(null);
+    } catch (error) {
+      if (error.code !== "acknowledge_required") throw error;
+      const payload = error.payload || {};
+      const fields = payload.fields || [];
+      if (!(await askPolicyAcknowledge(fields, payload.texts || {}))) {
+        hint.textContent = "没有保存：放宽工具安全策略需要你确认（服务端返回了 409）。";
+        return;
+      }
+      view = await put(fields);
+    }
+    fillToolPolicy(view, (view.changed || []).length ? "已保存。已启用的 MCP 工具如受影响，需要到工具页重新启用。" : "没有变化。");
+  } catch (error) {
+    hint.textContent = error.message || "没能保存。";
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 async function saveToolPolicy() {
+  let policy;
+  try {
+    policy = toolPolicyFromForm();
+  } catch (error) {
+    document.querySelector("#tool-policy-hint").textContent = error.message;
+    return;
+  }
+  await putToolPolicy(policy);
+}
+
+async function saveToolPolicyJson() {
   const form = document.querySelector("#settings-form");
   const text = form.elements.policy_json.value.trim();
   let policy = {};
@@ -1646,29 +1817,7 @@ async function saveToolPolicy() {
     document.querySelector("#tool-policy-hint").textContent = "不是合法的 JSON，没有保存。";
     return;
   }
-  // #93 决定 7：放不放宽由宿主判断。宿主回 409 acknowledge_required 时把放宽字段和说明原样给人看，
-  // 同意了才带 acknowledge 重发；收紧和恢复默认不用确认。
-  const put = (acknowledge) => api("PUT", "/api/tool-policy", acknowledge ? { policy, acknowledge } : { policy });
-  try {
-    let view;
-    try {
-      view = await put(null);
-    } catch (error) {
-      if (error.code !== "acknowledge_required") throw error;
-      const payload = error.payload || {};
-      const fields = payload.fields || [];
-      const texts = payload.texts || {};
-      const lines = fields.map((field) => `· ${field}${texts[field] ? "：" + texts[field] : ""}`);
-      if (!window.confirm(`这份策略放宽了：\n${lines.join("\n")}\n\n放宽会让第三方 / MCP 工具能做更多事，确定保存？`)) {
-        document.querySelector("#tool-policy-hint").textContent = "没有保存：放宽工具安全策略需要你确认。";
-        return;
-      }
-      view = await put(fields);
-    }
-    fillToolPolicy(view, (view.changed || []).length ? "已保存。已启用的 MCP 工具如受影响，需要到工具页重新启用。" : "没有变化。");
-  } catch (error) {
-    document.querySelector("#tool-policy-hint").textContent = error.message || "没能保存。";
-  }
+  await putToolPolicy(policy);
 }
 
 async function resetToolPolicy() {

@@ -110,16 +110,54 @@
       </fieldset>
       <p id="context-hint" class="hint">非法取值会回退默认值。</p>
       <h2>工具安全策略</h2>
-      <p class="hint">MCP 出站控制和参数黑名单（#93，见 docs/tool-policy.md）。留空 = 最严格：只跑包内 Python、不连回环 / 链路本地 / 局域网、不注入认证头。
-        层级 global → packs.&lt;包名&gt; → tools.&lt;工具名&gt;，越具体越优先。任何放宽在安装或启用工具时还要再确认一次；改了策略，已启用的 MCP 工具要重新启用。</p>
-      <fieldset id="tool-policy" class="context-settings">
-        <label>策略（JSON，只写要改的项）<textarea name="policy_json" rows="8" spellcheck="false" autocomplete="off"></textarea></label>
+      <p class="hint">MCP 出站控制、内容审核和成人内容路由（#93，见 docs/tool-policy.md）。下面的控件改的是<strong>全局</strong>一层；没改的项就是最严格的默认值。
+        放宽任何一项，保存时都会先弹窗列出放宽的字段，确认后才保存；安装或启用工具时还会再审阅一次。</p>
+      <fieldset id="tool-policy" class="context-settings policy-form">
+        <legend>可以配置的项（全局）</legend>
+        <p class="hint">内容审核与路由</p>
+        <label>内容审核级别（content_guard）
+          <select name="pol_content_guard">
+            <option value="strict">strict：全部检查（默认）</option>
+            <option value="standard">standard：不查版权角色（放宽）</option>
+            <option value="off">off：不审核（放宽；未成年 / 真人仍然拦）</option>
+          </select>
+        </label>
+        <label>成人内容可以发给的第三方出图主机（adult_remote_hosts，逗号分隔；留空 = 只走本机 ComfyUI）
+          <input name="pol_adult_remote_hosts" placeholder="例如 images.example.com" autocomplete="off" spellcheck="false"></label>
+        <p class="hint">第三方 / MCP 工具（勾选 = 最严的默认行为；取消勾选 = 放宽）</p>
+        <label><input type="checkbox" name="pol_untrusted_results"> 工具结果标为不可信并附提示（untrusted_results）</label>
+        <label><input type="checkbox" name="pol_schema_reauth"> MCP 工具说明 / 参数变了要重新启用（schema_reauth）</label>
+        <label><input type="checkbox" name="pol_mcp_confirm_every_call"> MCP 工具每次调用都确认（mcp_confirm_every_call）</label>
+        <label><input type="checkbox" name="pol_sensitive_confirm_every_call"> 联网的第三方包每次调用都确认（sensitive_confirm_every_call）</label>
+        <p class="hint">MCP 出站（勾选 = 放宽）</p>
+        <label>stdio 命令白名单（stdio_commands，逗号分隔；留空 = 只跑包内 Python）
+          <input name="pol_stdio_commands" placeholder="例如 npx" autocomplete="off" spellcheck="false"></label>
+        <label><input type="checkbox" name="pol_http_loopback"> 允许连回环地址（http_loopback；本程序端口永远拦）</label>
+        <label><input type="checkbox" name="pol_http_link_local"> 允许连链路本地地址（http_link_local，含云元数据地址）</label>
+        <label><input type="checkbox" name="pol_http_private"> 允许连局域网地址（http_private）</label>
+        <label>参数名黑名单追加（params_block，逗号分隔）
+          <input name="pol_params_block" autocomplete="off" spellcheck="false"></label>
+        <label>从参数名黑名单放行（params_allow，逗号分隔；放宽）
+          <input name="pol_params_allow" autocomplete="off" spellcheck="false"></label>
+        <p class="hint">MCP 认证引用（auth，只能按包配置；只存引用，不存密钥）</p>
+        <label>包名<input name="pol_auth_pack" placeholder="MCP 包名" autocomplete="off" spellcheck="false"></label>
+        <label>请求头<input name="pol_auth_header" placeholder="Authorization" autocomplete="off" spellcheck="false"></label>
+        <label>方案
+          <select name="pol_auth_scheme"><option value="bearer">bearer</option><option value="none">none（原样放值）</option></select></label>
+        <label>来源
+          <select name="pol_auth_source"><option value="">不注入认证头</option><option value="env">环境变量</option><option value="keychain">系统钥匙串（仅桌面版）</option></select></label>
+        <label>环境变量名（来源是环境变量时，必须以 MAS_MCP_ 开头）
+          <input name="pol_auth_env" placeholder="MAS_MCP_MY_TOKEN" autocomplete="off" spellcheck="false"></label>
         <p id="tool-policy-hint" class="hint">读取中…</p>
-        <details><summary>不可配置的底线（只读）</summary><ul id="tool-policy-locked" class="hint"></ul></details>
         <div class="dialog-actions">
           <button type="button" id="tool-policy-save">保存策略</button>
           <button type="button" id="tool-policy-reset">恢复默认</button>
         </div>
+        <details id="tool-policy-advanced"><summary>高级：直接编辑 JSON（含 packs / tools 层）</summary>
+          <p class="hint">层级 global → packs.&lt;包名&gt; → tools.&lt;工具名&gt;，越具体越优先。改了策略，已启用的 MCP 工具要重新启用。</p>
+          <label>策略（JSON，只写要改的项）<textarea name="policy_json" rows="8" spellcheck="false" autocomplete="off"></textarea></label>
+          <div class="dialog-actions"><button type="button" id="tool-policy-save-json">按 JSON 保存</button></div>
+        </details>
         <label>MCP 认证密钥写进系统钥匙串（只写不读，仅桌面版）
           <input name="policy_secret_pack" placeholder="包名" autocomplete="off" spellcheck="false">
           <input name="policy_secret_value" type="password" placeholder="密钥" autocomplete="off" spellcheck="false">
@@ -128,6 +166,8 @@
           <button type="button" id="tool-policy-secret">写入</button>
           <button type="button" id="tool-policy-secret-clear">删除</button>
         </div>
+        <details id="tool-policy-locked-box"><summary>不可配置的底线（只读）：这些是故意锁定的，不会出现在上面的控件里</summary>
+          <ul id="tool-policy-locked" class="hint"></ul></details>
       </fieldset>
       <h2>本地存储</h2>
       <p id="storage-status" class="hint">读取中…</p>
@@ -138,6 +178,15 @@
         <button type="button" id="close-settings">关闭</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="policy-ack" aria-labelledby="policy-ack-title">
+    <h2 id="policy-ack-title">确认放宽工具安全策略</h2>
+    <p class="hint">服务端判断这份策略放宽了下面这些字段（409 acknowledge_required）。确认后才会保存，并记一条只含字段名的审计。</p>
+    <ul id="policy-ack-fields"></ul>
+    <div class="dialog-actions">
+      <button type="button" id="policy-ack-ok">确认放宽并保存</button>
+      <button type="button" id="policy-ack-cancel">取消</button>
+    </div>
   </dialog>
   <dialog id="tool-settings">
     <form id="tool-form" method="post" action="#">
