@@ -120,7 +120,7 @@ anime style illustration, character illustration, full body, highly detailed, be
 ## 代码
 
 - 工具：`toolpacks/builtin/character_image/`（`tool.json` 1.4.0、`tool.py`、`presets.json`、`ui/`）。拼提示词的代码就在工具目录的 `tool.py` 里，宿主不再有专门的代码；`apps/web/character.py` 只剩一个转发到 `tool.py` 的兼容壳（旧的 import 还能用）。
-- 通用的表单工具调用：`apps/web/module_tools.py`；分级守卫：`apps/web/content_guard.py`
+- 通用的表单工具调用：`apps/web/module_tools.py`；分级守卫：`services/runtime/content_guard.py`
 - 对话工具和表单出图：`apps/web/chat_run.py`（`_execute_module_tool`、`start_form_tool`）
 - 页面：面板在工具自己的目录里（`toolpacks/builtin/character_image/ui/panel.js`、`panel.css`，清单 `ui.panel`）；网页只有通用的面板宿主 `apps/web/static/panels.js`，按 `GET /api/tools` 的 `form_tools` 给每个带面板的工具在侧栏加一个入口。见[工具代码契约 · 网页面板](tool-code-contract.md#网页面板uipanelissue-89)
 - 检查：`apps/web/check.py` 的 `_character_units`、`_character_cases`、`_pack_character_cases`、`_tool_install_cases`；评测 `image.character*`、`image.form_tool_*`、`image.install_*`
@@ -162,7 +162,7 @@ anime style illustration, character illustration, full body, highly detailed, be
 
 ### 分级守卫（宿主硬拦，工具代码改不了）
 
-`apps/web/content_guard.py` 对**任何** `content.rating=adult` 的工具生效（内置还是安装、代码有没有自己检查都一样），调用前查每个字段、调用后再查最终提示词：
+`services/runtime/content_guard.py` 对**任何** `content.rating=adult` 的工具生效（内置还是安装、代码有没有自己检查都一样），调用前查每个字段、调用后再查最终提示词。默认 `strict`，`content_guard=off` 才跳过：
 
 | 规则 | 代码 |
 | --- | --- |

@@ -2181,6 +2181,10 @@ def _page_and_key(base: str, upstream: str, directory: str, provider, app) -> No
         fail("页面脚本没有接上流式事件")
     if "runtime.step" not in script or "renderRuntime" not in script:
         fail("页面脚本没有接上运行过程")
+    if 'id="tool-policy"' not in page or "工具安全策略" not in page or "/api/tool-policy" not in script:
+        fail("设置页没有工具安全策略")
+    if 'id="close-tool-panel"' not in page or 'id="close-settings-top"' not in page or 'id="close-tools-top"' not in page:
+        fail("报错或长对话框没有始终可见的关闭按钮")
     if _unsafe_inner_html(script) or "regenerate" in script or "use_as_reference" in script or "change_aspect" in script:
         fail("页面多做了卡片动作，或用 innerHTML 塞进了内容")
     if "打开等距图" not in script:
@@ -5621,9 +5625,10 @@ def _config_origin_case(base: str) -> dict:
             fail(f"跨站写配置没被拒：{headers} {status} {body}")
     for path, body_ in (("/api/provider", {"base_url": "https://evil.example/v1", "model": "x"}),
                         ("/api/context", {"values": {"enabled": False}}),
+                        ("/api/tool-policy", {"schema": "mas.toolpolicy/1", "global": {}}),
                         ("/api/toolpacks/install", {"source": "/tmp/nowhere"}),
                         ("/api/toolpacks/x/uninstall", {})):
-        method = "PUT" if path in ("/api/provider", "/api/context") else "POST"
+        method = "PUT" if path in ("/api/provider", "/api/context", "/api/tool-policy") else "POST"
         status, _ = _request_headers(method, base + path, body_, {"Origin": "https://evil.example"})
         if status != 403:
             fail(f"跨站写 {path} 没被拒：{status}")
@@ -5631,7 +5636,7 @@ def _config_origin_case(base: str) -> dict:
     if view["values"]["remote_local_prompt"]["value"] != "refuse":
         fail("跨站请求改动了 remote_local_prompt")
     denied = _config_audit_since(base, mark, "security.config_write_denied")
-    if len(denied) < 7 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
+    if len(denied) < 8 or any(item.get("via") not in ("cross_origin", "cross_site") for item in denied):
         fail(f"跨站写配置没记安全事件：{denied}")
     mark = _now_mark(base)
     status, body = _request_headers("PUT", url, {"values": {"remote_timeout_sec": 61}},
@@ -5649,6 +5654,84 @@ def _config_origin_case(base: str) -> dict:
     return {"denied": len(denied)}
 
 
+def _tool_policy_settings_case(base: str, directory: str) -> None:
+    """#93：设置页能读写工具安全策略。密钥字段拒绝且不回显；放宽只把字段名写进审计。"""
+    status, page = request("GET", base + "/")
+    if status != 200 or 'id="tool-policy"' not in page or "保存安全策略" not in page:
+        fail("设置页没有工具安全策略表单")
+    path = os.path.join(directory, "tool_policy.json")
+    saved_env = os.environ.get("MAS_TOOL_POLICY")
+    os.environ["MAS_TOOL_POLICY"] = path
+    secret = "mas-policy-secret-value-93"
+    try:
+        status, body = request("GET", base + "/api/tool-policy")
+        view = json.loads(body)
+        if status != 200 or view["resolved"]["allow_lan"] is not False or view["resolved"]["content_guard"] != "strict" \
+                or view["relaxations"] or "prompt" not in view["defaults"]["params_block"]:
+            fail(f"安全策略默认值不对：{status} {body}")
+        status, body = request("PUT", base + "/api/tool-policy", {
+            "schema": "mas.toolpolicy/1",
+            "global": {"auth": {"header": "Authorization", "env": "MAS_MCP_TOKEN", "value": secret}},
+        })
+        if status != 400 or json.loads(body).get("code") != "policy_secret":
+            fail(f"设置页接受了密钥：{status} {body}")
+        if os.path.isfile(path) and secret in open(path, encoding="utf-8").read():
+            fail("密钥写进了策略文件")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"schema": "mas.toolpolicy/1", "global": {
+                "allow_lan": True,
+                "auth": {"header": "Authorization", "env": "MAS_MCP_TOKEN", "value": secret},
+            }}, handle)
+        status, body = request("GET", base + "/api/tool-policy")
+        view = json.loads(body)
+        auth = ((view.get("document") or {}).get("global") or {}).get("auth") or {}
+        if status != 200 or secret in body or "value" in auth or view["resolved"]["allow_lan"] is not True:
+            fail(f"读策略时回显了密钥或丢掉了其余配置：{status} {body}")
+        mark = _now_mark(base)
+        status, body = request("PUT", base + "/api/tool-policy", {
+            "schema": "mas.toolpolicy/1",
+            "global": {"allow_lan": True, "stdio_commands": ["npx"]},
+            "packs": {"mcp_echo": {"allow_lan": False}},
+            "tools": {"mcp_echo__echo": {"confirm_every_call": False}},
+        })
+        view = json.loads(body)
+        fields = {item["field"] for item in view.get("relaxations") or []}
+        if status != 200 or view["document"]["global"].get("stdio_commands") != ["npx"] \
+                or view["document"]["packs"]["mcp_echo"].get("allow_lan") is not False \
+                or view["document"]["tools"]["mcp_echo__echo"].get("confirm_every_call") is not False \
+                or "allow_lan" not in fields or "stdio_commands" not in fields or secret in body:
+            fail(f"安全策略没保存：{status} {body}")
+        stored = open(path, encoding="utf-8").read()
+        if secret in stored or "value" in json.loads(stored)["global"].get("auth", {}):
+            fail("保存后的策略文件里有密钥")
+        relaxed = _config_audit_since(base, mark, "security.policy_relaxed")
+        last = relaxed[-1] if relaxed else {}
+        changed = _config_audit_since(base, mark, "security.config_changed")
+        cfg = changed[-1] if changed else {}
+        blob = json.dumps({"relaxed": last, "config": cfg}, ensure_ascii=False)
+        if "allow_lan" not in str(last.get("fields")) or "stdio_commands" not in str(last.get("fields")) \
+                or "confirm_every_call" not in str(last.get("fields")) or "npx" in blob \
+                or cfg.get("target") != "tool_policy" or "allow_lan" not in (cfg.get("fields") or []) \
+                or "stdio_commands" not in (cfg.get("fields") or []):
+            fail(f"策略写入没有审计或审计里有取值：{blob}")
+        status, body = request("PUT", base + "/api/tool-policy", {
+            "schema": "mas.toolpolicy/1", "global": {}, "packs": {}, "tools": {}})
+        view = json.loads(body)
+        if status != 200 or view.get("relaxations") or view["resolved"]["allow_lan"] is not False:
+            fail(f"恢复默认失败：{status} {body}")
+        status, body = request("PUT", base + "/api/tool-policy", {"schema": "mas.toolpolicy/1", "global": {"nope": True}})
+        if status != 400:
+            fail(f"不认识的字段被保存了：{status} {body}")
+    finally:
+        if saved_env is None:
+            os.environ.pop("MAS_TOOL_POLICY", None)
+        else:
+            os.environ["MAS_TOOL_POLICY"] = saved_env
+        if os.path.isfile(path):
+            os.remove(path)
+    print("tool policy settings ok")
+
+
 def _injection_cases(base: str, directory: str) -> None:
     _fingerprint_exfil_unit()
     _confirm_card_unit()
@@ -5657,6 +5740,7 @@ def _injection_cases(base: str, directory: str) -> None:
     _config_scope_unit(directory)
     _config_origin_case(base)
     _context_settings_case(base)
+    _tool_policy_settings_case(base, directory)
     print("injection guard ok")
 
 
@@ -6957,6 +7041,8 @@ def _panel_static_clean(base: str) -> None:
     if status != 200 or "MASPanels" not in host or 'setAttribute("sandbox", "allow-scripts")' not in host \
             or "event.source !== frame.contentWindow" not in host or "form_tools" not in host or "innerHTML" in host:
         fail("panels.js 不是通用的面板宿主（沙箱 iframe、来源核对、按 form_tools 挂载）")
+    if "close-tool-panel" not in host or "unavailable" not in host:
+        fail("工具面板在授权失败时没有关闭，或仍然去挂载被拒绝的面板")
     if "session.confirmed" not in host or "local_only" not in host:
         fail("面板宿主没有自己补分级确认、强制只能本机")
     script = request("GET", base + "/static/app.js")[1]

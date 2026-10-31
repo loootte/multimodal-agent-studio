@@ -32,8 +32,18 @@ _MAX_VALUE = 80
 
 
 def tool_result_message(name: str, result, prefix: str = "工具结果") -> dict:
-    """回传给模型的工具结果：user 角色、标 untrusted，正文只是数据。"""
+    """回传给模型的工具结果：默认 user 角色、标 untrusted，正文只是数据。
+    #93：untrusted_results=false 时去掉标记（这是放宽，默认仍标记）。"""
     body = json.dumps(result, ensure_ascii=False)
+    mark = True
+    try:
+        from services.tools.policy import resolve
+
+        mark = resolve(tool=name)["untrusted_results"]
+    except Exception:  # noqa: BLE001 读不到策略时不放宽
+        mark = True
+    if not mark:
+        return {"role": "user", "parts": [{"type": "text", "text": f"{prefix} {name} {body}"}]}
     return {
         "role": "user",
         "channel": TOOL_RESULT_CHANNEL,

@@ -1294,6 +1294,17 @@ def _model_tool_names() -> list:
     return [item["function"]["name"] for item in openai_tools()]
 
 
+def run_tool_policy(h: Harness, task: dict, live: bool) -> dict:
+    """#93：默认拦截、显式放宽生效、覆盖优先级、密钥不泄漏。不联网。"""
+    from services.tools.policy import PolicyError, check_case
+
+    try:
+        check_case(task["case"])
+    except PolicyError as exc:
+        raise Failed(exc.message) from exc
+    return {"case": task["case"]}
+
+
 def run_mcp(h: Harness, task: dict, live: bool) -> dict:
     """14.A #78：MCP 客户端。
     local_content_blocked：模型把本地正文（base64 编码后）塞进 MCP 参数，连接前就被拦（egress.blocked），server 没被启动；
@@ -1897,6 +1908,7 @@ RUNNERS = {
     "sandbox": run_sandbox,
     "confirm_policy": run_confirm_policy,
     "mcp": run_mcp,
+    "tool_policy": run_tool_policy,
     "storage_encryption": run_storage_encryption,
     "desktop_token": run_desktop_token,
     "desktop_security": run_desktop_security,

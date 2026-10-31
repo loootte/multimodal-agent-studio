@@ -157,8 +157,7 @@ def _project_schema(schema):
 
 def project(server: str, listed: list) -> list[dict]:
     """tools/list 的结果 -> 缓存条目。不合格的工具标 blocked，不能启用。"""
-    from services.tools import packs
-    from services.tools.registry import BLOCKED_EXTERNAL
+    from services.tools import packs, policy
 
     taken = {p.name for p in _safe_discover()} - {server}
     seen = set()
@@ -178,7 +177,7 @@ def project(server: str, listed: list) -> list[dict]:
         schema = _project_schema(tool.get("inputSchema"))
         if schema is None:
             item["blocked"] = "bad_schema"
-        elif BLOCKED_EXTERNAL.intersection(schema["properties"]):
+        elif policy.blocked_params(server, name).intersection(schema["properties"]):
             item["blocked"] = "blocked_param"
             item["params"] = sorted(schema["properties"])
         elif not packs._NAME.match(name) or name in taken or name in seen:
@@ -239,11 +238,19 @@ def _store_enabled(pack, tools: dict) -> None:
         _write_json(os.path.join(pack.folder, ENABLED_FILE), {"schema": ENABLED_SCHEMA, "tools": tools})
 
 
-def _state(item: dict, record: dict | None) -> str:
+def _state(item: dict, record: dict | None, pack_name: str | None = None) -> str:
     if item.get("blocked"):
         return "blocked"
     if not record:
         return "disabled"
+    if pack_name is not None:
+        from services.tools import policy
+
+        if record.get("policy") != policy.fingerprint(pack_name, item.get("name")):
+            return "changed"
+        if policy.resolve(pack_name, item.get("name"))["schema_reauth"] and record.get("digest") != item.get("digest"):
+            return "changed"
+        return "enabled"
     return "enabled" if record.get("digest") == item.get("digest") else "changed"
 
 
@@ -253,7 +260,7 @@ def view(pack) -> dict:
     tools = []
     for item in cached(pack):
         record = on.get(item.get("remote"))
-        state = _state(item, record)
+        state = _state(item, record, pack.name)
         row = {"remote": item.get("remote"), "name": item.get("name"), "description": item.get("description"),
                "digest": item.get("digest"), "params": item.get("params") or [], "state": state}
         if state == "blocked":
@@ -285,7 +292,7 @@ def model_tools(pack) -> list[dict]:
     if pack.grant_state() != "ok":
         return []
     on = enabled(pack)
-    return [item for item in cached(pack) if _state(item, on.get(item.get("remote"))) == "enabled"]
+    return [item for item in cached(pack) if _state(item, on.get(item.get("remote")), pack.name) == "enabled"]
 
 
 def model_description(pack, item: dict) -> str:
@@ -310,7 +317,9 @@ def tool_pack(server, name: str):
     return None
 
 
-def enable(pack, remote: str, digest: str) -> dict:
+def enable(pack, remote: str, digest: str, acknowledge=None) -> dict:
+    from services.tools import policy
+
     if pack.grant_state() != "ok":
         raise McpError("permission_denied", "工具包授权不完整或包被改过，先重新安装。")
     for item in cached(pack):
@@ -320,8 +329,15 @@ def enable(pack, remote: str, digest: str) -> dict:
             raise McpError("mcp_tool_blocked", BLOCKED_TEXT.get(item["blocked"], "这个工具不能启用。"))
         if not isinstance(digest, str) or digest != item.get("digest"):
             raise McpError("digest_mismatch", "工具的说明或参数和你看到的不一致，先刷新列表再启用。")
+        needed = sorted(row["field"] for row in policy.relaxations(pack.name, item.get("name")))
+        given = sorted(str(part) for part in acknowledge) if isinstance(acknowledge, list) else []
+        if given != needed:
+            raise McpError("policy_not_accepted", "启用前要确认放宽项：" + ("、".join(needed) or "无") + "。")
+        if needed:
+            policy.audit(pack.name, item.get("name"))
         on = enabled(pack)
-        on[remote] = {"digest": item["digest"], "name": item["name"], "enabled_at": round(time.time(), 3)}
+        on[remote] = {"digest": item["digest"], "name": item["name"], "enabled_at": round(time.time(), 3),
+                      "policy": policy.fingerprint(pack.name, item.get("name"))}
         _store_enabled(pack, on)
         return view(pack)
     raise McpError("not_found", "最近一次列表里没有这个工具，先刷新。")
@@ -333,6 +349,44 @@ def disable(pack, remote: str) -> dict:
         on.pop(remote)
         _store_enabled(pack, on)
     return view(pack)
+
+
+def _run_stdio_command(pack, messages: list) -> dict:
+    """策略放行的命令（npx 或指定命令）。不走 shell，工作目录是包目录，环境变量只留系统必需项。"""
+    import shutil
+    import subprocess
+
+    from services.tools import policy, sandbox
+
+    entry = _entry(pack)
+    command = str(entry.get("command") or "")
+    if command not in policy.resolve(pack.name)["stdio_commands"]:
+        return {"ok": False, "error": {"code": "permission_denied", "message": "这个命令不在白名单里。"}}
+    if not policy.args_ok(entry.get("args") or []):
+        return {"ok": False, "error": {"code": "permission_denied", "message": "命令参数不合格。"}}
+    exe = shutil.which(command)
+    if not exe:
+        return {"ok": False, "error": {"code": "mcp_unreachable", "message": "找不到这个命令。"}}
+    env = {key: os.environ[key] for key in sandbox.ENV_KEEP if os.environ.get(key)}
+    env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+    try:
+        env.update(policy.auth_env(pack.name))
+    except policy.PolicyError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+    feed = "".join(json.dumps(message, ensure_ascii=False) + "\n" for message in messages if isinstance(message, dict))
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            [exe, *(entry.get("args") or [])], input=feed, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", cwd=pack.folder, env=env, timeout=sandbox.timeout(),
+            shell=False, creationflags=flags,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": {"code": "tool_timeout", "message": "MCP server 运行超时。"}}
+    except OSError:
+        return {"ok": False, "error": {"code": "sandbox_error", "message": "命令启动失败。"}}
+    lines = [line for line in (proc.stdout or "").splitlines() if line.strip()][:200]
+    return {"lines": lines}
 
 
 # ---------- 传输 ----------
@@ -360,9 +414,11 @@ class _Session:
 
     def guard(self, message: dict):
         from services.gateway import egress
+        from services.tools import policy
 
-        fingerprints = getattr(self.bodies, "fingerprints", None) or None
-        ticket = egress.guard("toolpack", self.url, message, local_bodies=self.bodies or None, exempt=(),
+        bodies = self.bodies if policy.resolve(self.pack.name)["local_body_check"] else None
+        fingerprints = getattr(bodies, "fingerprints", None) or None if bodies else None
+        ticket = egress.guard("toolpack", self.url, message, local_bodies=bodies or None, exempt=(),
                               local_fingerprints=fingerprints)
         if ticket.hit:
             raise McpError("egress_blocked", f"出站被拦下（{ticket.reason_code}）：参数里不能有本地内容，只能用句柄。")
@@ -373,8 +429,11 @@ class _Stdio(_Session):
     def exchange(self, messages: list[dict], tickets: list) -> dict:
         from services.tools import packs, sandbox
 
-        result = sandbox.run(self.pack, {"messages": messages}, packs.config_for(self.pack), self.pack.effective(),
-                             function="mcp")
+        if _entry(self.pack).get("command"):
+            result = _run_stdio_command(self.pack, messages)
+        else:
+            result = sandbox.run(self.pack, {"messages": messages}, packs.config_for(self.pack), self.pack.effective(),
+                                 function="mcp")
         if result.get("ok") is False and "lines" not in result:
             for ticket in tickets:
                 ticket.failed((result.get("error") or {}).get("code") or "tool_error")
@@ -414,13 +473,17 @@ class _Http(_Session):
 
     def _check_host(self) -> None:
         from services.gateway import egress
-        from services.tools import sandbox
+        from services.tools import policy
 
         parts = urllib.parse.urlsplit(self.url)
-        allowed, reason = sandbox.decide(self.pack.name, self.pack.effective(), parts.hostname or "", parts.port or 443)
+        host = parts.hostname or ""
+        if "network" not in self.pack.effective():
+            egress.toolpack_connect(self.pack.name, host, allowed=False, reason_code="permission_denied")
+            raise McpError("permission_denied", "不能连这个 MCP server（没有联网授权）。")
+        allowed, reason = policy.http_allowed(host, policy.resolve(self.pack.name))
         if not allowed:
-            egress.toolpack_connect(self.pack.name, parts.hostname or "", allowed=False, reason_code=reason)
-            raise McpError(reason or "permission_denied", "不能连这个 MCP server（没有联网授权，或者是本机地址）。")
+            egress.toolpack_connect(self.pack.name, host, allowed=False, reason_code=reason)
+            raise McpError(reason or "egress_policy_denied", "不能连这个 MCP 地址（这一类地址被策略拦住，或者解析不了）。")
 
     def send(self, message: dict, ticket=None):
         from services.tools import sandbox
@@ -436,6 +499,13 @@ class _Http(_Session):
             headers["Mcp-Session-Id"] = self.session_id
         if self.version:
             headers["MCP-Protocol-Version"] = self.version
+        from services.tools import policy
+
+        try:
+            headers.update(policy.auth_headers(self.pack.name))
+        except policy.PolicyError as exc:
+            ticket.failed(exc.code)
+            raise McpError(exc.code, exc.message) from exc
         body = json.dumps(message, ensure_ascii=False).encode("utf-8")
         try:
             status, response_headers, data = HTTP_POST(self.url, body, headers, sandbox.timeout())
@@ -572,11 +642,17 @@ def call(tool_pack_, arguments: dict) -> dict:
     record = enabled(server).get(remote)
     if not record:
         return _failure(name, "mcp_tool_disabled", "这个 MCP 工具没有启用。")
-    try:
-        bodies = egress.session_bodies()
-    except RuntimeError:
-        egress.blocked("toolpack", endpoint(server), "local_bodies_unavailable", tool=name)
-        return _failure(name, "egress_blocked", "取不到本会话的本地内容登记，按最严处理，没有连接 MCP server。")
+    from services.tools import policy
+
+    check_local = policy.resolve(server.name, name)["local_body_check"]
+    if check_local:
+        try:
+            bodies = egress.session_bodies()
+        except RuntimeError:
+            egress.blocked("toolpack", endpoint(server), "local_bodies_unavailable", tool=name)
+            return _failure(name, "egress_blocked", "取不到本会话的本地内容登记，按最严处理，没有连接 MCP server。")
+    else:
+        bodies = None
     message = _rpc(3, "tools/call", {"name": remote, "arguments": dict(arguments)})
     session = _session(server, bodies)
     try:
@@ -588,12 +664,17 @@ def call(tool_pack_, arguments: dict) -> dict:
         listed = session.list_tools()
         fresh = project(server.name, listed)
         current = next((t for t in fresh if t.get("remote") == remote), None)
-        if current is None or current.get("digest") != record.get("digest") or current.get("blocked"):
+        fp = policy.fingerprint(server.name, name)
+        schema_changed = current is None or current.get("blocked") or current.get("digest") != record.get("digest")
+        policy_changed = record.get("policy") != fp
+        # 工具没了、被拦住、策略变了，一律重新确认。说明变了只在 schema_reauth 开着时才挡。
+        if current is None or current.get("blocked") or policy_changed or (
+                schema_changed and policy.resolve(server.name, name)["schema_reauth"]):
             _store_cache(server, fresh)
             ticket.failed("reauth_required")
             _security("security.mcp_reauth_required", tool=name, error_code="reauth_required")
             return _failure(name, "reauth_required",
-                            "MCP server 上这个工具的说明或参数变了（或已经没有了），没有调用。请在工具包设置里刷新并重新启用。")
+                            "MCP 工具的说明、参数或安全策略变了（或已经没有了），没有调用。请刷新并重新启用。")
         if isinstance(session, _Http):
             message["id"] = session._id()
         result = session.call(message, ticket)
@@ -605,6 +686,9 @@ def call(tool_pack_, arguments: dict) -> dict:
 
 
 def untrusted_result(name: str, server: str, result: dict) -> dict:
+    from services.tools import policy
+
+    secret = policy.peek_secret(server, name)
     texts, omitted, used = [], 0, 0
     for item in result.get("content") or []:
         if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
@@ -612,13 +696,15 @@ def untrusted_result(name: str, server: str, result: dict) -> dict:
             if room <= 0:
                 omitted += 1
                 continue
-            text = item["text"][:room]
+            text = policy.redact(item["text"][:room], secret)
             used += len(text)
             texts.append(text)
         else:
             omitted += 1
-    out = {"ok": not result.get("isError"), "tool": name, "source": "mcp", "trust": "untrusted", "server": server,
+    out = {"ok": not result.get("isError"), "tool": name, "source": "mcp", "server": server,
            "content": texts, "omitted": omitted}
+    if policy.resolve(server, name)["untrusted_results"]:
+        out["trust"] = "untrusted"
     if result.get("isError"):
         out["error"] = {"code": "mcp_tool_error", "message": "MCP 工具报告了错误（内容见 content，不可信）。"}
     return out

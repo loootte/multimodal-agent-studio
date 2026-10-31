@@ -154,6 +154,7 @@ def self_check() -> None:
             comfy_poc.fail("失败结果不应表示成功，也不应带 workflow。")
     _check_mcp(specs)
     _check_mcp_client()
+    _check_tool_policy()
     _check_video_whitelist()
     artifacts.self_check()
     _check_artifact_handoff()
@@ -186,6 +187,18 @@ def _check_mcp(specs: list[dict]) -> None:
     missing = handle({"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
     if not missing or missing.get("error", {}).get("code") != -32601:
         comfy_poc.fail(f"未知 MCP 方法没有拒绝：{missing}")
+
+
+def _check_tool_policy() -> None:
+    """#93：默认拦截、显式放宽、覆盖优先级、密钥不进文件和结果。"""
+    from services.tools.policy import PolicyError, self_check
+
+    try:
+        self_check()
+    except PolicyError as exc:
+        comfy_poc.fail(f"工具安全策略：{exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        comfy_poc.fail(f"工具安全策略检查失败：{type(exc).__name__}: {exc}")
 
 
 def _check_mcp_client() -> None:

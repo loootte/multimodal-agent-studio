@@ -175,26 +175,50 @@
     return () => window.removeEventListener("message", listener);
   }
 
+  async function lookup(name) {
+    const tools = (await call("GET", "/api/tools")).form_tools || [];
+    return tools.find((item) => item.name === name) || null;
+  }
+
+  function showBlocked(tool, text) {
+    say("");
+    body.replaceChildren();
+    active = { tool, cleanup: null };
+    dialog.setAttribute("aria-label", (tool.panel && (tool.panel.title || tool.title)) || tool.title || "工具");
+    dialog.showModal();
+    say(text || "这个工具现在不可用。");
+  }
+
   async function open(tool) {
     if (active) dialog.close();
+    let fresh = tool;
+    try {
+      fresh = (await lookup(tool.name)) || tool;
+    } catch (_error) {
+      fresh = tool;
+    }
+    if (!fresh.panel || fresh.unavailable) {
+      showBlocked(fresh, fresh.unavailable || "这个工具现在不可用。");
+      return;
+    }
     const session = { confirmed: false };
-    if (tool.rating === "adult") {
-      if (!window.confirm(tool.confirm || `开启“${tool.label || tool.title}”？`)) return;
+    if (fresh.rating === "adult") {
+      if (!window.confirm(fresh.confirm || `开启“${fresh.label || fresh.title}”？`)) return;
       session.confirmed = true;
     }
     say("");
     body.replaceChildren();
-    const api = makeApi(tool, session);
-    active = { tool, cleanup: null };
-    dialog.setAttribute("aria-label", tool.panel.title || tool.title);
+    const api = makeApi(fresh, session);
+    active = { tool: fresh, cleanup: null };
+    dialog.setAttribute("aria-label", fresh.panel.title || fresh.title);
     dialog.showModal();
     try {
-      if (tool.panel.isolated) {
-        active.cleanup = mountFrame(tool, api);
+      if (fresh.panel.isolated) {
+        active.cleanup = mountFrame(fresh, api);
       } else {
-        loadStyle(tool.panel.style);
-        await loadScript(tool);
-        const result = registry.get(tool.name)(body, api);
+        loadStyle(fresh.panel.style);
+        await loadScript(fresh);
+        const result = registry.get(fresh.name)(body, api);
         if (typeof result === "function") active.cleanup = result;
       }
     } catch (error) {
@@ -232,6 +256,7 @@
     }
   }
 
+  document.querySelector("#close-tool-panel").addEventListener("click", () => dialog.close());
   document.addEventListener("mas:tools-changed", refresh);
   refresh();
 })();

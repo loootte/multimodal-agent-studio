@@ -274,6 +274,46 @@ def _audit_config_write(target: str, fields) -> None:
         print(f"警告：配置写入审计失败 {type(exc).__name__}", file=sys.stderr)
 
 
+def _tool_policy_http(handler, method: str) -> None:
+    """#93：设置页读写 tool_policy.json。审计只记字段名。密钥字段由 policy.save 拒绝，不落盘。"""
+    from services.tools import policy as tool_policy
+
+    if method == "GET":
+        _send_json(handler, 200, tool_policy.public_view())
+        return
+    if not _config_write_allowed(handler, "tool_policy"):
+        return
+    body = _read_json(handler)
+    try:
+        saved = tool_policy.save(body)
+    except tool_policy.PolicyError as exc:
+        _send_json(handler, 400, {"code": exc.code, "message": exc.message})
+        return
+    fields = list(saved["global"])
+    for scope in ("packs", "tools"):
+        for name, layer in saved[scope].items():
+            for key in layer:
+                fields.append(f"{scope}.{name}.{key}")
+    _audit_config_write("tool_policy", fields)
+    relaxed: list[str] = []
+    scopes = [(None, None)]
+    scopes.extend((name, None) for name in saved["packs"])
+    scopes.extend((name.split("__", 1)[0], name) for name in saved["tools"])
+    for pack, tool in scopes:
+        for item in tool_policy.relaxations(pack, tool):
+            if item["field"] not in relaxed:
+                relaxed.append(item["field"])
+    if relaxed:
+        try:
+            telemetry.record(
+                "security.policy_relaxed", trace_id="cfg_" + uuid.uuid4().hex,
+                tool="tool_policy", fields=",".join(relaxed)[:200], via="settings",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"警告：策略放宽审计写入失败 {type(exc).__name__}", file=sys.stderr)
+    _send_json(handler, 200, tool_policy.public_view())
+
+
 def _storage_route(handler, app) -> None:
     """本地存储状态（12.F #62）：模式、算法、key_id、密钥来源、是否还有明文残留。
     不给密钥、不给完整路径；只给本机。导入 / 导出密钥只走命令行，不走 HTTP。"""
@@ -679,6 +719,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             _audit_config_write("context", fields + (["reset"] if body.get("reset") else []))
             _send_json(handler, 200, view)
             return
+        if path == "/api/tool-policy" and method in ("GET", "PUT"):
+            _tool_policy_http(handler, method)
+            return
         if path == "/api/tools" and method == "GET":
             view = app.tools.listing()
             view["form_tools"] = module_tools.form_tools()  # #86：表单工具（entry.kind=module）
@@ -993,7 +1036,8 @@ def _mcp_route(handler, packs, name: str, method: str, rest: list) -> None:
             if rest == ["refresh"]:
                 view = mcp_client.refresh(pack)
             elif rest == ["enable"]:
-                view = mcp_client.enable(pack, str(body.get("tool") or ""), body.get("digest"))
+                view = mcp_client.enable(pack, str(body.get("tool") or ""), body.get("digest"),
+                                         acknowledge=body.get("acknowledge"))
             else:
                 view = mcp_client.disable(pack, str(body.get("tool") or ""))
             _audit_config_write("toolpack_mcp", ["mcp_" + rest[0]])

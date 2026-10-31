@@ -76,6 +76,9 @@
   <p id="live" class="sr-only" aria-live="polite"></p>
   <dialog id="settings">
     <form id="settings-form" method="post" action="#">
+      <div class="dialog-bar">
+        <button type="button" id="close-settings-top">关闭</button>
+      </div>
       <h2>模型</h2>
       <label>
         API 基址
@@ -92,6 +95,60 @@
       </label>
       <p id="key-hint" class="hint"></p>
       <p id="settings-error" class="note" hidden></p>
+      <h2>工具安全策略</h2>
+      <fieldset id="tool-policy" class="context-settings">
+        <p class="hint">管 MCP 的命令、地址、认证和几项安全开关。没改过就是最严。这一节单独保存。密钥不写在这里，只写环境变量名或钥匙串条目。</p>
+        <label>编辑哪一层
+          <select id="policy-scope"></select>
+        </label>
+        <label>加一层覆盖（包名，或 包名__工具名）
+          <input id="policy-scope-new" autocomplete="off" spellcheck="false" placeholder="mcp_echo 或 mcp_echo__echo">
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="policy-scope-use">编辑这一层</button>
+        </div>
+        <p class="hint">换层之前先保存。没保存的修改会丢掉。</p>
+        <label>stdio 命令白名单（空格或逗号分隔。留空只许包内 Python）
+          <input name="pol_stdio" autocomplete="off" spellcheck="false" placeholder="npx">
+        </label>
+        <label><input type="checkbox" name="pol_allow_loopback"> 允许 HTTP MCP 连接回环地址</label>
+        <label><input type="checkbox" name="pol_allow_link_local"> 允许连接链路本地地址</label>
+        <label><input type="checkbox" name="pol_allow_lan"> 允许连接局域网地址</label>
+        <label>认证头（留空表示不注入）
+          <input name="pol_auth_header" autocomplete="off" spellcheck="false" placeholder="Authorization">
+        </label>
+        <label>密钥来源
+          <select name="pol_auth_source">
+            <option value="">不注入</option>
+            <option value="env">环境变量名</option>
+            <option value="keychain">钥匙串条目</option>
+          </select>
+        </label>
+        <label>变量名或条目名（不是密钥本身）
+          <input name="pol_auth_name" autocomplete="off" spellcheck="false" placeholder="MAS_MCP_TOKEN">
+        </label>
+        <label>参数名黑名单（空格或逗号分隔）
+          <input name="pol_params_block" autocomplete="off" spellcheck="false" value="prompt text body content bytes path filename">
+        </label>
+        <label>从黑名单里放行的参数名
+          <input name="pol_params_allow" autocomplete="off" spellcheck="false">
+        </label>
+        <label><input type="checkbox" name="pol_confirm_every_call" checked> 每次调用前确认</label>
+        <label><input type="checkbox" name="pol_local_body_check" checked> 检查发往 MCP 的本地正文</label>
+        <label><input type="checkbox" name="pol_untrusted_results" checked> 工具结果标为不可信</label>
+        <label><input type="checkbox" name="pol_schema_reauth" checked> 说明或参数变了要重新启用</label>
+        <label>内容审核
+          <select name="pol_content_guard">
+            <option value="strict">严格</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+        <p id="policy-hint" class="hint">读取中…</p>
+        <div class="dialog-actions">
+          <button type="button" id="save-tool-policy">保存安全策略</button>
+          <button type="button" id="reset-tool-policy">这一层恢复默认</button>
+        </div>
+      </fieldset>
       <h2>上下文压缩</h2>
       <fieldset id="context-settings" class="context-settings">
         <label><input type="checkbox" name="ctx_enabled"> 超过阈值时压缩较早的轮次</label>
@@ -121,7 +178,11 @@
   </dialog>
   <dialog id="tool-settings">
     <form id="tool-form" method="post" action="#">
+      <div class="dialog-bar">
+        <button type="button" id="close-tools-top">关闭</button>
+      </div>
       <h2>工具配置</h2>
+      <p class="hint">MCP 的命令白名单、地址、认证和安全开关在「设置」的「工具安全策略」里。</p>
       <label>
         工具
         <select id="tool-select"></select>
@@ -214,6 +275,9 @@
     </div>
   </dialog>
   <dialog id="tool-panel" class="tool-panel">
+    <div class="dialog-bar">
+      <button type="button" id="close-tool-panel">关闭</button>
+    </div>
     <div id="tool-panel-body"></div>
     <p id="tool-panel-note" class="note" hidden></p>
   </dialog>

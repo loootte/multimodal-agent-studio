@@ -430,6 +430,30 @@ dialog {
 
 dialog h2 { margin: 0 0 0.8rem; font-size: 1.25rem; }
 
+.dialog-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 0.7rem;
+  padding-bottom: 0.45rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+#settings {
+  width: min(36rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+}
+
+#tool-settings,
+#tool-panel {
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+}
+
 dialog label { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.55rem; }
 
 dialog input {

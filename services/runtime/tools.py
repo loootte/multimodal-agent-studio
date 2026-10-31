@@ -88,8 +88,10 @@ def confirm_every_call(name: str) -> bool:
     from services.tools import packs
 
     pack = packs.find_tool(name)
-    if packs.is_mcp(pack):  # 14.A：远端工具做什么宿主看不见，一律每次确认
-        return True
+    if packs.is_mcp(pack):  # 14.A：默认每次确认。#93 起这个开关走策略，默认仍是每次确认。
+        from services.tools import policy
+
+        return bool(policy.resolve(getattr(pack, "mcp_server", None) or pack.name, pack.name)["confirm_every_call"])
     return bool(pack is not None and not pack.builtin and packs.sensitive(pack))
 
 
