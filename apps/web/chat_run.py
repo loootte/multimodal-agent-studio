@@ -79,6 +79,9 @@ SYSTEM = (
     "张数只用 plan_images 报，不说时默认一张。说不清用哪种来源或后端时，按默认做并在回复里说明，或先用一句话确认。"
     "用户要画一个角色/人物（说到性别、年龄、人种、体型、发型、发色、瞳色、服装、姿势、背景、画面风格、参考角色）时，调用 character_image，"
     "只填用户说到的字段，其余用默认值；拿到句柄后再 generate_image（多张先 plan_images）。"
+    "用户要从图片里读出嵌入的提示词（ComfyUI / A1111 / EXIF）时，调用 prompt_from_image（不要填任何正文或字节）；"
+    "弹出本机选图后你只拿到 content_handle、source、found，看不到提示词正文。用户可在本地资源里改提示词，再 generate_image；"
+    "found=false 时再调用 accept_local_content（purpose=image_prompt）让用户手写。"
     "景别/角度/构图、光照、表情、动作场景也是它的字段。"
 )
 _TASK_LINE = "用户要生成一张图片。请调用 accept_local_content，purpose 填 image_prompt。不要编写画面描述。"
@@ -122,9 +125,10 @@ _SCHEDULE_MARKERS = (
 MAX_INPUT = 32000
 MAX_MESSAGE = 16000
 MAX_TOTAL = 100000
-_TAKE_TOOLS = ("accept_local_content", "build_skill_page")
+_TAKE_TOOLS = ("accept_local_content", "prompt_from_image", "build_skill_page")
 _WEB_TOOLS = (
     "accept_local_content",
+    "prompt_from_image",
     "list_local_content",
     "forget_local_content",
     "retrieve_local",
@@ -464,7 +468,12 @@ def submit_file(app, run_id: str, encoded, media_type) -> dict:
         raise RequestError(400, "invalid_json", "文件内容无法读取。") from exc
     if not data:
         raise RequestError(400, "empty", "请选择要留在本机的文件。")
-    if len(data) > store.MAX_FILE:
+    run = app.runs.get(run_id)
+    # #101：读图提示词允许更大的图片（与附件上限对齐）；普通 accept_local_content 文件仍用 MAX_FILE。
+    limit = int(getattr(run, "_file_max", 0) or 0) if run is not None else 0
+    if limit <= 0:
+        limit = store.MAX_FILE
+    if len(data) > limit:
         raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
     payload = {"kind": "file", "data": data, "media_type": store.clean_media_type(media_type)}
     return _offer(app, run_id, "file", payload)
@@ -664,8 +673,10 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     try:
         session = app.sessions.get(session_id)
         user_id, user_text, attachments = _latest_user(session)
+        # #101：读嵌入提示词必须走对话 take（prompt_from_image），不能进本机出图快捷切片。
         image_request = (
             _image_request(user_text, attachments) and not _open_prompt_request(user_text)
+            and not _prompt_from_image_request(user_text)
             and getattr(run, "agent_mode", "single") != "multi"
             and getattr(run, "planning_mode", "execute") != "plan" and getattr(run, "_approved_plan", None) is None
             and getattr(run, "job", None) is None
@@ -809,8 +820,8 @@ def _generate_text_turn(
     def mutating(name, arguments=None):
         if name == agents.DELEGATE:
             return False
-        # 收本机内容走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
-        if name == "accept_local_content":
+        # 收本机内容 / 选图走 content_request 对话框，用户在框里提交或跳过就是确认；再弹工具确认会把输入框挡掉。
+        if name in ("accept_local_content", "prompt_from_image"):
             return False
         # 同一轮里已经确认过的工具（如连续出图的 generate_image）不再逐次确认。
         if name in allowed:
@@ -994,6 +1005,10 @@ def _dispatch_tool(app, session_id, message_id, run, provider, user_text, tool_c
         return _continue_after_content(
             app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
         )
+    if name == "prompt_from_image":
+        return _continue_prompt_from_image(
+            app, session_id, message_id, run, provider, user_text,
+        )
     if name in ("list_local_content", "forget_local_content", "lookup_demo", "retrieve_local"):
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     if name == "generate_image":
@@ -1098,6 +1113,160 @@ def _continue_after_content(
         return _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call)
     _complete(app, session_id, message_id, run, reply)
     return "completed"
+
+
+
+def _continue_prompt_from_image(app, session_id, message_id, run, provider, user_text) -> str:
+    """#101：弹出本机选图 → 抽出正向提示词 → 登记为 image_prompt 句柄；工具结果只含句柄/来源/found，无正文。"""
+    if run.cancel.is_set():
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    _emit_runtime(
+        app, session_id, message_id, run,
+        {"kind": "tool", "name": "prompt_from_image", "ms": 0, "ok": True},
+        persist=True,
+    )
+    run.begin_content_wait("file")
+    run._file_max = store.MAX_ATTACHMENT  # 选图可比普通 keep 文件更大；只抽元数据，不把图存成 keep
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_CONTENT_REQUEST,
+        "message_id": message_id,
+        "run_id": run.run_id,
+        "purpose": "image_prompt",
+        "kind": "file",
+        "hint": "请选择带有嵌入提示词的图片（PNG / JPEG / WebP）。图片只在本机解析，模型只看到句柄。",
+        "draft": "",
+    })
+    payload = run.wait_content()
+    run._file_max = 0
+    if run.cancel.is_set():
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    if payload and payload.get("skip"):
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", "已取消。"))
+    if not payload:
+        current = app.sessions.message_text(session_id, message_id)
+        return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要解析的图片。", current)
+    data = payload.get("data") or b""
+    media_type = payload.get("media_type") or ""
+    if not isinstance(data, bytes) or not data:
+        current = app.sessions.message_text(session_id, message_id)
+        return _error_finish(app, session_id, message_id, run, "empty", "请选择要解析的图片。", current)
+    extracted = _extract_image_prompt(data, media_type)
+    positive = extracted.get("positive") if extracted.get("found") else None
+    source = extracted.get("source") if extracted.get("found") else None
+    result = {
+        "ok": True,
+        "tool": "prompt_from_image",
+        "found": bool(extracted.get("found")),
+        "source": source,
+        "content_handle": None,
+    }
+    handle = ""
+    if positive:
+        try:
+            record = app.sessions.add_content(session_id, positive, "image_prompt")
+        except StoreError:
+            current = app.sessions.message_text(session_id, message_id)
+            return _error_finish(app, session_id, message_id, run, "provider_error", HUMAN["provider_error"], current)
+        handle = record.get("handle") or ""
+        result["content_handle"] = handle
+        result["next"] = (
+            f"已登记本地提示词句柄 {handle}（来源 {source}）。"
+            "正文只在本机；用户可在「本地资源」里修改后再出图。"
+            "要出图时调用 generate_image，content_handle 填这枚句柄；多张先 plan_images。"
+        )
+        print(f"prompt_from_image {session_id} {handle} {source} {len(positive)}", file=sys.stderr)
+    else:
+        result["next"] = (
+            "这张图没有可读的嵌入提示词。"
+            "请调用 accept_local_content（purpose=image_prompt）让用户手写画面描述，或请用户换一张带 ComfyUI/A1111 元数据的图。"
+        )
+        print(f"prompt_from_image {session_id} not_found", file=sys.stderr)
+
+    # 工具结果推给前端时间线（不含正文）
+    _push_saved(app, session_id, message_id, run, {
+        "type": EVENT_TOOL_CALL,
+        "tool": "prompt_from_image",
+        "arguments": {},
+        "result": {k: result[k] for k in ("ok", "found", "source", "content_handle") if k in result},
+        "status": "success",
+        "message_id": message_id,
+        "run_id": run.run_id,
+    })
+
+    session = app.sessions.get(session_id)
+    # 给模型的后续只有句柄摘要，绝不带 positive 正文
+    line = "本地工具结果 prompt_from_image " + json.dumps(result, ensure_ascii=False)
+    # 用户这句话本身要出图时才催 generate_image；只抽提示词时把句柄摘要交回模型即可。
+    if handle and _image_request(user_text):
+        ready_line = _ready_line(handle)
+        total = _plan_total(run)
+        if total:
+            ready_line += f"已有计划：共 {total} 张，还没开始。请逐张调用 generate_image。"
+        return _generate_text_turn(
+            app, session_id, message_id, run, provider, session, user_text,
+            extra=[{"role": "user", "content": ready_line + "\n" + line}],
+            take_tools=("build_skill_page",),
+        )
+    messages = _turn_messages(
+        app, session_id, session,
+        extra=[{"role": "user", "content": line + "\n" + injection.TOOL_RESULT_NOTE,
+                "channel": injection.TOOL_RESULT_CHANNEL, "trust": injection.UNTRUSTED}],
+    )
+    try:
+        follow, reply = _ask(app, session_id, message_id, run, provider, messages, False)
+    except GatewayError as exc:
+        return _fail_status(app, session_id, message_id, run, exc)
+    if run.cancel.is_set():
+        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+    if isinstance(follow, dict) and follow.get("name") == "generate_image" and handle:
+        return _run_bound(app, session_id, message_id, run, user_text, follow, False)
+    if isinstance(follow, dict) and follow.get("name") == "accept_local_content":
+        purpose, kind = _accept_args(follow)
+        return _continue_after_content(
+            app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
+        )
+    _complete(app, session_id, message_id, run, reply)
+    return "completed"
+
+
+def _extract_image_prompt(data: bytes, media_type: str) -> dict:
+    """加载工具包内纯函数；失败当未找到，不把异常细节回给模型。"""
+    try:
+        mod = _prompt_extract_mod()
+        result = mod.extract(data, media_type or "")
+    except Exception as exc:  # 解析失败 = 无提示词
+        print(f"prompt_from_image extract failed {type(exc).__name__}", file=sys.stderr)
+        return {"positive": None, "source": None, "found": False}
+    if not isinstance(result, dict):
+        return {"positive": None, "source": None, "found": False}
+    found = bool(result.get("found"))
+    positive = result.get("positive") if found else None
+    source = result.get("source") if found else None
+    if not isinstance(positive, str) or not positive.strip():
+        return {"positive": None, "source": None, "found": False}
+    if not isinstance(source, str) or not source:
+        source = "unknown"
+    return {"positive": positive.strip(), "source": source, "found": True}
+
+
+_PROMPT_EXTRACT = None
+
+
+def _prompt_extract_mod():
+    global _PROMPT_EXTRACT
+    if _PROMPT_EXTRACT is not None:
+        return _PROMPT_EXTRACT
+    import importlib.util
+    path = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "toolpacks", "builtin", "prompt_from_image", "extract.py",
+    ))
+    spec = importlib.util.spec_from_file_location("mas_prompt_from_image_extract", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("prompt_from_image extract missing")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _PROMPT_EXTRACT = mod
+    return mod
 
 
 def _follow_local_tool(app, session_id, message_id, run, provider, user_text, tool_call) -> str:
@@ -2370,10 +2539,45 @@ def _open_prompt_request(text: str) -> bool:
     return "图" in text or "comfy" in lowered or any(marker in text for marker in _IMAGE_MARKERS)
 
 
+_PROMPT_FROM_IMAGE_MARKERS = (
+    "读出提示词",
+    "抽出提示词",
+    "提取提示词",
+    "嵌入的提示词",
+    "嵌入提示词",
+    "图里的提示词",
+    "图片里的提示词",
+    "从这张图读",
+    "从图片读",
+    "读图提示",
+    "prompt_from_image",
+    "a1111",
+    "parameters",
+)
+
+
+def _prompt_from_image_request(text: str) -> bool:
+    """#101：用户要从图里读嵌入提示词（不是普通出图）。走对话工具，不走出图快捷切片。"""
+    lowered = (text or "").lower()
+    if any(marker in text for marker in _PROMPT_FROM_IMAGE_MARKERS):
+        return True
+    if any(marker in lowered for marker in ("a1111", "novelai", "comfyui prompt", "embedded prompt")):
+        return True
+    # 「从…图…提示词」且没有明确只要出图
+    if "提示词" in text and ("图" in text) and any(w in text for w in ("读", "抽", "提取", "解析", "拿")):
+        return True
+    return False
+
+
 def _image_request(text: str, attachments=None) -> bool:
     if any(marker in text for marker in _SCHEDULE_MARKERS):
         return False
     if _skill_figure(text):
+        return False
+    # 「只抽/不要出图」即使句子里有「出图」字样，也不算出图请求。
+    if any(m in text for m in ("不要出图", "只抽", "只读嵌入", "只读提示")) and not any(
+        m in text for m in ("并生成", "再生成", "生成一张", "生成一幅", "画一张", "来一张")
+    ):
         return False
     if any(marker in text for marker in _VISION_MARKERS):
         if not any(marker in text for marker in _IMAGE_MARKERS) and "comfy" not in text.lower():

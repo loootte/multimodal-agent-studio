@@ -110,7 +110,9 @@
         "security.schedule_cross_job_handle": true,
         "runtime.schedule_budget_stop": true,
         "runtime.schedule_overlap_missed": true,
-        "security.schedule_model_create_confirm": true
+        "security.schedule_model_create_confirm": true,
+        "security.prompt_from_image_no_body": true,
+        "runtime.prompt_from_image_extract": true
       }
     }
   }

@@ -307,6 +307,33 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return
             self._emit_tool("generate_image", {"content_handle": handle, "aspect_ratio": "1:1", "seed": 7})
             return
+        if mode == "promptimage":
+            # #101：模型调 prompt_from_image；结果只含句柄/来源/found，绝无正文。
+            if self._tool_result_count("prompt_from_image") == 0:
+                self._emit_tool("prompt_from_image", {})
+                return
+            last = self._last_user()
+            if '"found": false' in last or '"found":false' in last:
+                self._piece(_delta(content="这张图没有嵌入提示词。"))
+                self._done()
+                return
+            texts = self._user_texts()
+            ask = next((t for t in texts if "工具结果" not in t and "已就绪" not in t), texts[0] if texts else "")
+            if "只抽" in ask or "只读" in ask or "不要出图" in ask:
+                self._piece(_delta(content="已抽出提示词句柄。"))
+                self._done()
+                return
+            if self._tool_result_count("generate_image") >= 1:
+                self._piece(_delta(content="好了"))
+                self._done()
+                return
+            handle = _content_handle(last) or ("c_" + "00" * 16)
+            self._emit_tool("generate_image", {
+                "content_handle": handle,
+                "aspect_ratio": "1:1",
+                "seed": 7,
+            })
+            return
         if mode == "fileimage":
             if not self._ready():
                 self._emit_tool("accept_local_content", {"purpose": "keep", "kind": "file"})
@@ -723,6 +750,7 @@ def _agent_cases() -> None:
         "装上编排者": dict(good, role="orchestrator"),
         "装上委托": dict(good, tools=["delegate"]),
         "子 Agent 弹本地内容": dict(good, tools=["accept_local_content"]),
+        "子 Agent 读图提示词": dict(good, tools=["prompt_from_image"]),
         "未注册的工具": dict(good, tools=["rm_rf"]),
         "子 Agent 的树预算": dict(good, budget={"tree_steps": 10}),
         "预算越界": dict(good, budget={"steps": 999}),
@@ -777,6 +805,11 @@ def _agent_cases() -> None:
     lead = agents.find("orchestrator")
     if "accept_local_content" in agents.allowed_tools(planner, depth=1):
         fail("子 Agent 拿到了 accept_local_content")
+    if "prompt_from_image" in agents.allowed_tools(planner, depth=1):
+        fail("子 Agent 拿到了 prompt_from_image")
+    lead_tools = agents.allowed_tools(lead, depth=0)
+    if "prompt_from_image" not in lead_tools or "accept_local_content" not in lead_tools:
+        fail(f"编排者缺读图/本地内容工具：{sorted(lead_tools)}")
     if "delegate" not in agents.allowed_tools(lead, depth=0) or "delegate" in agents.allowed_tools(lead, depth=agents.MAX_DEPTH):
         fail("delegate 的层数限制不对")
     if agents.not_allowed("generate_image", "planner")["error"]["code"] != "tool_not_allowed":
@@ -3847,6 +3880,7 @@ def _image_cases(base: str, provider, directory: str, app=None) -> None:
         _local_file(base, provider, comfy.box, directory)
         _local_forget_file(base, provider, comfy.box, directory)
         _local_file_image(base, provider, comfy.box)
+        _prompt_from_image_case(base, provider, comfy.box, directory)
         _egress_file(provider)
         _egress_http_case(base, provider, directory)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
@@ -4357,7 +4391,7 @@ def _assert_bound(directory: str, session_id: str, body: dict, prompt: str, expe
             generate = function
         if function.get("name") == "accept_local_content":
             accept = function
-    if not {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "generate_image"}.issubset(names):
+    if not {"accept_local_content", "prompt_from_image", "list_local_content", "forget_local_content", "retrieve_local", "generate_image"}.issubset(names):
         fail(f"工具契约缺少本地内容工具：{names}")
     props = (generate.get("parameters") or {}).get("properties") or {}
     if "prompt" in props or "content_handle" not in props:
@@ -5989,6 +6023,137 @@ def _local_plan_case(base: str, provider, box: ComfyState) -> None:
         fail("按计划出图时把本地正文发给了模型")
 
 
+
+def _png_with_text(key: str, value: str) -> bytes:
+    """最小带 tEXt 的 PNG，供 #101 抽取用例。"""
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload) & 0xffffffff)
+    raw = b"".join(b"\x00" + bytes((200, 100, 50)) * 2 for _ in range(2))
+    header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+    text = key.encode("latin-1") + b"\x00" + value.encode("latin-1")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"tEXt", text) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+def _prompt_extract_units() -> None:
+    """#101：抽取纯函数——A1111 / ComfyUI CLIPTextEncode / 无元数据。"""
+    import importlib.util
+    path = os.path.join(ROOT, "toolpacks", "builtin", "prompt_from_image", "extract.py")
+    spec = importlib.util.spec_from_file_location("mas_prompt_extract_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    params = (
+        "a cute cat sitting on a mat\n"
+        "Negative prompt: blurry, lowres\n"
+        "Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, Size: 512x512"
+    )
+    hit = mod.extract(_png_with_text("parameters", params), "image/png")
+    if not hit.get("found") or hit.get("source") != "a1111_parameters" or hit.get("positive") != "a cute cat sitting on a mat":
+        fail(f"A1111 抽取不对：{hit}")
+    if "Negative" in (hit.get("positive") or "") or "Steps" in (hit.get("positive") or ""):
+        fail("A1111 把负向/采样参数带进了正向")
+    comfy = json.dumps({
+        "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "masterpiece, best quality, fox"}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "bad hands"}},
+        "3": {"class_type": "KSampler", "inputs": {"seed": 1}},
+    })
+    hit2 = mod.extract(_png_with_text("prompt", comfy), "image/png")
+    if not hit2.get("found") or hit2.get("source") != "comfyui_prompt" or hit2.get("positive") != "masterpiece, best quality, fox":
+        fail(f"ComfyUI 抽取不对：{hit2}")
+    miss = mod.extract(_png_with_text("Description", "just a caption"), "image/png")
+    if miss.get("found"):
+        fail(f"无关 tEXt 不该当提示词：{miss}")
+    empty = mod.extract(b"\xff\xd8\xff\xe0notjpeg", "image/jpeg")
+    if empty.get("found"):
+        fail(f"坏 JPEG 不该 found：{empty}")
+    print("prompt_from_image extract units ok")
+
+
+def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#101：选图 → 抽出正向提示词 → 登记 image_prompt 句柄；事件与供应商请求都没有正文；可再出图。"""
+    _prompt_extract_units()
+    provider.mode = "promptimage"
+    session_id = _fresh_session(base)
+    secret = "LOCAL-PROMPT-FROM-IMAGE-9f2c unique fox in moonlight, film grain"
+    png = _png_with_text("parameters", secret + "\nNegative prompt: blurry\nSteps: 20, Sampler: Euler a, CFG scale: 7, Seed: 3, Size: 512x512")
+    before = len(box.prompts)
+    sent = len(provider.requests)
+    events = _speak_file(base, session_id, "请从这张图里读出嵌入的提示词，只抽不要出图。", png, "image/png", "a1111-secret.png")
+    if _assistant_text(events) != "已抽出提示词句柄。":
+        fail(f"读图提示词后没有写完回答：{_assistant_text(events)!r}")
+    if len(box.prompts) != before:
+        fail("只抽提示词时调用了 ComfyUI")
+    blob = json.dumps(events, ensure_ascii=False)
+    if secret in blob or "Negative prompt" in blob or base64.b64encode(png).decode("ascii") in blob:
+        fail("嵌入提示词正文或图片字节出现在事件里")
+    # content_request 必须是 file + image_prompt
+    req = next((e for e in events if e.get("type") == "content_request"), None)
+    if not req or req.get("kind") != "file" or req.get("purpose") != "image_prompt":
+        fail(f"读图 content_request 不对：{req}")
+    # 工具结果事件无正文
+    # take 截走时 flush_traces 会先推一条无 result 的 tool_call；以带 result 的那条为准。
+    tool_ev = next(
+        (e for e in events if e.get("type") == "tool_call" and e.get("tool") == "prompt_from_image" and e.get("result")),
+        None,
+    )
+    if not tool_ev:
+        fail("没有 prompt_from_image 工具结果事件")
+    result = tool_ev.get("result") or {}
+    if not result.get("found") or not result.get("content_handle") or result.get("source") != "a1111_parameters":
+        fail(f"工具结果缺句柄/来源：{result}")
+    if "positive" in result or secret in json.dumps(result, ensure_ascii=False):
+        fail("工具结果把提示词正文回给了前端事件")
+    handle = result["content_handle"]
+    for item in provider.requests[sent:]:
+        raw = _provider_blob(item)
+        if secret in raw or "Negative prompt" in raw or base64.b64encode(png).decode("ascii") in raw:
+            fail("嵌入提示词正文或图片字节进入了第三方请求")
+        # 工具列表应含 prompt_from_image，且参数不含正文键
+        tools = (item.get("body") or {}).get("tools") or []
+        names = {(t.get("function") or {}).get("name") for t in tools}
+        if "prompt_from_image" not in names:
+            fail(f"模型请求缺 prompt_from_image：{sorted(n for n in names if n)}")
+    saved = _saved_contents(directory, session_id)
+    matches = [item for item in saved if item.get("handle") == handle]
+    if len(matches) != 1 or matches[0].get("purpose") != "image_prompt":
+        fail(f"抽出的提示词没落成 image_prompt：{matches}")
+    if matches[0].get("text") != secret:
+        fail("本机保存的正向提示词不对（应去掉负向/采样）")
+    # 无元数据 → found=false，正文不进供应商
+    session2 = _fresh_session(base)
+    sent2 = len(provider.requests)
+    bare = _png_with_text("Comment", "no prompt here")
+    events2 = _speak_file(base, session2, "请从这张图只读嵌入提示词，不要出图。", bare, "image/png", "empty.png")
+    if _assistant_text(events2) != "这张图没有嵌入提示词。":
+        fail(f"无元数据回答不对：{_assistant_text(events2)!r}")
+    for item in provider.requests[sent2:]:
+        if "no prompt here" in _provider_blob(item):
+            fail("无元数据图的 Comment 进了供应商")
+    # 有元数据 + 要出图：句柄出图，正文仍不外泄
+    provider.mode = "promptimage"
+    session3 = _fresh_session(base)
+    secret3 = "LOCAL-PROMPT-GEN-4a1e red fox under neon rain"
+    png3 = _png_with_text(
+        "prompt",
+        json.dumps({"1": {"class_type": "CLIPTextEncode", "inputs": {"text": secret3}}}),
+    )
+    before3 = len(box.prompts)
+    sent3 = len(provider.requests)
+    events3 = _speak_file(base, session3, "从这张图读出提示词并生成一张图。", png3, "image/png", "comfy.png")
+    if len(box.prompts) != before3 + 1:
+        fail("读图后出图没有提交 ComfyUI")
+    if secret3 in json.dumps(events3, ensure_ascii=False):
+        fail("出图路径事件里出现了提示词正文")
+    for item in provider.requests[sent3:]:
+        if secret3 in _provider_blob(item):
+            fail("出图路径把嵌入提示词正文发给了供应商")
+    # 提交进 Comfy 的应是 secret3（经句柄）
+    last_prompt = box.prompts[-1] if box.prompts else {}
+    # box.prompts 结构因夹具而异；至少确认调用次数 + 成片/完成
+    if events3[-1].get("type") not in TERMINAL:
+        fail("读图出图没有结束事件")
+    print("prompt_from_image cases ok")
+
+
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):
     def on_event(event):
         if event.get("type") == "tool.confirm":
@@ -6137,7 +6302,7 @@ def _egress_http_case(base: str, provider, directory: str) -> None:
 
 # ---------- #31 工具包 ----------
 
-BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
+BUILTIN_TOOLS = {"accept_local_content", "prompt_from_image", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
                  "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image",
                  "remember", "recall", "forget",  # 14.D：长期记忆，默认不进模型请求
                  "schedule_create", "schedule_list", "schedule_update", "schedule_delete"}  # 14.E：定时任务，默认不进

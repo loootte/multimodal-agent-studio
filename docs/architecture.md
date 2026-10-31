@@ -115,13 +115,13 @@ Agent 运行时
 | `agents/builtin/*/agent.json` | 内置 orchestrator、planner、image、reviewer |
 | `toolpacks/builtin/lookup_demo/tool.py`、`tool.json` | 只读演示 `lookup_demo` |
 
-输入框旁勾上「多智能体」时，`chat_run.py` 把这一轮交给编排者：系统指令和工具换成编排者清单，`delegate` 起子 Agent；子 Agent 的工具调用、确认卡和 `agent` 节点事件都标出 Agent 名和 `agent_run_id`，界面右侧画成「编排者 → 子 Agent → 工具调用」的树。`accept_local_content` 只给编排者。不勾时路径不变。见 [agents.md](agents.md)。
+输入框旁勾上「多智能体」时，`chat_run.py` 把这一轮交给编排者：系统指令和工具换成编排者清单，`delegate` 起子 Agent；子 Agent 的工具调用、确认卡和 `agent` 节点事件都标出 Agent 名和 `agent_run_id`，界面右侧画成「编排者 → 子 Agent → 工具调用」的树。`accept_local_content` / `prompt_from_image` 只给编排者。不勾时路径不变。见 [agents.md](agents.md)。
 
 现在一轮回答仍放在网页进程里：
 
 | 文件 | 做什么 |
 | --- | --- |
-| `apps/web/chat_run.py` | 一轮回答。交给 `runtime.run`，界面只画统一运行过程窗口。系统指令附带已安装技能的名字和短摘要。把图片附件把手交给网关写进图像部件。明确的单次出图关键词仍走网页切片：一次出一张。已留下的提示词要连续出图时，交给第三方模型在运行时循环里按次调用 `generate_image`，一次一张。`accept_local_content` 仍走网页切片，先对话框里提交正文；文件不能出图。解剖说明走 `read_skill` 与 `build_skill_page`，不要走 `generate_image`。本地会话内容工具只看本会话；模型侧是会话级摘要加可引用句柄，没有正文。同一条助手消息上可有 `content_request`、`tool.confirm`、`tool_call`、`progress`、多张 `artifact` 和 `error` |
+| `apps/web/chat_run.py` | 一轮回答。交给 `runtime.run`，界面只画统一运行过程窗口。系统指令附带已安装技能的名字和短摘要。把图片附件把手交给网关写进图像部件。明确的单次出图关键词仍走网页切片：一次出一张。已留下的提示词要连续出图时，交给第三方模型在运行时循环里按次调用 `generate_image`，一次一张。`accept_local_content` 仍走网页切片，先对话框里提交正文；文件不能出图。`prompt_from_image`（#101）同样走网页切片：本机选图后只把句柄/来源/found 回模型，正文留在本机。解剖说明走 `read_skill` 与 `build_skill_page`，不要走 `generate_image`。本地会话内容工具只看本会话；模型侧是会话级摘要加可引用句柄，没有正文。同一条助手消息上可有 `content_request`、`tool.confirm`、`tool_call`、`progress`、多张 `artifact` 和 `error` |
 | `apps/web/skill_page.py` | 用本机 Node 跑 `skills/anatomy` 的最小例子，把页面存成这个会话的 HTML 工件。没有 Node 时这一轮以可读错误结束，不落到出图 |
 
 
@@ -170,6 +170,7 @@ services/tools/  api  schema  registry  packs  sandbox  sandbox_runner  mcp  _su
 | `toolpacks/builtin/lookup_demo/tool.py` | 本机只读演示 `lookup_demo`。按主题返回固定说明 |
 | `toolpacks/builtin/read_skill/tool.py` | 读取已安装技能的做法 |
 | `toolpacks/builtin/character_image/tool.py` | 表单工具「角色定制」（`entry.kind=module`） |
+| `toolpacks/builtin/prompt_from_image/` | 宿主工具「从图片读提示词」（#101）：对话唤起、本机选图、只登记正向 `image_prompt` 句柄，正文不回模型 |
 | `services/tools/mcp.py` | 两边的进程内 MCP 投影。本机 `tools/call` 会执行，外部只校验 |
 | `poc/comfyui/template_fill.py` | 复制模板，只写字段对照里的白名单。模型拼出的工作流 JSON 不会被提交 |
 | `poc/comfyui/comfy_poc.py` | 命令行的文生图、图生图、文生视频、图生视频。它等待下载完成 |

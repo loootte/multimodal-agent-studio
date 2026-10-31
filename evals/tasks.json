@@ -91,6 +91,7 @@
         "generate_image",
         "generate_video",
         "accept_local_content",
+        "prompt_from_image",
         "forget_local_content"
       ],
       "read_only": [
@@ -845,6 +846,22 @@
       "fake_only": true,
       "case": "model_create_confirm",
       "marker": "LOCAL-SCHED-2a7"
+    },
+    {
+      "id": "security.prompt_from_image_no_body",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "no_body",
+      "marker": "LOCAL-PROMPT-FROM-IMAGE-9f2c"
+    },
+    {
+      "id": "runtime.prompt_from_image_extract",
+      "category": "runtime",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "extract_units",
+      "marker": "LOCAL-PROMPT-FROM-IMAGE-9f2c"
     }
   ]
 }

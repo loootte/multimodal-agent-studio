@@ -80,6 +80,8 @@ HOST_TOOLS = {
     "plan_images": frozenset(),
     "stage_prompt": frozenset(),
     "character_image": frozenset(),
+    # #101：从上传图读正向提示词，登记成本地句柄；选图对话框由宿主弹出，结果只回句柄+来源。
+    "prompt_from_image": frozenset({"read_local_content", "write_files"}),
     # 14.D #81：长期记忆。recall 会在当前会话签发新句柄（写会话记录），所以也要 write_files。
     "remember": frozenset({"read_local_content", "write_files"}),
     "recall": frozenset({"read_local_content", "write_files"}),
