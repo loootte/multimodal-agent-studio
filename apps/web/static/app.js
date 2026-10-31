@@ -206,6 +206,41 @@ function openToolPanel(event) {
   window.MASPanels.openFor(String(event.tool || ""), { handle: event.content_handle, session_id: state.currentId });
 }
 
+// 同一个句柄在这个页面里只自动弹一次：一轮结束后的接回（subscribe 回放全部事件）不会再弹第二次，
+// 两次 open 也就不会互相打架。之后要再开，点消息下方的按钮。
+const autoOpenedPanels = new Set();
+function autoOpenToolPanel(event) {
+  const key = `${state.currentId || ""}:${String(event.tool || "")}:${String(event.content_handle || "")}`;
+  if (autoOpenedPanels.has(key)) return;
+  autoOpenedPanels.add(key);
+  openToolPanel(event);
+}
+
+// 服务端每个 JSON 回应带 X-MAS-Build（启动时网页静态文件的指纹）。页面记下第一次见到的值；
+// 变了说明服务换了新代码而这个标签还跑着旧脚本，旧脚本可能不认识新事件（比如 tool.panel），提示刷新。
+let pageBuild = "";
+function noteBuild(response) {
+  const build = response && response.headers ? response.headers.get("X-MAS-Build") || "" : "";
+  if (!build) return;
+  if (!pageBuild) {
+    pageBuild = build;
+    return;
+  }
+  if (build === pageBuild || document.querySelector("#stale-page")) return;
+  const bar = document.createElement("div");
+  bar.id = "stale-page";
+  bar.className = "stale-page";
+  bar.setAttribute("role", "alert");
+  const text = document.createElement("span");
+  text.textContent = "本机服务已更新，这个页面还是旧版本，部分功能（比如提示词编辑面板）可能不出现。请刷新页面（Ctrl+F5）。";
+  const reload = document.createElement("button");
+  reload.type = "button";
+  reload.textContent = "刷新";
+  reload.addEventListener("click", () => window.location.reload());
+  bar.append(text, reload);
+  document.body.prepend(bar);
+}
+
 window.MASHost = Object.freeze({ runFormTool, runToolDraft, busy: () => Boolean(state.sending) });
 
 async function runTurn(url, body, userText, attachments) {
@@ -325,7 +360,7 @@ function onEvent(event) {
       document.querySelector("#live").textContent = event.media === "html" ? "已收到等距图" : "已收到图片";
     }
     if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
-    if (event.type === "tool.panel" && !state.stopped) openToolPanel(event); // 只在实时事件里自动打开，回放不弹
+    if (event.type === "tool.panel" && !state.stopped) autoOpenToolPanel(event); // 每个句柄只自动弹一次，回放不再弹
     if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
   } else if (event.type === "message.completed") {
     assistant.text = event.text || "";
@@ -987,7 +1022,7 @@ function bubble(message) {
   for (const panelEvent of events.filter((entry) => entry.type === "tool.panel")) {
     const reopen = document.createElement("button");
     reopen.type = "button";
-    reopen.className = "ghost tool-panel-reopen";
+    reopen.className = "tool-panel-reopen";
     reopen.textContent = String(panelEvent.label || "打开面板").slice(0, 40);
     reopen.addEventListener("click", () => openToolPanel(panelEvent));
     item.append(reopen);
@@ -2155,6 +2190,7 @@ async function api(method, path, body) {
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
+  noteBuild(response);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(payload.message || "请求失败。");

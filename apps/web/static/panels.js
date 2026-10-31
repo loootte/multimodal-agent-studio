@@ -246,18 +246,38 @@
     body.replaceChildren();
     active = { tool, cleanup: null };
     dialog.setAttribute("aria-label", (tool.panel && (tool.panel.title || tool.title)) || tool.title || "工具");
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     say(text || "这个工具现在不可用。");
   }
 
+  // 同步收尾：跑面板自己的 cleanup，清空正文。dialog 的 close 事件是异步派发的，
+  // 不能靠它在「关掉旧的、马上打开新的」时收尾，否则它会晚到、把刚挂上的新面板清空（#101）。
+  function teardown() {
+    if (active && typeof active.cleanup === "function") {
+      try { active.cleanup(); } catch (_error) { /* 面板自己的收尾出错不影响关闭 */ }
+    }
+    active = null;
+    body.replaceChildren();
+    say("");
+  }
+
+  let opening = 0; // 每次 open 领一个号；await 回来发现号变了（又开了别的/用户关了）就放弃，不往正文里挂旧面板
+  let selfClosed = 0; // open() 自己关掉旧面板的次数；对应的 close 事件晚到时只认领、不收尾
+
   async function open(tool, draft) {
-    if (active) dialog.close();
+    const ticket = ++opening;
+    if (dialog.open) {
+      selfClosed += 1;
+      dialog.close();
+    }
+    teardown();
     let fresh = tool;
     try {
       fresh = (await lookup(tool.name)) || tool;
     } catch (_error) {
       fresh = tool;
     }
+    if (ticket !== opening) return;
     if (!fresh.panel || fresh.unavailable) {
       showBlocked(fresh, fresh.unavailable || "这个工具现在不可用。");
       return;
@@ -267,6 +287,7 @@
       if (!window.confirm(fresh.confirm || `开启“${fresh.label || fresh.title}”？`)) return;
       session.confirmed = true;
     }
+    if (ticket !== opening) return;
     say("");
     body.replaceChildren();
     if (fresh.panel.launcher === "chat" && !draft) {
@@ -274,30 +295,33 @@
       return;
     }
     const api = makeApi(fresh, session, draft);
-    active = { tool: fresh, cleanup: null };
+    const current = { tool: fresh, cleanup: null, ticket };
+    active = current;
     dialog.setAttribute("aria-label", fresh.panel.title || fresh.title);
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     try {
       if (fresh.panel.isolated) {
-        active.cleanup = mountFrame(fresh, api);
+        current.cleanup = mountFrame(fresh, api);
       } else {
         loadStyle(fresh.panel.style);
         await loadScript(fresh);
+        if (ticket !== opening || active !== current || !dialog.open) return;
         const result = registry.get(fresh.name)(body, api);
-        if (typeof result === "function") active.cleanup = result;
+        if (typeof result === "function") current.cleanup = result;
       }
     } catch (error) {
-      say(error.message || "面板打不开。");
+      if (ticket === opening) say(error.message || "面板打不开。");
     }
   }
 
   dialog.addEventListener("close", () => {
-    if (active && typeof active.cleanup === "function") {
-      try { active.cleanup(); } catch (_error) { /* 面板自己的收尾出错不影响关闭 */ }
+    if (selfClosed > 0) {
+      selfClosed -= 1; // open() 换面板时自己关的，已经同步收尾过
+      return;
     }
-    active = null;
-    body.replaceChildren();
-    say("");
+    if (dialog.open) return; // 保险：新面板已经打开了，别清掉它
+    opening += 1; // 用户关掉后，还在加载中的 open 不再挂上来
+    teardown();
   });
 
   async function refresh() {

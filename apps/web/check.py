@@ -6068,9 +6068,43 @@ def _prompt_extract_units() -> None:
     print("prompt_from_image extract units ok")
 
 
+def _prompt_panel_page_case(base: str) -> None:
+    """#101：旧标签不认识 tool.panel → 面板不出来。服务回应带构建指纹，页面变了就提示刷新；
+    同一句柄只自动弹一次，open 可重入；页面没有内联事件处理器、favicon 不报 404（e2e 要求控制台干净）。"""
+    import server as web_server
+
+    status, headers, _raw = _raw_get(base, "/api/identity")
+    build = headers.get("x-mas-build", "")
+    if status != 200 or not re.fullmatch(r"[0-9a-f]{16}", build) or build != web_server.STATIC_BUILD:
+        fail(f"/api/identity 没带正确的 X-MAS-Build：{status} {build!r}")
+    status, _headers, _raw = _raw_get(base, "/favicon.ico")
+    if status != 204:
+        fail(f"/favicon.ico 应回 204，实际 {status}")
+    static = os.path.join(WEB_DIR, "static")
+    with open(os.path.join(static, "index.html"), encoding="utf-8") as handle:
+        index = handle.read()
+    if re.search(r"<[^>]+\son[a-z]+\s*=", index):
+        fail("index.html 里有内联事件处理器（CSP script-src 'self' 会拦，控制台报错）")
+    with open(os.path.join(static, "app.js"), encoding="utf-8") as handle:
+        app_js = handle.read()
+    for needle in ("function noteBuild(", "noteBuild(response)", "X-MAS-Build", "function autoOpenToolPanel(",
+                   'event.type === "tool.panel" && !state.stopped) autoOpenToolPanel(event)', "tool-panel-reopen"):
+        if needle not in app_js:
+            fail(f"app.js 缺少 #101 面板/刷新提示逻辑：{needle}")
+    with open(os.path.join(static, "panels.js"), encoding="utf-8") as handle:
+        panels_js = handle.read()
+    for needle in ("function teardown()", "selfClosed", "ticket !== opening"):
+        if needle not in panels_js:
+            fail(f"panels.js 的 open 不可重入：缺 {needle}")
+    e2e = os.path.join(WEB_DIR, "e2e", "prompt_panel.cjs")
+    if not os.path.exists(e2e) or "textarea.pfi-text" not in open(e2e, encoding="utf-8").read():
+        fail("缺少读图提示词面板的浏览器 e2e（apps/web/e2e/prompt_panel.cjs）")
+
+
 def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str, app=None) -> None:
     """#101：选图 → 抽出正向提示词 → 登记 image_prompt 句柄；事件与供应商请求都没有正文；可再出图。"""
     _prompt_extract_units()
+    _prompt_panel_page_case(base)
     provider.mode = "promptimage"
     session_id = _fresh_session(base)
     secret = "LOCAL-PROMPT-FROM-IMAGE-9f2c unique fox in moonlight, film grain"

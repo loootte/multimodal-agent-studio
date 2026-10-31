@@ -646,3 +646,11 @@ dialog select { font: inherit; padding: 0.35rem; }
 .planning-todo { list-style: none; margin: 0.2rem 0; padding: 0; font-size: 0.9rem; }
 .planning-todo li[data-status="completed"] { opacity: 0.7; text-decoration: line-through; }
 .planning-todo li[data-status="in_progress"] { font-weight: 600; }
+
+/* #101：对话唤起的工具面板，消息下方的再次打开按钮要显眼（自动弹窗被关掉/没弹出来时从这里进） */
+.tool-panel-reopen { display: inline-block; margin: 0.4rem 0.4rem 0 0; }
+.stale-page {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+  display: flex; gap: 0.75rem; align-items: center; justify-content: center;
+  padding: 0.5rem 1rem; background: #fff4d6; color: #5a4300; border-bottom: 1px solid #e6c766;
+}

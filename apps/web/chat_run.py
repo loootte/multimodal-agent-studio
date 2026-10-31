@@ -149,7 +149,7 @@ _SCHEDULE_TOOLS = ("schedule_create", "schedule_list", "schedule_update", "sched
 EVENT_AGENT = "agent"
 # #101：宿主让网页打开某个内置工具的面板（对话唤起）。只带 tool、content_handle、source、label，没有正文。
 EVENT_TOOL_PANEL = "tool.panel"
-PROMPT_PANEL_READY = "已读出图片里的正向提示词，并在本机打开了编辑面板：改好后可以直接「出图」或「保存」。提示词正文只留在本机。"
+PROMPT_PANEL_READY = "已读出图片里的正向提示词，并在本机打开了编辑面板：改好后可以直接「出图」或「保存」。没看到面板的话，点这条消息下方的「编辑提示词」按钮。提示词正文只留在本机。"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
 
@@ -1175,7 +1175,8 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         result["next"] = (
             f"已登记本地提示词句柄 {handle}（来源 {source}），并已在用户本机打开编辑面板。"
             "正文只在本机；用户会在面板里编辑，再自己选「出图」或「保存」。"
-            "现在不要调用 generate_image 或其它工具，用一两句话告诉用户面板已打开即可。"
+            "现在不要调用 generate_image 或其它工具，用一两句话告诉用户面板已打开；"
+            "没看到面板的话，可以点这条消息下方的「编辑提示词」按钮。"
         )
         print(f"prompt_from_image {session_id} {handle} {source} {len(positive)}", file=sys.stderr)
     else:

@@ -17,6 +17,8 @@ v1 **不做**：侧栏入口（面板只由对话唤起）、负向提示词 / �
 - **出图**：先保存，再按这枚句柄出图（张数 1–20、画幅、本机 ComfyUI / 第三方）。走的是和表单工具 `privacy=local` 同一条宿主出图路径：对话里只记一行「读图提示词出图（本地提示词，N 张，本机 ComfyUI）」，不经对话模型；选第三方时照旧按 `remote_local_prompt`（默认 `refuse`；`ask` 时逐句柄逐主机确认）。
 - 要等读图那一轮结束才能点「出图」（可以先保存）；只认读图所在的会话。
 
+**没看到面板？** 先看这条回复下面有没有「编辑提示词」按钮，点它就能打开。连按钮都没有，多半是服务更新/重启后浏览器标签还跑着旧页面脚本（旧 `app.js` 不认识 `tool.panel` 事件，回复照样说"面板已打开"）：刷新页面（Ctrl+F5）即可，旧会话里的按钮也会出来。服务每个 JSON 回应都带 `X-MAS-Build`（启动时网页静态文件和内置工具面板的指纹），页面发现它变了会在顶上提示刷新。同一个句柄在一个页面里只自动弹一次（一轮结束后的接回不再弹）；`MASPanels.open` 可重入，旧面板的 `close` 事件晚到也不会把新面板清空。
+
 ### 面板怎么接进来（通用机制）
 
 | 部分 | 作用 |
@@ -67,4 +69,6 @@ v1 **不做**：侧栏入口（面板只由对话唤起）、负向提示词 / �
 ## 检查与评测
 
 - `apps/web/check.py` `_prompt_from_image_case` / `_prompt_draft_case`：读到就推 `tool.panel`、说要出图也不自动出图、草稿接口拒绝不相干句柄、编辑+保存原句柄更新、编辑+出图按新正文提交 ComfyUI 且不经模型；原文和改后的正文都不在事件、会话视图、后续对话历史和任何供应商请求里。
+- `apps/web/check.py` `_prompt_panel_page_case`：`X-MAS-Build` 头、`/favicon.ico` 204、`index.html` 没有内联事件处理器、`app.js` / `panels.js` 里有刷新提示和可重入 open。
+- 浏览器 e2e `apps/web/e2e/prompt_panel.cjs`（不进五项检查，要 Chrome/Edge 和 `puppeteer-core`）：自己起假供应商 + 假 ComfyUI（`prompt_panel_serve.py`），真浏览器里选图 → 面板自动打开、文本框可见可编辑且是读出的正文 → 一轮结束后面板不被清空 → 保存 → 关掉用「编辑提示词」再开读回新正文 → 连点几次只有一个文本框 → 出图 → 对话里没有正文 → 构建指纹变了顶上提示刷新；控制台不许有报错。用法：`CHROME=/usr/bin/google-chrome PYTHON=python3 node apps/web/e2e/prompt_panel.cjs`（Windows：`$env:CHROME="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`；`NODE_PATH` 指向装了 `puppeteer-core` 的 `node_modules`）。
 - `evals/tasks.json`：`security.prompt_from_image_no_body`、`runtime.prompt_from_image_extract`、`security.prompt_draft_edit_save`、`security.prompt_draft_edit_generate`。

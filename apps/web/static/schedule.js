@@ -8,6 +8,8 @@
   const preview = document.querySelector("#schedule-preview");
   const note = document.querySelector("#schedule-note");
   const add = document.querySelector("#schedule-add");
+  // 页面 CSP 是 script-src 'self'，不能用内联 onsubmit；在这里拦住表单的默认提交。
+  if (add) add.addEventListener("submit", (event) => event.preventDefault());
   const MODE = { plaintext: "明文存储", encrypted: "加密存储（12.F）", memory: "仅内存（重启后清空）" };
   const STATE = { active: "生效", needs_reauth: "待重新授权", done: "已结束", disabled: "已停用" };
   let timer = null;
