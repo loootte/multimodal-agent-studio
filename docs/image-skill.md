@@ -32,4 +32,4 @@ python apps/web/server.py
 
 ## 从图片读出嵌入提示词（#101）
 
-对话里可调用内置 `prompt_from_image`：本机选图 → 抽出正向提示词 → 登记为本地 `image_prompt` 句柄，再走现有 `generate_image`。详情见 [prompt-from-image.md](prompt-from-image.md)。v1 不改负向/采样，也不做面板。
+对话里可调用内置 `prompt_from_image`：本机选图 → 抽出正向提示词 → 登记为本地 `image_prompt` 句柄，并在本机打开编辑面板：改完点「保存」或「出图」（宿主出图路径，不经模型）。详情见 [prompt-from-image.md](prompt-from-image.md)。v1 不改负向/采样，面板没有侧栏入口。

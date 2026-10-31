@@ -10,6 +10,14 @@
 //   api.notify(text)      在对话框底部显示一行宿主提示
 //   api.close()           关掉面板
 //   api.handle.is(value)  value 是不是本地内容句柄（面板只会见到句柄，拿不到本地内容本身）
+//   api.draft             只给内置、声明了 ui.panel.local_draft、并且是从对话里（tool.panel 事件）打开的面板：
+//     .handle             这份本地草稿的句柄
+//     .read()             → 草稿正文（本机网页 ↔ 宿主，不经对话模型）
+//     .save(text)         原句柄保存编辑后的正文
+//     .generate({text, count, aspect_ratio, backend})  先保存再按这枚句柄出图（宿主出图路径，规则同表单 privacy=local）
+//   已安装工具的面板（iframe）永远没有 draft，FRAME_CALLS 里也没有。
+//
+// ui.panel.launcher=chat 的面板不在侧栏加入口，只能由对话里的 tool.panel 事件经 MASPanels.openFor 打开。
 //
 // 内置工具的面板同源加载：<script src="/api/tools/<name>/ui/<file>" data-tool="<name>">，
 // 面板调用 MASPanels.define(mount)，宿主按 data-tool 认领。已安装（第三方）工具的面板只在
@@ -19,6 +27,8 @@
   const waiting = new Map();
   const HANDLE = /^(c|a|art)_[0-9a-f]{32}$/;
   const FIELD = /^[a-z][a-z0-9_]{0,47}$/;
+  const SESSION = /^s_[0-9a-f]{32}$/;
+  const DRAFT_MAX = 8000;
   const FRAME_CALLS = new Set(["catalog", "preview", "run", "confirm", "notify", "close"]);
   const dialog = document.querySelector("#tool-panel");
   const body = document.querySelector("#tool-panel-body");
@@ -34,6 +44,14 @@
       registry.set(name, mount);
       const done = waiting.get(name);
       if (done) done.resolve();
+    },
+    // 宿主页面（app.js）在收到 tool.panel 事件时调用；context 只认 {handle, session_id}。
+    openFor(name, context) {
+      if (typeof name !== "string" || !name) return;
+      const ctx = context && typeof context === "object" ? context : {};
+      const handle = HANDLE.test(String(ctx.handle || "")) && String(ctx.handle).startsWith("c_") ? String(ctx.handle) : "";
+      const sessionId = SESSION.test(String(ctx.session_id || "")) ? String(ctx.session_id) : "";
+      open({ name, title: name }, handle && sessionId ? { handle, sessionId } : null);
     },
   });
 
@@ -73,10 +91,53 @@
     return Object.freeze(out);
   }
 
-  function makeApi(tool, session) {
+  function draftText(text) {
+    const value = typeof text === "string" ? text.trim() : "";
+    if (!value) throw new Error("提示词不能是空的。");
+    if (value.length > DRAFT_MAX) throw new Error(`提示词最多 ${DRAFT_MAX} 个字。`);
+    return value;
+  }
+
+  function makeDraft(tool, draft) {
+    const path = `/api/sessions/${draft.sessionId}/tools/${encodeURIComponent(tool.name)}/drafts/${draft.handle}`;
+    return Object.freeze({
+      handle: draft.handle,
+      async read() {
+        const data = await call("GET", path);
+        return typeof data.text === "string" ? data.text : "";
+      },
+      async save(text) {
+        const data = await call("POST", path, { text: draftText(text) });
+        return { ok: data.ok === true, size: data.size };
+      },
+      async generate(request) {
+        const r = request && typeof request === "object" ? request : {};
+        const n = Number(r.count);
+        if (!Number.isInteger(n) || n < 1 || n > 20) throw new Error("张数要是 1 到 20。");
+        const backend = r.backend === "remote" ? "remote" : "local";
+        const payload = {
+          text: draftText(r.text),
+          count: n,
+          aspect_ratio: typeof r.aspect_ratio === "string" ? r.aspect_ratio.slice(0, 10) : "1:1",
+          backend,
+        };
+        if (!window.MASHost || typeof window.MASHost.runToolDraft !== "function") throw new Error("页面还没准备好。");
+        if (window.MASHost.busy()) throw new Error("这一轮还没结束，等它结束再出图（可以先保存）。");
+        const where = backend === "local" ? "本机 ComfyUI" : "第三方出图";
+        const label = `${tool.title}出图（本地提示词，${n} 张，${where}）`;
+        dialog.close();
+        return Boolean(await window.MASHost.runToolDraft(draft.sessionId, `${path}/generate`, payload, label));
+      },
+    });
+  }
+
+  function makeApi(tool, session, draft) {
     const base = `/api/tools/${encodeURIComponent(tool.name)}`;
     const rated = tool.rating === "adult";
+    const extra = draft && tool.panel && tool.panel.local_draft === true && !tool.panel.isolated && tool.builtin === true
+      ? { draft: makeDraft(tool, draft) } : {};
     return Object.freeze({
+      ...extra,
       tool: toolInfo(tool),
       catalog: () => call("GET", `${base}/catalog`),
       preview: (fields) => call("POST", `${base}/preview`, { fields: cleanFields(fields) }),
@@ -189,7 +250,7 @@
     say(text || "这个工具现在不可用。");
   }
 
-  async function open(tool) {
+  async function open(tool, draft) {
     if (active) dialog.close();
     let fresh = tool;
     try {
@@ -208,7 +269,11 @@
     }
     say("");
     body.replaceChildren();
-    const api = makeApi(fresh, session);
+    if (fresh.panel.launcher === "chat" && !draft) {
+      showBlocked(fresh, "这个面板只能从对话里打开。");
+      return;
+    }
+    const api = makeApi(fresh, session, draft);
     active = { tool: fresh, cleanup: null };
     dialog.setAttribute("aria-label", fresh.panel.title || fresh.title);
     dialog.showModal();
@@ -245,6 +310,7 @@
     launchers.replaceChildren();
     for (const tool of tools) {
       if (!tool.panel || tool.unavailable) continue;
+      if (tool.panel.launcher === "chat") continue; // 对话唤起的面板没有侧栏入口
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ghost";

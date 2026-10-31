@@ -147,6 +147,9 @@ _WEB_TOOLS = (
 _MEMORY_TOOLS = ("remember", "recall", "forget")
 _SCHEDULE_TOOLS = ("schedule_create", "schedule_list", "schedule_update", "schedule_delete")
 EVENT_AGENT = "agent"
+# #101：宿主让网页打开某个内置工具的面板（对话唤起）。只带 tool、content_handle、source、label，没有正文。
+EVENT_TOOL_PANEL = "tool.panel"
+PROMPT_PANEL_READY = "已读出图片里的正向提示词，并在本机打开了编辑面板：改好后可以直接「出图」或「保存」。提示词正文只留在本机。"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
 
@@ -1163,16 +1166,16 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
     handle = ""
     if positive:
         try:
-            record = app.sessions.add_content(session_id, positive, "image_prompt")
+            record = app.sessions.add_content(session_id, positive, "image_prompt", origin="prompt_from_image")
         except StoreError:
             current = app.sessions.message_text(session_id, message_id)
             return _error_finish(app, session_id, message_id, run, "provider_error", HUMAN["provider_error"], current)
         handle = record.get("handle") or ""
         result["content_handle"] = handle
         result["next"] = (
-            f"已登记本地提示词句柄 {handle}（来源 {source}）。"
-            "正文只在本机；用户可在「本地资源」里修改后再出图。"
-            "要出图时调用 generate_image，content_handle 填这枚句柄；多张先 plan_images。"
+            f"已登记本地提示词句柄 {handle}（来源 {source}），并已在用户本机打开编辑面板。"
+            "正文只在本机；用户会在面板里编辑，再自己选「出图」或「保存」。"
+            "现在不要调用 generate_image 或其它工具，用一两句话告诉用户面板已打开即可。"
         )
         print(f"prompt_from_image {session_id} {handle} {source} {len(positive)}", file=sys.stderr)
     else:
@@ -1193,20 +1196,21 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         "run_id": run.run_id,
     })
 
+    if handle:
+        # #101：读到了就在本机打开编辑面板（对话唤起，没有侧栏入口）。事件只带工具名、句柄和来源，没有正文。
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_TOOL_PANEL,
+            "tool": "prompt_from_image",
+            "content_handle": handle,
+            "source": source,
+            "label": "编辑提示词",
+            "message_id": message_id,
+            "run_id": run.run_id,
+        })
+
     session = app.sessions.get(session_id)
     # 给模型的后续只有句柄摘要，绝不带 positive 正文
     line = "本地工具结果 prompt_from_image " + json.dumps(result, ensure_ascii=False)
-    # 用户这句话本身要出图时才催 generate_image；只抽提示词时把句柄摘要交回模型即可。
-    if handle and _image_request(user_text):
-        ready_line = _ready_line(handle)
-        total = _plan_total(run)
-        if total:
-            ready_line += f"已有计划：共 {total} 张，还没开始。请逐张调用 generate_image。"
-        return _generate_text_turn(
-            app, session_id, message_id, run, provider, session, user_text,
-            extra=[{"role": "user", "content": ready_line + "\n" + line}],
-            take_tools=("build_skill_page",),
-        )
     messages = _turn_messages(
         app, session_id, session,
         extra=[{"role": "user", "content": line + "\n" + injection.TOOL_RESULT_NOTE,
@@ -1218,8 +1222,10 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         return _fail_status(app, session_id, message_id, run, exc)
     if run.cancel.is_set():
         return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    if isinstance(follow, dict) and follow.get("name") == "generate_image" and handle:
-        return _run_bound(app, session_id, message_id, run, user_text, follow, False)
+    if handle:
+        # 出图由用户在面板里点「出图」发起；模型这时要的任何工具调用都不执行。
+        _complete(app, session_id, message_id, run, reply or PROMPT_PANEL_READY)
+        return "completed"
     if isinstance(follow, dict) and follow.get("name") == "accept_local_content":
         purpose, kind = _accept_args(follow)
         return _continue_after_content(
@@ -1863,6 +1869,104 @@ def start_form_tool(app, session_id: str, name: str, body) -> Run:
     return run
 
 
+# #101：内置工具面板里的本地草稿（ui.panel.local_draft）。正文只在本机网页和宿主之间往返，
+# 从不进对话模型；只认这个工具自己登记（origin）的、仍有效的 image_prompt 文字句柄。
+DRAFT_MAX_CHARS = 8000
+
+
+def _draft_pack(name: str):
+    pack = module_tools.panel_pack(name)
+    spec = module_tools._packs().panel_spec(pack.manifest) if pack is not None else None
+    if pack is None or not pack.builtin or not spec or spec.get("local_draft") is not True \
+            or "ui" not in pack.effective():
+        raise RequestError(404, "not_found", "这个工具没有本地草稿面板。")
+    return pack
+
+
+def _draft_record(app, session_id: str, name: str, handle: str) -> dict:
+    _draft_pack(name)
+    info = app.sessions.content_info(session_id, handle)
+    if not info or info.get("type") != "text" or info.get("purpose") != "image_prompt" \
+            or app.sessions.content_origin(session_id, handle) != name:
+        raise RequestError(404, "not_found", "找不到这份本地草稿。")
+    if info.get("state") != "active":
+        raise RequestError(410, "handle_expired", "这份本地草稿已过期或已作废。")
+    return info
+
+
+def _draft_text(body) -> str:
+    text = body.get("text") if isinstance(body, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise RequestError(400, "invalid_parameter", "提示词不能是空的。")
+    text = text.strip()
+    if len(text) > DRAFT_MAX_CHARS:
+        raise RequestError(400, "invalid_parameter", f"提示词最多 {DRAFT_MAX_CHARS} 个字。")
+    return text
+
+
+def draft_read(app, session_id: str, name: str, handle: str) -> dict:
+    """本机网页读草稿正文（同源、会话属主已核对）。不经模型。"""
+    info = _draft_record(app, session_id, name, handle)
+    return {"handle": handle, "tool": name, "text": app.sessions.content_text(session_id, handle) or "",
+            "size": info.get("size"), "expires_at": info.get("expires_at")}
+
+
+def draft_save(app, session_id: str, name: str, handle: str, body) -> dict:
+    """保存编辑后的正文：原句柄原地更新，回给网页的只有公开字段。"""
+    _draft_record(app, session_id, name, handle)
+    text = _draft_text(body)
+    try:
+        info = app.sessions.update_content(session_id, handle, text, origin=name)
+    except StoreError as exc:
+        raise RequestError(409, "conflict", exc.message) from exc
+    print(f"tool_draft save {session_id} {name} {handle} {len(text)}", file=sys.stderr)
+    return {"ok": True, "handle": handle, "size": info.get("size"), "saved": True}
+
+
+def start_tool_draft(app, session_id: str, name: str, handle: str, body) -> Run:
+    """面板里点「出图」：先保存（带了 text 时），再按这枚本地句柄逐张 generate_image。
+    走和表单工具 privacy=local 相同的宿主出图路径：本机 ComfyUI 直接出；第三方按 remote_local_prompt
+    逐句柄逐主机确认（_remote_consent）。消息里只写“本地提示词”，没有正文。"""
+    pack = _draft_pack(name)
+    _draft_record(app, session_id, name, handle)
+    body = body if isinstance(body, dict) else {}
+    if "text" in body:
+        draft_save(app, session_id, name, handle, body)
+    backend = body.get("backend") or "local"
+    if backend not in ("local", "remote"):
+        raise RequestError(400, "invalid_parameter", "backend 只能是 local 或 remote。")
+    count = body.get("count", 1)
+    if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 20:
+        raise RequestError(400, "invalid_parameter", "张数要是 1 到 20 的整数。")
+    aspect = body.get("aspect_ratio") or "1:1"
+    if aspect not in _ASPECTS:
+        raise RequestError(400, "invalid_parameter", "画幅只能是 1:1、16:9、9:16。")
+    title = module_tools.describe(pack)["title"]
+    where = "本机 ComfyUI" if backend == "local" else "第三方出图"
+    text = f"{title}出图（本地提示词，{count} 张，{where}）"
+    message_id = new_id("m_")
+    run = Run(session_id, message_id)
+    run.agent_mode = "single"
+    try:
+        assistant = app.sessions.append_turn(session_id, text, run.run_id, [])
+    except StoreError as exc:
+        if exc.message == "busy":
+            raise RequestError(409, "busy", "这一会话还在回答，先停止再发送。") from exc
+        raise RequestError(404, "not_found", "找不到这个会话。") from exc
+    run.message_id = assistant["message_id"]
+    app.runs.add(run)
+    run.push({"type": EVENT_RUN_STARTED, "run_id": run.run_id, "message_id": run.message_id, "session_id": session_id})
+    telemetry.record("web.request", trace_id=run.run_id, method="POST",
+                     path=f"/api/sessions/{session_id}/tools/{name}/drafts/{handle}/generate", session_id=session_id,
+                     message_id=run.message_id, modalities=["text"])
+    plan = {"prompt": "", "handle": handle, "privacy": "local", "backend": backend, "count": count,
+            "aspect": aspect, "seed": None, "explicit_backend": "backend" in body, "rating": None,
+            "done_text": "已按编辑后的本地提示词生成 {} 张图。"}
+    plan["done_text"] = plan["done_text"].format(count)
+    threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
+    return run
+
+
 def _character_run(app, session_id, message_id, run, plan) -> None:
     started = time.monotonic()
     status = "failed"
@@ -1870,7 +1974,9 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
     egress.attach(run.run_id, session_id=session_id, listener=_egress_listener(app, session_id, message_id, run),
                   local_bodies=lambda: app.sessions.local_bodies(session_id))
     try:
-        if plan["privacy"] == "local":
+        if plan.get("handle"):
+            handle, source = plan["handle"], "local"  # #101：面板里编辑过的本地草稿，句柄不变
+        elif plan["privacy"] == "local":
             record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
             handle, source = record["handle"], "local"
         else:
@@ -1898,7 +2004,7 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
                   app.sessions.message_text(session_id, message_id))
             status = "cancelled"
         elif done >= plan["count"]:
-            _complete(app, session_id, message_id, run, f"已生成 {done} 张角色图。")
+            _complete(app, session_id, message_id, run, plan.get("done_text") or f"已生成 {done} 张角色图。")
             status = "completed"
         else:
             error = (last or {}).get("error") or {}

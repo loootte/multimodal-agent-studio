@@ -1,0 +1,11 @@
+/* 读图提示词编辑面板（prompt_from_image 的 ui.panel）。规则都挂在 .pfi-panel 下面，不影响聊天页别的部分。 */
+.pfi-panel h2 { margin: 0 0 0.8rem; font-size: 1.25rem; }
+.pfi-panel .hint { color: #666; font-size: 0.85rem; margin: 0.3rem 0; }
+.pfi-panel .note { color: #a33; margin: 0.4rem 0; }
+.pfi-panel .note.ok { color: #2a6b2a; }
+.pfi-panel .note[hidden] { display: none; }
+.pfi-panel .pfi-text { width: 100%; min-height: 10rem; box-sizing: border-box; padding: 0.4rem; font: inherit; resize: vertical; }
+.pfi-panel .pfi-options { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.5rem 0 0.3rem; align-items: center; }
+.pfi-panel .pfi-options label { display: flex; flex-direction: column; gap: 0.2rem; margin: 0; }
+.pfi-panel .pfi-options input[type=number] { width: 4.5rem; }
+.pfi-panel .dialog-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; margin-top: 0.4rem; }

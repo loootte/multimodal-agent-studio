@@ -1091,9 +1091,11 @@ class SessionStore:
             self._write(session)
             return _public_content(record)
 
-    def add_content(self, session_id: str, text: str, purpose: str = "keep", memory_id: str | None = None) -> dict:
-        """对话框提交的正文。同一会话里相同正文和用途复用句柄。
-        memory_id（14.D #81）：从长期记忆重新签发时带上，删记忆时据此作废这枚句柄（复用已有句柄时不打标记）。"""
+    def add_content(self, session_id: str, text: str, purpose: str = "keep", memory_id: str | None = None,
+                    origin: str | None = None) -> dict:
+        """对话框提交的正文。同一会话里相同正文、用途和来源复用句柄。
+        memory_id（14.D #81）：从长期记忆重新签发时带上，删记忆时据此作废这枚句柄（复用已有句柄时不打标记）。
+        origin（#101）：哪个内置工具登记的（如 prompt_from_image）；只有这样的句柄能在该工具的面板里编辑。"""
         check_id(session_id, "会话")
         purpose = clean_purpose(purpose)
         with self._lock:
@@ -1106,6 +1108,7 @@ class SessionStore:
                     and _kind_of(item) == "text"
                     and item.get("purpose") == purpose
                     and item.get("text") == text
+                    and item.get("origin") == origin
                 ):
                     if self._renew_if_dead(session, item, session_id):
                         self._write(session)
@@ -1123,6 +1126,8 @@ class SessionStore:
             }
             if memory_id:
                 record["memory_id"] = memory_id
+            if origin:
+                record["origin"] = origin
             _scope(record, session_id)
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
@@ -1477,6 +1482,41 @@ class SessionStore:
         text = item.get("text")
         return text if isinstance(text, str) else None
 
+    def content_origin(self, session_id: str, handle: str) -> str | None:
+        """#101：句柄是哪个内置工具登记的（没有就是 None）。不含正文。"""
+        item = self._find_content(session_id, handle)
+        origin = item.get("origin") if isinstance(item, dict) else None
+        return origin if isinstance(origin, str) else None
+
+    def update_content(self, session_id: str, handle: str, text: str, *, origin: str) -> dict:
+        """#101：在原句柄上改正文（用户在本机面板里编辑）。只改 origin 相同、仍有效的文字句柄；
+        句柄不变，后续出图按新正文。返回公开字段，没有正文。"""
+        check_id(session_id, "会话")
+        if not isinstance(text, str) or not text.strip():
+            raise StoreError("内容是空的。")
+        with self._lock:
+            session = self._load_path(self._path(session_id))
+            if session is None:
+                raise StoreError("找不到这个会话。")
+            for item in session.get("contents") or []:
+                if not (isinstance(item, dict) and item.get("handle") == handle):
+                    continue
+                if _kind_of(item) != "text" or item.get("origin") != origin or handle_state(item) != "active":
+                    raise StoreError("这个句柄不能在这里编辑。")
+                old = item.get("text")
+                if isinstance(old, str) and old and old != text:
+                    # 改之前的正文也是本机内容：留下指纹（不留正文），出口检查照样拦。
+                    prior = [x for x in item.get("prior_fingerprints") or [] if isinstance(x, str)]
+                    prior.append(hashlib.sha256(old.encode("utf-8")).hexdigest())
+                    item["prior_fingerprints"] = prior[-20:]
+                item["text"] = text
+                item["size"] = len(text.encode("utf-8"))
+                item["updated_at"] = _now()
+                session["updated_at"] = _now()
+                self._write(session)
+                return _public_content(item)
+            raise StoreError("找不到这个句柄。")
+
     def content_bytes(self, session_id: str, handle: str) -> bytes | None:
         item = self._find_content(session_id, handle)
         if item is None or _kind_of(item) != "file":
@@ -1626,6 +1666,7 @@ class SessionStore:
             text = item.get("text")
             if isinstance(text, str) and text:
                 found.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+            found.extend(x for x in item.get("prior_fingerprints") or [] if isinstance(x, str) and x)
         return found
 
     def _find_content(self, session_id: str, handle: str) -> dict | None:

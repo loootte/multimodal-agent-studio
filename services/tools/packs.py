@@ -51,6 +51,8 @@ PERMISSIONS = ("read_local_content", "network", "write_files", "send_local_to_mo
 PANEL_FILE = re.compile(r"^ui/[A-Za-z0-9][A-Za-z0-9_-]{0,47}\.(js|css)$")
 PANEL_MAX_BYTES = 256 * 1024
 PANEL_MOUNTS = ("dialog",)
+# ui.panel.launcher：sidebar（默认，侧栏入口）或 chat（#101：没有侧栏入口，只由对话里宿主发出的 tool.panel 事件打开）。
+PANEL_LAUNCHERS = ("sidebar", "chat")
 CONFIRM = ("always", "never", "by_args")
 FIELD_TYPES = ("string", "int", "enum", "path", "secret")
 BLOCKED_EXTERNAL = {"prompt", "text", "body", "content", "bytes", "path", "filename"}
@@ -81,7 +83,7 @@ HOST_TOOLS = {
     "stage_prompt": frozenset(),
     "character_image": frozenset(),
     # #101：从上传图读正向提示词，登记成本地句柄；选图对话框由宿主弹出，结果只回句柄+来源。
-    "prompt_from_image": frozenset({"read_local_content", "write_files"}),
+    "prompt_from_image": frozenset({"read_local_content", "write_files", "ui"}),
     # 14.D #81：长期记忆。recall 会在当前会话签发新句柄（写会话记录），所以也要 write_files。
     "remember": frozenset({"read_local_content", "write_files"}),
     "recall": frozenset({"read_local_content", "write_files"}),
@@ -343,8 +345,9 @@ def _ui_problems(ui, kind, perms=None) -> list[str]:
     wants_ui = isinstance(perms, dict) and perms.get("ui") is True
     if ui is None:
         return ["permissions.ui 只给声明了 ui.panel 的工具。"] if wants_ui else []
-    if kind != "module":
-        return ["ui 只能用在 entry.kind=module 的工具上。"]
+    if kind != "module" and not (kind == "host" and isinstance(ui, dict) and set(ui) <= {"title", "panel"}):
+        # #101：宿主工具（内置名单）只能带对话唤起的面板，不能有表单。
+        return ["ui 只能用在 entry.kind=module 的工具上（宿主工具只能有 title 和 panel）。"]
     if not isinstance(ui, dict) or set(ui) - {"form", "preview", "title", "run_label", "panel"}:
         return ["ui 只能有 form、preview、title、run_label、panel。"]
     out = _panel_problems(ui.get("panel"))
@@ -364,8 +367,9 @@ def _ui_problems(ui, kind, perms=None) -> list[str]:
 def _panel_problems(panel) -> list[str]:
     if panel is None:
         return []
-    if not isinstance(panel, dict) or set(panel) - {"script", "style", "title", "mount"} or "script" not in panel:
-        return ["ui.panel 只能有 script（必填）、style、title、mount。"]
+    if not isinstance(panel, dict) or set(panel) - {"script", "style", "title", "mount", "launcher", "local_draft"} \
+            or "script" not in panel:
+        return ["ui.panel 只能有 script（必填）、style、title、mount、launcher、local_draft。"]
     out = []
     for key, suffix in (("script", ".js"), ("style", ".css")):
         if key in panel and (not isinstance(panel[key], str) or not PANEL_FILE.match(panel[key])
@@ -375,6 +379,10 @@ def _panel_problems(panel) -> list[str]:
         out.append("ui.panel.title 必须是 1-40 字的文字。")
     if panel.get("mount", "dialog") not in PANEL_MOUNTS:
         out.append(f"ui.panel.mount 只能是 {'、'.join(PANEL_MOUNTS)}。")
+    if panel.get("launcher", "sidebar") not in PANEL_LAUNCHERS:
+        out.append(f"ui.panel.launcher 只能是 {'、'.join(PANEL_LAUNCHERS)}。")
+    if "local_draft" in panel and not isinstance(panel["local_draft"], bool):
+        out.append("ui.panel.local_draft 必须是 true/false。")
     return out
 
 

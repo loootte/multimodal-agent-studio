@@ -862,6 +862,22 @@
       "fake_only": true,
       "case": "extract_units",
       "marker": "LOCAL-PROMPT-FROM-IMAGE-9f2c"
+    },
+    {
+      "id": "security.prompt_draft_edit_save",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "draft_save",
+      "marker": "LOCAL-PROMPT-EDITED-71c3"
+    },
+    {
+      "id": "security.prompt_draft_edit_generate",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "draft_generate",
+      "marker": "LOCAL-PROMPT-EDITED2-0b9d"
     }
   ]
 }

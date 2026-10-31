@@ -192,7 +192,21 @@ async function runFormTool(tool, body, label) {
   await runTurn(`/api/sessions/${state.currentId}/tools/${encodeURIComponent(tool)}/run`, body, label, []);
   return true;
 }
-window.MASHost = Object.freeze({ runFormTool });
+// #101：对话唤起的工具面板（tool.panel 事件）里点「出图」。url 由 panels.js 按 句柄 拼好，只认当前会话。
+async function runToolDraft(sessionId, url, body, label) {
+  if (state.sending || !sessionId || sessionId !== state.currentId) return false;
+  if (typeof url !== "string" || !url.startsWith(`/api/sessions/${sessionId}/tools/`)) return false;
+  await runTurn(url, body, label, []);
+  return true;
+}
+
+// 按 tool.panel 事件打开面板；页面只转交工具名和句柄，不认识具体工具。
+function openToolPanel(event) {
+  if (!event || !window.MASPanels || typeof window.MASPanels.openFor !== "function") return;
+  window.MASPanels.openFor(String(event.tool || ""), { handle: event.content_handle, session_id: state.currentId });
+}
+
+window.MASHost = Object.freeze({ runFormTool, runToolDraft, busy: () => Boolean(state.sending) });
 
 async function runTurn(url, body, userText, attachments) {
   state.stopped = false;
@@ -298,7 +312,8 @@ function onEvent(event) {
     event.type === "agent" ||
     event.type === "planning.todo" ||
     event.type === "planning.goal" ||
-    event.type === "plan.proposed"
+    event.type === "plan.proposed" ||
+    event.type === "tool.panel"
   ) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
     if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
@@ -310,6 +325,7 @@ function onEvent(event) {
       document.querySelector("#live").textContent = event.media === "html" ? "已收到等距图" : "已收到图片";
     }
     if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
+    if (event.type === "tool.panel" && !state.stopped) openToolPanel(event); // 只在实时事件里自动打开，回放不弹
     if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
   } else if (event.type === "message.completed") {
     assistant.text = event.text || "";
@@ -968,6 +984,14 @@ function bubble(message) {
   if (planning) item.append(planning);
   const calls = events.filter((entry) => entry.type === "tool_call");
   if (calls.length) item.append(toolTimeline(message, calls));
+  for (const panelEvent of events.filter((entry) => entry.type === "tool.panel")) {
+    const reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.className = "ghost tool-panel-reopen";
+    reopen.textContent = String(panelEvent.label || "打开面板").slice(0, 40);
+    reopen.addEventListener("click", () => openToolPanel(panelEvent));
+    item.append(reopen);
+  }
   // 只显示仍在进行中的进度：其后已有成片或新的工具调用时，旧进度不再显示。
   const latest = [...events].reverse().find((entry) => ["progress", "artifact", "tool_call"].includes(entry.type));
   const progress = latest && latest.type === "progress" ? latest : null;

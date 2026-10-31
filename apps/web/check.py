@@ -3880,7 +3880,7 @@ def _image_cases(base: str, provider, directory: str, app=None) -> None:
         _local_file(base, provider, comfy.box, directory)
         _local_forget_file(base, provider, comfy.box, directory)
         _local_file_image(base, provider, comfy.box)
-        _prompt_from_image_case(base, provider, comfy.box, directory)
+        _prompt_from_image_case(base, provider, comfy.box, directory, app)
         _egress_file(provider)
         _egress_http_case(base, provider, directory)
         _multi_image_case(base, provider, comfy.box, directory, workflow)
@@ -6068,7 +6068,7 @@ def _prompt_extract_units() -> None:
     print("prompt_from_image extract units ok")
 
 
-def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str) -> None:
+def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str, app=None) -> None:
     """#101：选图 → 抽出正向提示词 → 登记 image_prompt 句柄；事件与供应商请求都没有正文；可再出图。"""
     _prompt_extract_units()
     provider.mode = "promptimage"
@@ -6128,7 +6128,16 @@ def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str
     for item in provider.requests[sent2:]:
         if "no prompt here" in _provider_blob(item):
             fail("无元数据图的 Comment 进了供应商")
-    # 有元数据 + 要出图：句柄出图，正文仍不外泄
+    # 读到提示词就推 tool.panel（只带工具名/句柄/来源），没有正文
+    panel_ev = next((e for e in events if e.get("type") == "tool.panel"), None)
+    if not panel_ev or panel_ev.get("tool") != "prompt_from_image" or panel_ev.get("content_handle") != handle \
+            or panel_ev.get("source") != "a1111_parameters":
+        fail(f"读到提示词后没有打开本机编辑面板：{panel_ev}")
+    if set(panel_ev) - {"type", "tool", "content_handle", "source", "label", "message_id", "run_id"}:
+        fail(f"tool.panel 事件多了字段：{sorted(panel_ev)}")
+    if any(e.get("type") == "tool.panel" for e in events2):
+        fail("没读到提示词也打开了编辑面板")
+    # 有元数据 + 嘴上要出图：只打开面板，出图等用户在面板里点（模型要的 generate_image 不执行）
     provider.mode = "promptimage"
     session3 = _fresh_session(base)
     secret3 = "LOCAL-PROMPT-GEN-4a1e red fox under neon rain"
@@ -6139,19 +6148,135 @@ def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str
     before3 = len(box.prompts)
     sent3 = len(provider.requests)
     events3 = _speak_file(base, session3, "从这张图读出提示词并生成一张图。", png3, "image/png", "comfy.png")
-    if len(box.prompts) != before3 + 1:
-        fail("读图后出图没有提交 ComfyUI")
+    if len(box.prompts) != before3:
+        fail("读图后没等用户在面板里确认就提交了 ComfyUI")
+    if events3[-1].get("type") != "message.completed":
+        fail(f"读图（要出图）没有正常结束：{events3[-1]}")
+    panel3 = next((e for e in events3 if e.get("type") == "tool.panel"), None)
+    if not panel3 or not str(panel3.get("content_handle") or "").startswith("c_"):
+        fail("读图（要出图）没有打开编辑面板")
+    handle3 = panel3["content_handle"]
     if secret3 in json.dumps(events3, ensure_ascii=False):
-        fail("出图路径事件里出现了提示词正文")
-    for item in provider.requests[sent3:]:
-        if secret3 in _provider_blob(item):
-            fail("出图路径把嵌入提示词正文发给了供应商")
-    # 提交进 Comfy 的应是 secret3（经句柄）
-    last_prompt = box.prompts[-1] if box.prompts else {}
-    # box.prompts 结构因夹具而异；至少确认调用次数 + 成片/完成
-    if events3[-1].get("type") not in TERMINAL:
-        fail("读图出图没有结束事件")
+        fail("读图路径事件里出现了提示词正文")
+    _prompt_draft_case(base, provider, box, directory, session3, handle3, secret3, sent3, app)
     print("prompt_from_image cases ok")
+
+
+def _jreq(method: str, url: str, payload: dict | None = None):
+    status, raw = request(method, url, payload)
+    try:
+        return status, json.loads(raw) if raw else {}
+    except ValueError:
+        return status, {"raw": raw}
+
+
+def _prompt_draft_setup(base: str, provider, box: ComfyState):
+    """评测用：选一张带 ComfyUI 提示词的图，读出并打开面板，返回 (会话, 句柄, 原文, 读图前的供应商请求数)。"""
+    provider.mode = "promptimage"
+    session_id = _fresh_session(base)
+    secret = "LOCAL-PROMPT-DRAFT-5e7a amber fox in tall grass, golden hour"
+    png = _png_with_text("prompt", json.dumps({"1": {"class_type": "CLIPTextEncode", "inputs": {"text": secret}}}))
+    sent = len(provider.requests)
+    events = _speak_file(base, session_id, "从这张图读出提示词。", png, "image/png", "draft.png")
+    panel = next((e for e in events if e.get("type") == "tool.panel"), None)
+    if not panel or not str(panel.get("content_handle") or "").startswith("c_"):
+        fail("读图后没有打开编辑面板")
+    return session_id, panel["content_handle"], secret, sent
+
+
+def _prompt_draft_case(base: str, provider, box: ComfyState, directory: str, session_id: str, handle: str,
+                       secret: str, sent: int, app=None, steps=("save", "generate")) -> None:
+    """#101：面板里编辑 → 保存 / 出图。正文只在本机网页和宿主之间往返，任何供应商请求里都没有（原文和改后的都没有）。"""
+    draft = f"/api/sessions/{session_id}/tools/prompt_from_image/drafts/{handle}"
+    edited = "LOCAL-PROMPT-EDITED-71c3 silver fox on a snowy ridge, dawn light"
+    edited2 = "LOCAL-PROMPT-EDITED2-0b9d crimson fox, ink wash painting"
+    # 面板入口：form_tools 里有它（launcher=chat、local_draft），侧栏由 panels.js 跳过；面板文件同源可取、不联网
+    status, tools = _jreq("GET", base + "/api/tools")
+    item = next((t for t in (tools or {}).get("form_tools") or [] if t.get("name") == "prompt_from_image"), None)
+    panel = (item or {}).get("panel") or {}
+    if status != 200 or panel.get("launcher") != "chat" or panel.get("local_draft") is not True or panel.get("isolated"):
+        fail(f"prompt_from_image 的对话唤起面板没登记好：{item}")
+    for other in (tools or {}).get("form_tools") or []:
+        if other.get("name") != "prompt_from_image" and ((other.get("panel") or {}).get("local_draft")):
+            fail(f"别的工具也拿到了本地草稿接口：{other.get('name')}")
+    with urllib.request.urlopen(base + "/api/tools/prompt_from_image/ui/panel.js", timeout=5) as response:
+        script = response.read().decode("utf-8")
+    if "MASPanels.define" not in script or "fetch(" in script or "/api/" in script or "innerHTML" in script:
+        fail("读图提示词面板脚本不合规（要用 MASPanels.define，不能自己联网或写 innerHTML）")
+    # 读草稿：拿到原文（本机网页才看得到）
+    status, body = _jreq("GET", base + draft)
+    if status != 200 or body.get("text") != secret or body.get("handle") != handle:
+        fail(f"面板读不到本地提示词：{status} {body}")
+    # 不是这个工具登记的句柄、别的工具名、乱写的句柄都不给
+    keep = app.sessions.add_content(session_id, "KEEP-NOT-A-DRAFT-77", "image_prompt")["handle"] if app else f"c_{'1' * 32}"
+    for path in (f"/api/sessions/{session_id}/tools/prompt_from_image/drafts/{keep}",
+                 f"/api/sessions/{session_id}/tools/character_image/drafts/{handle}",
+                 f"/api/sessions/{session_id}/tools/prompt_from_image/drafts/c_{'0' * 32}"):
+        status, body = _jreq("GET", base + path)
+        if status != 404:
+            fail(f"本地草稿接口没有拒绝不相干的句柄：{path} {status}")
+    status, body = _jreq("POST", base + draft, {"text": "   "})
+    if status != 400:
+        fail(f"空提示词也保存了：{status}")
+    if "save" in steps:
+        _prompt_draft_save(base, directory, session_id, handle, draft, edited)
+    if "generate" in steps:
+        _prompt_draft_generate(base, provider, box, directory, session_id, handle, draft, edited2)
+    for item in provider.requests[sent:]:
+        raw = _provider_blob(item)
+        for text in (secret, edited, edited2):
+            if text in raw:
+                fail("本地提示词（原文或编辑后的）进入了供应商请求")
+    # 再问模型一句：历史里也没有正文
+    sent4 = len(provider.requests)
+    provider.mode = "ok"
+    read_sse(site_port(base), f"/api/sessions/{session_id}/messages", {"text": "刚才那张图怎么样？"}, timeout=12)
+    for item in provider.requests[sent4:]:
+        raw = _provider_blob(item)
+        for text in (secret, edited, edited2):
+            if text in raw:
+                fail("编辑过的本地提示词进入了后续对话历史")
+    session = _jreq("GET", base + f"/api/sessions/{session_id}")[1]
+    view = json.dumps(session, ensure_ascii=False)
+    for text in (secret, edited, edited2):
+        if text in view:
+            fail("会话视图里出现了本地提示词正文")
+    print(f"prompt_from_image draft {'/'.join(steps)} ok")
+
+
+def _prompt_draft_save(base: str, directory: str, session_id: str, handle: str, draft: str, edited: str) -> None:
+    """编辑 + 保存：原句柄原地更新。"""
+    status, body = _jreq("POST", base + draft, {"text": edited})
+    if status != 200 or body.get("ok") is not True or body.get("handle") != handle or "text" in body:
+        fail(f"保存编辑后的提示词失败：{status} {body}")
+    matches = [c for c in _saved_contents(directory, session_id) if c.get("handle") == handle]
+    if len(matches) != 1 or matches[0].get("text") != edited or matches[0].get("origin") != "prompt_from_image":
+        fail("编辑后的提示词没有原句柄保存")
+    status, body = _jreq("GET", base + draft)
+    if status != 200 or body.get("text") != edited:
+        fail("保存后读回的不是编辑后的正文")
+
+
+def _prompt_draft_generate(base: str, provider, box: ComfyState, directory: str, session_id: str, handle: str,
+                           draft: str, edited2: str) -> None:
+    """编辑 + 出图：先保存再按句柄出图，走宿主出图路径；不经对话模型。"""
+    after_save = len(provider.requests)
+    before = len(box.prompts)
+    status, _raw, events = read_sse(site_port(base), draft + "/generate",
+                                    {"text": edited2, "count": 1, "aspect_ratio": "1:1", "backend": "local"}, timeout=12)
+    if status != 200 or not events or events[-1].get("type") != "message.completed":
+        fail(f"面板出图没有正常结束：{status} {events[-1:] if events else events}")
+    if len(box.prompts) != before + 1 or edited2 not in json.dumps(box.prompts[-1], ensure_ascii=False):
+        fail("面板出图没有按编辑后的提示词提交本机 ComfyUI")
+    if not any(e.get("type") == "artifact" for e in events):
+        fail("面板出图没有成片")
+    if len(provider.requests) != after_save:
+        fail("面板出图经过了对话模型")
+    if edited2 in json.dumps(events, ensure_ascii=False):
+        fail("面板出图的事件里出现了提示词正文")
+    matches = [c for c in _saved_contents(directory, session_id) if c.get("handle") == handle]
+    if not matches or matches[0].get("text") != edited2:
+        fail("出图前没有把编辑后的提示词保存到原句柄")
 
 
 def _speak_file(base: str, session_id: str, text: str, data: bytes, media_type: str, filename: str):
@@ -7336,9 +7461,16 @@ def _panel_static_clean(base: str) -> None:
         fail("工具面板在授权失败时没有关闭，或仍然去挂载被拒绝的面板")
     if "session.confirmed" not in host or "local_only" not in host:
         fail("面板宿主没有自己补分级确认、强制只能本机")
+    # #101：launcher=chat 的面板不进侧栏；本地草稿接口只给内置、非 iframe 的面板，iframe 转发白名单里没有 draft
+    frame_calls = re.search(r"FRAME_CALLS = new Set\(\[([^\]]*)\]\)", host)
+    if 'tool.panel.launcher === "chat"' not in host or "openFor" not in host or not frame_calls \
+            or "draft" in frame_calls.group(1) or "!tool.panel.isolated && tool.builtin === true" not in host:
+        fail("panels.js 没有按 launcher 跳过对话唤起的面板，或把本地草稿接口给了 iframe 面板")
     script = request("GET", base + "/static/app.js")[1]
     if "MASHost" not in script or "runFormTool" not in script:
         fail("app.js 没有给面板用的通用出图入口")
+    if '"tool.panel"' not in script or "runToolDraft" not in script or "prompt_from_image" in script:
+        fail("app.js 没有通用地处理 tool.panel 事件（也不该认识具体工具）")
     print("tool ui static clean ok")
 
 
@@ -7747,8 +7879,12 @@ def _pack_discover_units() -> None:
 
     packs = _packs_module()
     listed = {item["name"]: item for item in module_tools.form_tools()}
-    if set(listed) != {"character_image"} or listed["character_image"]["rating"] != "general" \
-            or not listed["character_image"]["builtin"]:
+    # #101：prompt_from_image 是内置宿主工具，只带对话唤起的面板（launcher=chat，没有表单、没有侧栏入口）。
+    chat_only = listed.get("prompt_from_image") or {}
+    if set(listed) != {"character_image", "prompt_from_image"} or listed["character_image"]["rating"] != "general" \
+            or not listed["character_image"]["builtin"] or chat_only.get("form") \
+            or (chat_only.get("panel") or {}).get("launcher") != "chat" \
+            or (listed["character_image"].get("panel") or {}).get("launcher") != "sidebar":
         fail(f"默认只该有内置的 character_image 表单工具：{listed}")
     builtin_rated = [p.name for p in packs.discover() if p.builtin and packs.rating(p.manifest) == "adult"]
     if builtin_rated or os.path.exists(os.path.join(_BUILTIN_CHARACTER, "presets_adult.json")):
@@ -7757,7 +7893,7 @@ def _pack_discover_units() -> None:
         fail("apps/web/local_packs.py 应已删除（工具代码要在工具目录里）")
     with _Tools("rated_fixture", "general_fixture", "naive_rated") as root:
         listed = {item["name"]: item for item in module_tools.form_tools()}
-        if set(listed) != {"character_image", "rated_fixture", "general_fixture", "naive_rated"}:
+        if set(listed) != {"character_image", "prompt_from_image", "rated_fixture", "general_fixture", "naive_rated"}:
             fail(f"装上的表单工具没找全：{sorted(listed)}")
         rated = listed["rated_fixture"]
         if rated["rating"] != "adult" or not rated.get("local_only") or rated.get("min_age") != 21 \

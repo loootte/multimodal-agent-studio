@@ -44,6 +44,9 @@ from services.gateway import egress
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_CHARACTER = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/character$")
 _SESSION_TOOL_RUN = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/tools/([a-z][a-z0-9_]{1,47})/run$")
+# #101：内置工具面板的本地草稿（ui.panel.local_draft）。GET 读正文、POST 保存、/generate 出图（SSE）。
+_SESSION_TOOL_DRAFT = re.compile(
+    r"^/api/sessions/(s_[0-9a-f]{32})/tools/([a-z][a-z0-9_]{1,47})/drafts/(c_[0-9a-f]{32})(/generate)?$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
@@ -951,6 +954,22 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             session = _owned_session(app, matched.group(1))
             run = chat_run.start_form_tool(app, session["session_id"], matched.group(2), _read_json(handler))
             _send_sse(handler, run, 0)
+            return
+        matched = _SESSION_TOOL_DRAFT.fullmatch(path)
+        if matched and method in ("GET", "POST"):
+            session = _owned_session(app, matched.group(1))
+            sid, name, handle = session["session_id"], matched.group(2), matched.group(3)
+            if matched.group(4):
+                if method != "POST":
+                    _send_json(handler, 405, {"code": "method_not_allowed", "message": "只能 POST。"})
+                    return
+                run = chat_run.start_tool_draft(app, sid, name, handle, _read_json(handler))
+                _send_sse(handler, run, 0)
+                return
+            if method == "GET":
+                _send_json(handler, 200, chat_run.draft_read(app, sid, name, handle))
+            else:
+                _send_json(handler, 200, chat_run.draft_save(app, sid, name, handle, _read_json(handler)))
             return
         if path == "/api/sessions" and method == "GET":
             user = app.identity.current()

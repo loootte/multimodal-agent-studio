@@ -112,7 +112,9 @@
         "runtime.schedule_overlap_missed": true,
         "security.schedule_model_create_confirm": true,
         "security.prompt_from_image_no_body": true,
-        "runtime.prompt_from_image_extract": true
+        "runtime.prompt_from_image_extract": true,
+        "security.prompt_draft_edit_save": true,
+        "security.prompt_draft_edit_generate": true
       }
     }
   }

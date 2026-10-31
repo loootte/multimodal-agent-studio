@@ -2617,7 +2617,14 @@ def run_prompt_from_image(h: Harness, task: dict, live: bool) -> dict:
         if case == "extract_units":
             check._prompt_extract_units()
             return {"case": case}
-        check._prompt_from_image_case(h.base, h.provider, h.box, h.directory)
+        if case in ("draft_save", "draft_generate"):
+            # 读图后在本机面板里编辑 → 保存 / 出图；原文和改后的正文都不进任何供应商请求
+            session_id, handle, secret, sent = check._prompt_draft_setup(h.base, h.provider, h.box)
+            step = "save" if case == "draft_save" else "generate"
+            check._prompt_draft_case(h.base, h.provider, h.box, h.directory, session_id, handle, secret, sent,
+                                     h.app, steps=(step,))
+            return {"case": case, "marker": task.get("marker")}
+        check._prompt_from_image_case(h.base, h.provider, h.box, h.directory, h.app)
     except SystemExit as exc:
         raise Failed(str(exc) or "prompt_from_image 检查失败") from exc
     return {"case": case, "marker": task.get("marker")}
