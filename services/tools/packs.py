@@ -84,10 +84,18 @@ HOST_TOOLS = {
     "remember": frozenset({"read_local_content", "write_files"}),
     "recall": frozenset({"read_local_content", "write_files"}),
     "forget": frozenset({"read_local_content", "write_files"}),
+    # 14.E #82：定时任务。任务存在本机加密存储里；schedule_list 只回编号、名字、时间表和状态，没有正文和句柄。
+    "schedule_create": frozenset({"read_local_content", "write_files"}),
+    "schedule_list": frozenset({"read_local_content"}),
+    "schedule_update": frozenset({"read_local_content", "write_files"}),
+    "schedule_delete": frozenset({"read_local_content", "write_files"}),
 }
 # 14.D #81：长期记忆工具默认不给模型。只有网页宿主在记忆打开时显式放进请求（registry.external_contracts(include=...)）。
 MEMORY_TOOLS = frozenset({"remember", "recall", "forget"})
 MEMORY_WRITES = frozenset({"remember", "forget"})  # 每次写入都要用户确认，不记进「本轮已确认」
+# 14.E #82：定时任务工具同样默认不给模型，只在调度打开、单 Agent 文字轮时由网页宿主放进 include。
+SCHEDULE_TOOLS = frozenset({"schedule_create", "schedule_list", "schedule_update", "schedule_delete"})
+SCHEDULE_WRITES = frozenset({"schedule_create", "schedule_update", "schedule_delete"})  # 每次都确认
 BUILTIN_PYTHON = {
     "generate_image": frozenset({"network", "read_local_content", "write_files"}),
     "generate_video": frozenset({"network", "read_local_content", "write_files"}),
@@ -97,7 +105,7 @@ BUILTIN_PYTHON = {
 BUILTIN_ENTRY = "tool.py"  # 内置 python 工具的入口：只能是自己工具目录里的 tool.py（#89）
 # 12.E #61：只回句柄和元数据、不联网的内置读取工具。它们读本地内容但结果里没有正文，可以 confirm=never；
 # 其余凡是声明了 network 或 read_local_content 的工具（内置和第三方一样）都必须 confirm=always，校验时就拒绝。
-HANDLE_ONLY_READERS = frozenset({"list_local_content", "retrieve_local", "recall"})
+HANDLE_ONLY_READERS = frozenset({"list_local_content", "retrieve_local", "recall", "schedule_list"})
 SENSITIVE_CONFIRM_PROBLEM = "联网或读本地内容的工具必须 confirm=always（不能 never / by_args）。"
 GRANT_SCHEMA = "mas.grant/2"
 # 每种权限给人看的说明（安装前的权限审阅界面显示这些）。
@@ -126,8 +134,9 @@ _modules: dict = {}
 
 
 def gated_out(name: str, include=()) -> bool:
-    """这个工具现在该不该对模型隐藏（14.D：三个记忆工具默认隐藏，宿主按记忆设置显式放进 include 才出现）。"""
-    return name in MEMORY_TOOLS and name not in include
+    """这个工具现在该不该对模型隐藏（14.D：三个记忆工具默认隐藏，宿主按记忆设置显式放进 include 才出现；
+    14.E：四个 schedule_* 同理，按调度总开关）。"""
+    return (name in MEMORY_TOOLS or name in SCHEDULE_TOOLS) and name not in include
 
 
 class PackError(Exception):

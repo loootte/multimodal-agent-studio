@@ -54,6 +54,8 @@
 - 定时和后台任务不降低任何确认等级：`confirm: always` 和 `acknowledge=high_risk` 永远不能预授权，遇到就挂起为「待确认」。
 - 每个任务有步数、时间、token、每日次数上限。
 
+> 实现说明（14.E #82，ADR 状态不变）：见 [docs/scheduler.md](../scheduler.md)。比本节更严的地方：到点从不直接运行，每次都进「待开始」队列，要用户点「开始本次」，超时记 `confirm_timeout`；错过不补（用户勾「补跑」才在启动后补一次）；总开关默认关。按用户决定（方案 C）加了一个窄例外：用户在面板经宿主确认卡、可以给单个出图任务开「常驻授权」，只免「内置 `generate_image` → 本机（loopback）ComfyUI、句柄就是该任务这一轮登记的那枚、不超过任务张数」的确认，绑定任务 id + `scheduled` 句柄 + ComfyUI 主机，改内容 / 过期 / 重新授权 / 删除 / 换主机即作废；模型不能设置；`acknowledge=high_risk`（远端出图）和其它 `confirm: always` 的调用仍然每次确认。
+
 ### 浏览器
 
 - 只作为 MCP 沙箱工具包，默认关闭；禁止 `file://`、本机和局域网地址；往网页输入前过 `local_fingerprint`。

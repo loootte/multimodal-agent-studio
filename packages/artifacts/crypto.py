@@ -107,7 +107,7 @@ def key_id_of(master: bytes) -> str:
     return hmac.new(master, b"mas/key-id", hashlib.sha256).hexdigest()[:16]
 
 
-SCOPES = ("session", "memory")  # 派生密钥的作用域（14.D #81 加 memory）
+SCOPES = ("session", "memory", "schedule")  # 派生密钥的作用域（14.D #81 加 memory，14.E #82 加 schedule）
 
 
 class Cipher:

@@ -28,6 +28,7 @@
 - 每个会话一把密钥：`HKDF-SHA256(主密钥, salt="mas.storage/1", info="mas/session/<session_id>")`，只在内存里。
 - 会话文件：`{"schema":"mas.enc/1","alg","key_id","scope":"session","session_id","nonce","ct"}`，头部整体作 AAD——挪到别的会话名下、换主密钥、改一个字节都解不开。
 - 长期记忆（14.D，[long-term-memory.md](long-term-memory.md)）：`data/memory/memory.json` 用同一种信封，`scope` 为 `memory`、`session_id` 为 `store`，密钥是 `HKDF(主密钥, "mas/memory/store")`，和任何会话密钥都不同；会话密文挪成记忆文件（或反过来）解不开。
+- 定时任务（14.E，[scheduler.md](scheduler.md)）：`data/schedules/schedules.json` 同一种信封，`scope` 为 `schedule`、`session_id` 为 `store`，密钥 `HKDF(主密钥, "mas/schedule/store")`。
 - 字节：`MASE\x01 | nonce | 密文`，AAD 绑 `key_id | session_id | sha256`，解开后再核一遍 sha256；文件名是会话密钥上的 HMAC，不暴露明文的 sha256（别人不能「猜一张图 → 比哈希」）。加密时不跨会话去重。
 - `key_id`：主密钥的 HMAC 指纹前 16 位，用来核对数据目录和密钥是否配套，不可逆。
 

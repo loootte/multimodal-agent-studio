@@ -789,6 +789,62 @@
       "fake_only": true,
       "case": "preference_cross_session",
       "marker": "LOCAL-MEM-a2b5"
+    },
+    {
+      "id": "runtime.schedule_off_no_tools",
+      "category": "runtime",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "off_no_tools",
+      "marker": "LOCAL-SCHED-0a1"
+    },
+    {
+      "id": "security.schedule_no_auto_confirm",
+      "category": "security",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "no_auto_confirm",
+      "marker": "LOCAL-SCHED-7c2"
+    },
+    {
+      "id": "security.schedule_handle_expiry",
+      "category": "security",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "handle_expiry",
+      "marker": "LOCAL-SCHED-e93"
+    },
+    {
+      "id": "security.schedule_cross_job_handle",
+      "category": "security",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "cross_job_handle",
+      "marker": "LOCAL-SCHED-b44"
+    },
+    {
+      "id": "runtime.schedule_budget_stop",
+      "category": "runtime",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "budget_stop",
+      "marker": "LOCAL-SCHED-5d5"
+    },
+    {
+      "id": "runtime.schedule_overlap_missed",
+      "category": "runtime",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "overlap_missed",
+      "marker": "LOCAL-SCHED-f16"
+    },
+    {
+      "id": "security.schedule_model_create_confirm",
+      "category": "security",
+      "kind": "schedule",
+      "fake_only": true,
+      "case": "model_create_confirm",
+      "marker": "LOCAL-SCHED-2a7"
     }
   ]
 }

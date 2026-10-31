@@ -103,7 +103,14 @@
         "security.memory_cross_session_reissue": true,
         "runtime.memory_off_no_context": true,
         "runtime.memory_forget_recall": true,
-        "runtime.memory_preference_cross_session": true
+        "runtime.memory_preference_cross_session": true,
+        "runtime.schedule_off_no_tools": true,
+        "security.schedule_no_auto_confirm": true,
+        "security.schedule_handle_expiry": true,
+        "security.schedule_cross_job_handle": true,
+        "runtime.schedule_budget_stop": true,
+        "runtime.schedule_overlap_missed": true,
+        "security.schedule_model_create_confirm": true
       }
     }
   }
