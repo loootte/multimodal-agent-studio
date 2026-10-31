@@ -20,6 +20,13 @@
 - mcp_confirm_every_call*       false = MCP 远端工具一轮里确认一次后复用（仍至少确认一次）。默认 true。
 - sensitive_confirm_every_call* false = 联网的第三方工具一轮里确认一次后复用；读本地内容的包不受影响。默认 true。
 （这四项 #93 后续由用户决定开放；默认值仍是最严。三层都可写。）
+- adult_remote_hosts*  成人分级（rating=adult 或露骨）内容允许发往的第三方出图服务主机名。默认 []：只走本机 ComfyUI。
+                       global / packs（分级工具包）/ tools（分级工具名，或 generate_image 管露骨提示词）。
+                       放宽后每次实际发送都要确认，卡上写目的主机；本地提示词还要 remote_local_prompt=confirm。
+                       这是路由（出站去向），和内容审核无关；本地提示词出站另归本地正文那一套（send_local_to_model 锁定）。
+- content_guard*       内容审核级别：strict（默认，全部检查）| standard（不查版权角色）| off（不审核）。
+                       只管审不审，不管发到哪里（关掉审核不会让任何内容出本机或发第三方）。global / packs / tools。
+                       未成年 / 真人的性化内容拦截是底线（LOCKED content_safety_baseline），任何级别都生效。
 
 锁定项（LOCKED）：只显示，不能改；写了别的值记 warning 并按锁定值处理。
 """
@@ -44,7 +51,9 @@ ADDRESS_FIELDS = ("http_loopback", "http_link_local", "http_private")
 ADDRESS_CLASS = {"http_loopback": "loopback", "http_link_local": "link_local", "http_private": "private"}
 # 默认 true（最严），写 false 才是放宽的开关。
 STRICT_SWITCHES = ("untrusted_results", "schema_reauth", "mcp_confirm_every_call", "sensitive_confirm_every_call")
-RELAXING = ("stdio_commands", "http_loopback", "http_link_local", "http_private", "auth", "params_allow") + STRICT_SWITCHES
+RELAXING = ("stdio_commands", "http_loopback", "http_link_local", "http_private", "auth", "params_allow") + STRICT_SWITCHES \
+    + ("adult_remote_hosts", "content_guard")
+MODERATION_LEVELS = ("strict", "standard", "off")
 DEFAULTS = {
     "stdio_commands": [],
     "http_loopback": False,
@@ -59,6 +68,8 @@ DEFAULTS = {
     "schema_reauth": True,
     "mcp_confirm_every_call": True,
     "sensitive_confirm_every_call": True,
+    "adult_remote_hosts": [],
+    "content_guard": "strict",
 }
 FIELD_LEVELS = {
     "stdio_commands": ("global", "packs"),
@@ -71,22 +82,26 @@ FIELD_LEVELS = {
     "confirm": ("global", "packs", "tools"),
     "result_max_chars": ("global", "packs", "tools"),
     **{key: ("global", "packs", "tools") for key in STRICT_SWITCHES},
+    "adult_remote_hosts": ("global", "packs", "tools"),
+    "content_guard": ("global", "packs", "tools"),
 }
 # 底线：不开放配置（显示在设置页上，只读）。要不要开放其中哪一项由用户决定，见 docs/tool-policy.md。
 LOCKED = {
     "local_body_check": ("strict", "出站前检查本地正文（原文、截段、编码变体、本地指纹），命中就在连接前拦下。本地正文不出本机是底线。"),
     "local_bodies_unavailable": ("refuse", "取不到本会话的本地内容登记时，按最严处理，不连接。"),
-    "send_local_to_model": ("forbidden", "第三方工具包不能声明 send_local_to_model：开放就等于让本地正文经工具结果发给模型供应商，"
-                                         "碰本地正文不出本机的底线，所以不开放。"),
+    "send_local_to_model": ("forbidden", "本地内容出站的总闸：本地正文 / 本地提示词要不要发给第三方模型或服务都归它。"
+                                         "第三方工具包不能把本地内容交给模型；本地提示词发第三方出图只能走 generate_image 的 "
+                                         "remote_local_prompt（默认拒绝，显式 confirm 后每轮确认）。内容审核和成人内容路由都改不了它。"),
     "remote_local_prompt_default": ("refuse", "generate_image 把本地提示词发第三方默认拒绝；放宽只能在该工具设置里显式确认。"),
-    "content_guard": ("on", "出图内容审核（services/runtime/content_guard.py）。它同时保证成人分级内容只在本机 ComfyUI 出图、"
-                            "不发第三方后端；关掉就会让本地提示词出本机，所以不开放。"),
+    "content_safety_baseline": ("on", "内容安全底线：性化内容（分级工具或露骨文字）里不能有未成年 / 像未成年的角色、不能有真人。"
+                                      "不属于内容审核开关，content_guard=off 也照样拦。"),
     "loopback_self_port": ("deny", "MCP 永远不能连本程序自己的端口。"),
     "unspecified_unresolved": ("deny", "0.0.0.0 / :: 和解析不了的主机永远拒绝。"),
 }
 COMMAND = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 PARAM = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NAME = re.compile(r"^[a-z][a-z0-9_]{1,95}$")
+HOSTNAME = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 ENV_NAME = re.compile(r"^MAS_MCP_[A-Z0-9_]{1,60}$")
 HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
 FORBIDDEN_HEADERS = {"host", "content-type", "content-length", "accept", "cookie", "connection", "transfer-encoding",
@@ -168,6 +183,16 @@ def _field(key, value, path, warnings):
         before = len(warnings)
         out = _auth(value, path, warnings)
         return len(warnings) == before, out
+    if key == "adult_remote_hosts":
+        if isinstance(value, list):
+            value = [v.strip().lower().rstrip(".") if isinstance(v, str) else v for v in value]
+        names = _names(value, HOSTNAME, path, warnings)
+        return names is not None, names
+    if key == "content_guard":
+        if value in MODERATION_LEVELS:
+            return True, value
+        warnings.append(path)
+        return False, None
     if key in ("params_allow", "params_block"):
         names = _names(value, PARAM, path, warnings, limit=64)
         return names is not None, names
@@ -336,7 +361,8 @@ def resolve(pack: str | None, tool: str | None = None, policy: dict | None = Non
 
 
 def relaxations(effective: dict, transport: str | None = None, command: str | None = None, *,
-                mcp: bool = True, sensitive_relaxable: bool = False) -> list[str]:
+                mcp: bool = True, sensitive_relaxable: bool = False, rated: bool = False,
+                moderated: bool = False) -> list[str]:
     """生效策略里对这个包 / 工具真正起作用的放宽项（字段名）。
     mcp=False 是普通第三方包：只看 untrusted_results 和（联网、不读本地内容的包）sensitive_confirm_every_call。"""
     out = []
@@ -345,6 +371,10 @@ def relaxations(effective: dict, transport: str | None = None, command: str | No
             out.append("untrusted_results")
         if sensitive_relaxable and effective.get("sensitive_confirm_every_call") is False:
             out.append("sensitive_confirm_every_call")
+        if rated and effective.get("adult_remote_hosts"):
+            out.append("adult_remote_hosts")
+        if moderated and effective.get("content_guard", "strict") != "strict":
+            out.append("content_guard")
         return out
     if command and command in (effective.get("stdio_commands") or []):
         out.append("stdio_commands")
@@ -360,6 +390,12 @@ def relaxations(effective: dict, transport: str | None = None, command: str | No
         if effective.get(key) is False:
             out.append(key)
     return out
+
+
+def adult_remote_allowed(effective: dict, host: str) -> bool:
+    """成人分级内容能不能发往这个第三方出图主机（只比主机名，大小写和末尾点不计）。默认 [] = 只走本机。"""
+    host = (host or "").strip("[]").lower().rstrip(".")
+    return bool(host) and host in (effective.get("adult_remote_hosts") or [])
 
 
 def digest(effective: dict) -> str:
@@ -530,6 +566,8 @@ def public() -> dict:
 def is_relaxed(key: str, value) -> bool:
     if key in STRICT_SWITCHES:
         return value is False
+    if key == "content_guard":
+        return value in MODERATION_LEVELS and value != "strict"
     return key in RELAXING and value not in (None, [], False)
 
 

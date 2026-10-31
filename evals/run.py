@@ -1657,13 +1657,14 @@ def run_tool_policy(h: Harness, task: dict, live: bool) -> dict:
             expect(marker in later and TOOL_RESULT_NOTE in later and 'untrusted' in later, "默认策略下结果没标不可信")
             # 本地正文底线仍锁定：写了也不生效，只给 warning，不用确认
             status, body = check.request("PUT", h.base + "/api/tool-policy", {"policy": {
-                "global": {"send_local_to_model": True, "content_guard": "off"}}})
+                "global": {"send_local_to_model": True, "content_safety_baseline": "off"}}})
             view = json.loads(body)
             expect(status == 200 and not view["policy"]["global"]
-                   and {"global.send_local_to_model", "global.content_guard"} <= set(view["warnings"]),
+                   and {"global.send_local_to_model", "global.content_safety_baseline"} <= set(view["warnings"]),
                    f"锁定项被写进了策略：{status} {body[:300]}")
             locked = {item["key"] for item in view["locked"]}
-            expect({"send_local_to_model", "content_guard"} <= locked and "untrusted_results" not in locked,
+            expect({"send_local_to_model", "content_safety_baseline"} <= locked and "untrusted_results" not in locked
+                   and "content_guard" not in locked,
                    f"锁定项列表不对：{sorted(locked)}")
             # 放宽三个 MCP 开关：已启用的退出工具表，重新启用要逐项确认
             _policy_put(h, {"packs": {"mcp_fake": {"untrusted_results": False, "mcp_confirm_every_call": False,

@@ -54,7 +54,8 @@ my_tool/
 2. 调用后（`check_output`）再查最终提示词（同样的规则）；结果的 `rating` 一律以清单为准，工具自称 `general` 也会被改成 `adult`。普通工具拼出露骨提示词 → `unsafe_content`。
 3. 表单目录（`filter_catalog`）：分级工具去掉标了 `minor` 或过不了守卫的预设；普通工具去掉露骨预设。
 4. 开启：表单提交要带 `confirmed: true`（页面在选中工具时弹 `content.confirm`），否则 400 `confirm_required`；对话里只有用户**这一句**出现 `chat_keywords` 之一，模型调它才放行，否则 `confirm_required`。没写 `chat_keywords` 就只能在表单里用。
-5. 只许本机出图：分级内容发第三方出图一律 400 `nsfw_backend_not_allowed`（说明可能违反服务条款），记一条 `egress.blocked`；表单把后端锁在本机 ComfyUI。
+5. 默认只许本机出图：分级内容发第三方出图 400 `nsfw_backend_not_allowed`（说明可能违反服务条款），记一条 `egress.blocked`；表单把后端锁在本机 ComfyUI。用户在工具安全策略里把出图服务主机加进 `adult_remote_hosts`（要确认）后才可以发，每次发送弹写明主机的卡。
+7. 审核级别由工具安全策略的 `content_guard` 决定（`strict` 默认 / `standard` 不查版权角色 / `off` 不审核），工具代码改不了；未成年 / 真人在任何级别都拦。见 [tool-policy.md](tool-policy.md)。
 6. 结果标记：工件 `rating: "adult"`，文件名加 `adult_` 前缀，SSE `artifact` 事件带 `rating`；本地资源面板可以按分级筛选。
 
 ## 安装
@@ -154,7 +155,7 @@ def preview(fields, ctx):
 
 面板**拿不到本地内容本身**：接口里没有读资源、读文件、取会话正文的方法，最多看到句柄。面板也不应该自己 `fetch`；内置面板的检查会确认 `panel.js` 里没有 `fetch` 和 `/api/`。
 
-分级工具（`content.rating=adult`）：打开面板前宿主先弹 `content.confirm`，用户确认后才挂载；`api.run` 的 `confirmed` 只来自这次宿主确认，面板传不进来；后端锁在本机。服务端的 `content_guard`、`confirm_required`、`nsfw_backend_not_allowed` 照旧生效，面板绕不过去。
+分级工具（`content.rating=adult`）：打开面板前宿主先弹 `content.confirm`，用户确认后才挂载；`api.run` 的 `confirmed` 只来自这次宿主确认，面板传不进来；后端默认锁在本机（工具简介的 `local_only` 按 `adult_remote_hosts` 算）。服务端的 `content_guard`、`confirm_required`、`nsfw_backend_not_allowed` 照旧生效，面板绕不过去。
 
 ### 为什么内置同源、安装的放沙箱 iframe
 

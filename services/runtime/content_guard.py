@@ -1,12 +1,22 @@
 """宿主的内容守卫（#86；#93 起在 services/runtime，apps/web/content_guard.py 只是兼容入口）：对声明 content.rating=adult 的工具强制执行，工具自己的代码改不了也绕不过。
 
+#93 拆分：这里只管「审不审、审多严」（内容审核），不管内容发到哪里。
+- 出图去向（成人内容只走本机 / 放行哪个第三方出图主机）是工具安全策略的路由项 adult_remote_hosts，由 chat_run 执行；
+- 本地内容出不出站归本地正文那一套（send_local_to_model 锁定、remote_local_prompt 默认拒绝），也不在这里。
+审核级别（工具安全策略 content_guard，默认 strict）：
+- strict   全部检查（下面列的都查）。
+- standard 不查版权角色 / 同人（not_original_character 只剩真人）。
+- off      不做内容审核：普通工具也能出露骨内容、版权角色不查。
+无论哪一级，底线（BASELINE）都生效：性化内容（分级工具，或文字本身露骨）里不能有未成年 / 像未成年的角色
+（年龄、幼态体型、校服 / 学生），不能有真人（名人、熟人、真人照片、@账号、人名）。
+
 module 工具（entry.kind=module）的每次 preview / run，宿主都会：
 1. 调用前 check_inputs：逐个字段查用户/模型给的文字；
 2. 调用后 check_output：再查工具拼好的最终提示词，并把分级强制设成清单里声明的 rating；
 3. 目录 filter_catalog：从表单选项里去掉守卫不放行的项。
 
 rating=adult：不能画未成年或像未成年的角色（含低于 min_age 的年龄）、校服/学生、幼态体型，不能参考真人或版权角色；
-              只能本机出图（第三方后端由 chat_run 拒绝），结果标记为成人内容。
+              结果标记为成人内容（发到哪里出图不归这里管，见 adult_remote_hosts，默认只走本机）。
 rating=general：不能有露骨/色情内容（工具自己没拦的，这里兜底）。
 """
 
@@ -16,6 +26,10 @@ import re
 
 RATING_ADULT = "adult"
 RATING_GENERAL = "general"
+LEVEL_STRICT = "strict"
+LEVEL_STANDARD = "standard"
+LEVEL_OFF = "off"
+LEVELS = (LEVEL_STRICT, LEVEL_STANDARD, LEVEL_OFF)
 
 # 露骨/色情（全部小写比较）。
 EXPLICIT = (
@@ -46,19 +60,26 @@ _SCHOOL = (
     "school uniform", "sailor uniform", "sailor fuku", "seifuku", "school swimsuit", "sukumizu", "gym uniform",
     "school bag", "randoseru", "classroom",
 )
-_REAL_OR_IP = (
+# 真人（底线，任何级别都查）。
+_REAL = (
     "明星", "演员", "歌手", "网红", "主播", "偶像", "爱豆", "名人", "真人", "本人", "照片里", "照片上", "长得像", "一模一样",
     "同事", "同学", "邻居", "前女友", "前男友", "女朋友", "男朋友", "老婆", "老公", "某某",
+    "celebrity", "celeb", "actress", "actor", "singer", "idol", "influencer", "streamer", "youtuber", "vtuber", "real person",
+    "real-life", "lookalike", "look like", "looks like", "resembling",
+)
+# 版权角色 / 同人（只有 strict 查）。
+_IP = (
     "原神", "崩坏", "星穹铁道", "火影", "海贼王", "死神", "鬼灭", "进击的巨人", "新世纪福音战士", "初音", "迪士尼", "漫威",
     "宝可梦", "美少女战士", "英雄联盟", "王者荣耀", "明日方舟", "碧蓝航线", "赛马娘", "蔚蓝档案", "间谍过家家", "咒术回战",
     "哈利波特", "星球大战", "最终幻想", "塞尔达", "马里奥", "东方project", "同人", "二创", "cos", "cosplay", "角色扮演",
-    "celebrity", "celeb", "actress", "actor", "singer", "idol", "influencer", "streamer", "youtuber", "vtuber", "real person",
-    "real-life", "lookalike", "look like", "looks like", "resembling", "fan art", "fanart", "genshin", "honkai", "naruto",
+    "fan art", "fanart", "genshin", "honkai", "naruto",
     "one piece", "pokemon", "disney", "marvel", "dc comics", "evangelion", "hatsune", "miku", "sailor moon", "overwatch",
     "league of legends", "final fantasy", "zelda", "nintendo", "touhou", "blue archive", "arknights", "azur lane",
     "umamusume", "spy x family", "demon slayer", "jujutsu", "harry potter", "star wars",
 )
-_IP_RULES = (re.compile(r"《[^》]+》"), re.compile(r"@\w+"))
+_REAL_OR_IP = _REAL + _IP
+_REAL_RULES = (re.compile(r"@\w+"),)
+_IP_RULES = (re.compile(r"《[^》]+》"),)
 _PERSON_NAME = re.compile(r"(?<![A-Za-z])[A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}(?![A-Za-z])")
 _WORD_CACHE: dict = {}
 
@@ -141,7 +162,13 @@ def under_age(text: str) -> int | None:
     return min(ages) if ages else None
 
 
-def _rated_problem(text: str, info: dict, label: str, field: str, *, age_field: bool, people: bool) -> GuardError | None:
+def level_of(value) -> str:
+    return value if value in LEVELS else LEVEL_STRICT
+
+
+def _rated_problem(text: str, info: dict, label: str, field: str, *, age_field: bool, people: bool,
+                   level: str = LEVEL_STRICT) -> GuardError | None:
+    """未成年和真人（底线）任何级别都查；版权角色只在 strict 查。"""
     mode = info["label"]
     min_age = info["min_age"]
     lowered = text.lower()
@@ -162,9 +189,9 @@ def _rated_problem(text: str, info: dict, label: str, field: str, *, age_field: 
     word = _hit(text, _SCHOOL)
     if word:
         return GuardError("minor_unsafe", f"{mode}禁用校服/学生相关内容（{label}里有“{word}”）。", field)
-    word = _hit(text, _REAL_OR_IP)
+    word = _hit(text, _REAL)
     if not word:
-        for rule in _IP_RULES:
+        for rule in _REAL_RULES:
             found = rule.search(text)
             if found:
                 word = found.group(0)
@@ -173,14 +200,30 @@ def _rated_problem(text: str, info: dict, label: str, field: str, *, age_field: 
         found = _PERSON_NAME.search(text)
         if found:
             word = found.group(0)
+    if not word and level_of(level) == LEVEL_STRICT:
+        word = _hit(text, _IP)
+        if not word:
+            for rule in _IP_RULES:
+                found = rule.search(text)
+                if found:
+                    word = found.group(0)
+                    break
     if word:
         return GuardError("not_original_character",
                           f"{mode}不能参考真人或已有版权角色（{label}里有“{word}”）。请只描述原创角色。", field)
     return None
 
 
-def check_inputs(manifest: dict, values: dict, labels: dict | None = None) -> None:
-    """调用工具代码之前：逐个字段查。不过关抛 GuardError。"""
+def _baseline_info(info: dict) -> dict:
+    """普通工具在 off 级别出了露骨内容时，按成人底线查（min_age 18）。"""
+    if info["rating"] == RATING_ADULT:
+        return info
+    return dict(info, min_age=18, label="露骨内容")
+
+
+def check_inputs(manifest: dict, values: dict, labels: dict | None = None, level: str = LEVEL_STRICT) -> None:
+    """调用工具代码之前：逐个字段查。不过关抛 GuardError。level 见模块说明；底线任何级别都查。"""
+    level = level_of(level)
     info = content(manifest)
     labels = labels or {}
     for name, raw in (values or {}).items():
@@ -191,15 +234,20 @@ def check_inputs(manifest: dict, values: dict, labels: dict | None = None) -> No
             continue
         label = str(labels.get(name) or name)
         if info["rating"] == RATING_ADULT:
-            problem = _rated_problem(text, info, label, name, age_field=name == "age", people=True)
+            problem = _rated_problem(text, info, label, name, age_field=name == "age", people=True, level=level)
             if problem:
                 raise problem
         elif explicit(text):
-            raise GuardError("unsafe_content", f"{label}里有露骨或色情内容，不能用来出图。", name)
+            if level != LEVEL_OFF:
+                raise GuardError("unsafe_content", f"{label}里有露骨或色情内容，不能用来出图。", name)
+            problem = _rated_problem(text, _baseline_info(info), label, name, age_field=False, people=True, level=level)
+            if problem:
+                raise problem
 
 
-def check_output(manifest: dict, result: dict) -> dict:
-    """工具代码返回以后：再查最终提示词，分级一律以清单为准（工具自称 general 也没用）。"""
+def check_output(manifest: dict, result: dict, level: str = LEVEL_STRICT) -> dict:
+    """工具代码返回以后：再查最终提示词，分级一律以清单为准（工具自称 general 也没用）。底线任何级别都查。"""
+    level = level_of(level)
     if not isinstance(result, dict):
         raise GuardError("tool_error", "工具没有返回对象。")
     prompt = result.get("prompt")
@@ -210,19 +258,25 @@ def check_output(manifest: dict, result: dict) -> dict:
     info = content(manifest)
     out = dict(result)
     if info["rating"] == RATING_ADULT:
-        problem = _rated_problem(_normalize(prompt), info, "最终提示词", "", age_field=False, people=False)
+        problem = _rated_problem(_normalize(prompt), info, "最终提示词", "", age_field=False, people=False, level=level)
         if problem:
             raise problem
         out["rating"] = RATING_ADULT
     else:
         if explicit(prompt):
-            raise GuardError("unsafe_content", "工具拼出的提示词里有露骨或色情内容，不能用来出图。")
-        out["rating"] = RATING_GENERAL
+            if level != LEVEL_OFF:
+                raise GuardError("unsafe_content", "工具拼出的提示词里有露骨或色情内容，不能用来出图。")
+            problem = _rated_problem(_normalize(prompt), _baseline_info(info), "最终提示词", "", age_field=False,
+                                     people=False, level=level)
+            if problem:
+                raise problem
+        out["rating"] = RATING_GENERAL  # 露骨与否由出图那一步再判（looks_adult），按成人内容路由
     return out
 
 
-def filter_catalog(manifest: dict, view: dict) -> dict:
-    """表单目录：rated 工具去掉标了 minor 或守卫不放行的预设；general 工具去掉露骨预设。"""
+def filter_catalog(manifest: dict, view: dict, level: str = LEVEL_STRICT) -> dict:
+    """表单目录：rated 工具去掉标了 minor 或守卫不放行的预设；general 工具去掉露骨预设（off 级别只去掉碰底线的露骨预设）。"""
+    level = level_of(level)
     if not isinstance(view, dict):
         return {"fields": [], "extra_fields": [], "defaults": {}}
     info = content(manifest)
@@ -240,10 +294,14 @@ def filter_catalog(manifest: dict, view: dict) -> dict:
                 texts = [str(item.get(k) or "") for k in ("key", "label", "prompt")]
                 if adult:
                     if item.get("minor") or any(
-                            _rated_problem(_normalize(t), info, "", "", age_field=False, people=False) for t in texts if t):
+                            _rated_problem(_normalize(t), info, "", "", age_field=False, people=False, level=level)
+                            for t in texts if t):
                         continue
                 elif any(explicit(t) for t in texts[1:]):
-                    continue
+                    if level != LEVEL_OFF or item.get("minor") or any(
+                            _rated_problem(_normalize(t), _baseline_info(info), "", "", age_field=False, people=False,
+                                           level=level) for t in texts if t):
+                        continue
                 options.append(item)
             cleaned.append(dict(field, options=options))
         out[group] = cleaned

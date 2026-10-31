@@ -1376,7 +1376,7 @@ def _execute_stage_prompt(app, session_id, run, arguments) -> dict:
             "next": f"调用 generate_image，content_handle 填 {handle}。"}
 
 
-def _stage(run, text: str, source: str, rating: str | None = None) -> str:
+def _stage(run, text: str, source: str, rating: str | None = None, origin: str | None = None) -> str:
     staged = getattr(run, "_staged", None)
     if staged is None:
         staged = run._staged = {}
@@ -1384,11 +1384,15 @@ def _stage(run, text: str, source: str, rating: str | None = None) -> str:
         if item["text"] == text and item["source"] == source:
             if rating:
                 item["rating"] = rating
+            if origin:
+                item["origin"] = origin
             return handle
     handle = new_id("c_")
     staged[handle] = {"text": text, "source": source}
     if rating:
         staged[handle]["rating"] = rating
+    if origin:
+        staged[handle]["origin"] = origin  # 分级工具名：出站去向按它的 adult_remote_hosts
     return handle
 
 
@@ -1440,7 +1444,8 @@ def _character_config(app) -> dict:
 
 def _execute_module_tool(app, session_id, run, name, arguments) -> dict:
     """#53/#86：模型从对话里填表单工具的字段（没说的用默认值）；宿主过守卫、调工具代码拼提示词，登记成本轮句柄（1.1/1.2），
-    再交给 generate_image。rating=adult 的工具要用户这一句里有清单声明的关键词，且只能本机出图。"""
+    再交给 generate_image。rating=adult 的工具要用户这一句里有清单声明的关键词；默认只能本机出图，
+    工具安全策略 adult_remote_hosts 放行的第三方出图主机除外（每次发送都要用户确认）。"""
     pack = module_tools.get(name)
     args = dict(arguments) if isinstance(arguments, dict) else {}
     source = args.pop("mode", None) or "model"
@@ -1465,13 +1470,18 @@ def _execute_module_tool(app, session_id, run, name, arguments) -> dict:
     except content_guard.GuardError as exc:
         return {"ok": False, "tool": name, "executed": False, "error": exc.public()}
     rating = composed["rating"]
-    handle = _stage(run, composed["prompt"], source, rating if rated else None)
+    handle = _stage(run, composed["prompt"], source, rating if rated else None, name if rated else None)
     print(f"module tool {name} {run.run_id} {handle} {source} {len(composed['prompt'])} {rating}", file=sys.stderr)
     out = {"ok": True, "tool": name, "content_handle": handle, "source": source,
            "summary": composed["summary"], "used_defaults": composed["used_defaults"], "rating": rating,
            "next": f"调用 generate_image，content_handle 填 {handle}；要多张时先 plan_images，再逐张调用。"}
     if rated:
-        out["next"] += " 分级内容只能用本机 ComfyUI：backend 不填。"
+        hosts = module_tools.adult_remote_hosts(name)
+        if hosts:
+            out["next"] += (" 分级内容默认用本机 ComfyUI（backend 不填）；工具安全策略允许发往 " + "、".join(hosts)
+                            + "，只有用户明确要求第三方出图时才填 backend=remote，发送前宿主会请用户确认。")
+        else:
+            out["next"] += " 分级内容只能用本机 ComfyUI：backend 不填。"
     else:
         out["prompt"] = composed["prompt"]
     return out
@@ -1490,7 +1500,7 @@ def start_form_tool(app, session_id: str, name: str, body) -> Run:
     """#53/#86 网页表单：不经过对话模型，按字段拼提示词、报张数、逐张 generate_image。
     privacy=chat：字段是用户自己写在页面上的文字（1.1），会作为聊天消息保存；
     privacy=local：拼好的提示词存成本地内容（1.3），消息里只写“本地提示词”，第三方出图按 remote_local_prompt。
-    rating=adult 的工具：body.confirmed 必须是 true，且只能本机出图。"""
+    rating=adult 的工具：body.confirmed 必须是 true；默认只能本机出图，策略 adult_remote_hosts 放行的主机除外。"""
     pack = module_tools.get(name)
     if pack is None or not (pack.manifest.get("ui") or {}).get("form"):
         raise RequestError(404, "not_found", "没有这个表单工具。")
@@ -1514,8 +1524,8 @@ def start_form_tool(app, session_id: str, name: str, body) -> Run:
     rated = info["rating"] == content_guard.RATING_ADULT
     if rated and body.get("confirmed") is not True:
         raise RequestError(400, "confirm_required", f"“{info['label']}”默认关闭，要先在弹窗里确认开启。")
-    if rated and backend != "local":
-        # 宿主强制：分级内容只走本机 ComfyUI，与工具代码无关。
+    if rated and backend != "local" and not _adult_remote_ok(name):
+        # 宿主强制：分级内容默认只走本机 ComfyUI，与工具代码无关；放宽只能由人在工具安全策略里配置。
         try:
             settings = image_run.remote_settings()
             egress.blocked("remote_image", settings.get("remote_base_url"), "nsfw_backend_not_allowed",
@@ -1523,7 +1533,8 @@ def start_form_tool(app, session_id: str, name: str, body) -> Run:
         except Exception:  # 记录失败不影响拒绝
             pass
         raise RequestError(400, "nsfw_backend_not_allowed",
-                           f"“{info['label']}”只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。")
+                           f"“{info['label']}”只能用本机 ComfyUI 出图；第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款。"
+                           "确实要发时在 设置 → 工具安全策略 里把这个出图服务的主机加进 adult_remote_hosts。")
     try:
         composed = module_tools.compose(pack, body.get("fields") or {}, _tool_config(app, name))
     except content_guard.GuardError as exc:
@@ -1552,7 +1563,7 @@ def start_form_tool(app, session_id: str, name: str, body) -> Run:
                      message_id=run.message_id, modalities=["text"])
     plan = {"prompt": composed["prompt"], "privacy": privacy, "backend": backend, "count": count,
             "aspect": aspect, "seed": seed, "explicit_backend": "backend" in body,
-            "rating": content_guard.RATING_ADULT if rated else None}
+            "rating": content_guard.RATING_ADULT if rated else None, "origin": name if rated else None}
     threading.Thread(target=_character_run, args=(app, session_id, run.message_id, run, plan), daemon=True).start()
     return run
 
@@ -1568,7 +1579,7 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
             record = app.sessions.add_content(session_id, plan["prompt"], "image_prompt")
             handle, source = record["handle"], "local"
         else:
-            handle, source = _stage(run, plan["prompt"], "chat", plan.get("rating")), "chat"
+            handle, source = _stage(run, plan["prompt"], "chat", plan.get("rating"), plan.get("origin")), "chat"
         run._image_plan = {"count": plan["count"], "items": []}
         last = None
         for index in range(plan["count"]):
@@ -1583,7 +1594,8 @@ def _character_run(app, session_id, message_id, run, plan) -> None:
             else:
                 bound = _bind_submitted(plan["prompt"], tool_call)
             last = _generate_bound(app, session_id, message_id, run, handle, bound, source,
-                                   plan["backend"], plan["explicit_backend"], rating=plan.get("rating"))
+                                   plan["backend"], plan["explicit_backend"], rating=plan.get("rating"),
+                                   origin=plan.get("origin"))
             if not last.get("ok"):
                 break
         done = int(getattr(run, "_images_done", 0) or 0)
@@ -1671,6 +1683,44 @@ def _remote_consent(app, session_id, message_id, run, handle: str, base: str) ->
     return bool(ok)
 
 
+def _adult_remote_consent(app, session_id, message_id, run, handle: str, base: str, local: bool) -> bool:
+    """#93：成人分级内容发第三方出图服务，每次实际发送前都要用户确认（不记住，拒绝也不记住）。
+    卡片由宿主模板生成，写明目的主机；本地提示词（1.3）的同意包含在这张卡里。"""
+    host, _scope = egress.destination(base)
+    lock = getattr(run, "_agent_confirm_lock", None)
+    if lock is not None:
+        lock.acquire()
+    try:
+        run.begin_confirm_wait()
+        notice = (
+            f"要把成人分级内容（{handle}）发给第三方出图服务 {host or base}（工具安全策略 adult_remote_hosts 放行了这个主机）。"
+            + ("这是本地提示词（本地内容出站已按 remote_local_prompt 另行确认）。" if local else "")
+            + "第三方服务大多禁止 NSFW 内容，发过去可能违反其服务条款。每一张都会单独询问。"
+        )
+        args = {"content_handle": handle, "backend": "remote"}
+        summary = _confirm_egress(app, session_id, run, "generate_image", args, None)
+        summary["adult_remote"] = True
+        card = _confirm_card(run, "generate_image", args, summary)
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_TOOL_CONFIRM, "name": "generate_image", "tool": "generate_image", "arguments": args,
+            "notice": notice, "egress": summary, "card": card, "message_id": message_id, "run_id": run.run_id,
+        })
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_TOOL_CALL, "tool": "generate_image", "arguments": args, "status": "waiting_confirm",
+            "notice": notice, "egress": summary, "card": card, "message_id": message_id, "run_id": run.run_id,
+        })
+        ok = run.wait_confirm()
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+    telemetry.record("security.adult_remote_confirm", trace_id=run.run_id, tool="generate_image",
+                     destination_host=host, granted=bool(ok))
+    return bool(ok)
+
+
 def _note_image(run, source: str, backend: str, explicit_backend: bool, result: dict | None = None) -> dict | None:
     log = getattr(run, "_image_log", None)
     if log is None:
@@ -1737,7 +1787,7 @@ def _execute_generate_image(app, session_id, message_id, run, arguments) -> dict
         source = staged["source"]
         bound = _bind_submitted(staged["text"], tool_call)
         return _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, bool(raw_backend),
-                               rating=staged.get("rating"))
+                               rating=staged.get("rating"), origin=staged.get("origin"))
     block = _handle_block(app, session_id, tool_call, run)
     if block == "file":
         return {
@@ -1760,19 +1810,37 @@ def _bound_prompt(bound) -> str:
     return str((arguments or {}).get("prompt") or "")
 
 
+def _adult_remote_ok(origin: str | None, base: str | None = None) -> bool:
+    """#93：成人分级内容能不能发往第三方出图服务。只看工具安全策略 adult_remote_hosts（人配的），默认 [] = 只走本机。
+    base 不给时取当前设置的第三方出图地址。"""
+    from services.tools import policy as tool_policy
+
+    if base is None:
+        try:
+            base = image_run.remote_settings().get("remote_base_url")
+        except Exception:  # noqa: BLE001
+            return False
+    host, _scope = egress.destination(base)
+    hosts = module_tools.adult_remote_hosts(origin)
+    return tool_policy.adult_remote_allowed({"adult_remote_hosts": hosts}, host)
+
+
 def _generate_bound(app, session_id, message_id, run, handle, bound, source, backend, explicit_backend,
-                    rating=None) -> dict:
-    # #86：分级扩展包出的角色（rating=adult）或提示词本身露骨的都算成人内容：只许本机出图，结果打 rating=adult。
+                    rating=None, origin=None) -> dict:
+    # #86：分级扩展包出的角色（rating=adult）或提示词本身露骨的都算成人内容，结果打 rating=adult。
+    # #93：默认只许本机出图；工具安全策略 adult_remote_hosts 放行的第三方主机才能发，而且每次发送前都要用户确认。
     if rating != content_guard.RATING_ADULT and content_guard.looks_adult(_bound_prompt(bound)):
         rating = content_guard.RATING_ADULT
-    if backend == "remote" and rating == content_guard.RATING_ADULT:
+    adult_remote = backend == "remote" and rating == content_guard.RATING_ADULT
+    if adult_remote and not _adult_remote_ok(origin):
         settings = image_run.remote_settings()
         egress.blocked("remote_image", settings.get("remote_base_url"), "nsfw_backend_not_allowed",
                        local_derived=source == "local", handle=handle, tool="generate_image")
         return _note_image(run, source, backend, explicit_backend, _image_error(
             handle, "nsfw_backend_not_allowed",
-            "成人/露骨内容只能用本机 ComfyUI 出图，不发给第三方出图服务。",
-            "第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款、导致账号被封；改用本机 ComfyUI（backend 不填）。",
+            "成人/露骨内容默认只能用本机 ComfyUI 出图，不发给第三方出图服务。",
+            "第三方出图服务大多禁止 NSFW 内容，发过去可能违反其服务条款、导致账号被封；改用本机 ComfyUI（backend 不填）。"
+            "确实要发时由用户在 设置 → 工具安全策略 里把这个出图服务的主机加进 adult_remote_hosts。",
             backend,
         ))
     if backend == "remote":
@@ -1795,11 +1863,22 @@ def _generate_bound(app, session_id, message_id, run, handle, bound, source, bac
                     "确实要发时在 设置 → 工具 → generate_image 把 remote_local_prompt 改成 confirm，之后每轮会先请你确认。",
                     backend,
                 ))
+        if source == "local":
+            # 本地内容出站：归本地正文那一套（remote_local_prompt + 每轮确认），与分级路由无关。
             if not _remote_consent(app, session_id, message_id, run, handle, str(settings.get("remote_base_url") or "")):
                 egress.blocked("remote_image", settings.get("remote_base_url"), "user_declined",
                                local_derived=True, handle=handle, tool="generate_image")
                 return _note_image(run, source, backend, explicit_backend, _image_error(
                     handle, "user_declined", "你没有同意把本地提示词发给第三方出图服务。", "可以改用本机 ComfyUI 出图。", backend))
+        if adult_remote:
+            # 成人内容路由：每次实际发送都问（不记住），卡上写目的主机。
+            if not _adult_remote_consent(app, session_id, message_id, run, handle,
+                                         str(settings.get("remote_base_url") or ""), source == "local"):
+                egress.blocked("remote_image", settings.get("remote_base_url"), "user_declined",
+                               local_derived=source == "local", handle=handle, tool="generate_image")
+                return _note_image(run, source, backend, explicit_backend, _image_error(
+                    handle, "user_declined", "你没有同意把成人分级内容发给第三方出图服务。", "可以改用本机 ComfyUI 出图。",
+                    backend))
     bound_args = dict(bound.get("arguments") or {})
     if backend == "remote":
         bound_args["backend"] = "remote"

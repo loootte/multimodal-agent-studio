@@ -381,6 +381,13 @@
       "case": "adult_remote"
     },
     {
+      "id": "image.route_moderation_split",
+      "category": "image",
+      "kind": "form_tool",
+      "fake_only": true,
+      "case": "route_split"
+    },
+    {
       "id": "image.install_form_tool_ok",
       "category": "image",
       "kind": "form_tool_install",

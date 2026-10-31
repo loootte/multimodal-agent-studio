@@ -156,6 +156,7 @@ def self_check() -> None:
     _check_mcp(specs)
     _check_mcp_client()
     _check_tool_policy()
+    _check_route_moderation_split()
     _check_video_whitelist()
     artifacts.self_check()
     _check_artifact_handoff()
@@ -546,9 +547,72 @@ def _check_tool_policy() -> None:
         shutil.rmtree(source, ignore_errors=True)
 
 
+def _check_route_moderation_split() -> None:
+    """#93 拆分：send_local_to_model 锁定、只管本地内容出站；adult_remote_hosts 只管成人内容路由；
+    content_guard 只管审不审（strict / standard / off）；未成年 / 真人底线任何级别都拦。默认 = 旧的最严行为。"""
+    from services.runtime import content_guard as guard
+    from services.tools import policy
+
+    fail = comfy_poc.fail
+    if "send_local_to_model" not in policy.LOCKED or "content_safety_baseline" not in policy.LOCKED \
+            or "content_guard" in policy.LOCKED or "adult_remote_hosts" in policy.LOCKED:
+        fail("锁定 / 开放的划分不对")
+    if policy.DEFAULTS["adult_remote_hosts"] != [] or policy.DEFAULTS["content_guard"] != "strict":
+        fail("默认值不是最严")
+    effective = policy.resolve("p", "t")
+    if policy.adult_remote_allowed(effective, "127.0.0.1") or effective["content_guard"] != "strict":
+        fail("默认策略下成人内容能发第三方，或审核不是 strict")
+    data, warnings = policy.normalize({"global": {"content_guard": "loose", "content_safety_baseline": "off"},
+                                       "tools": {"some_tool": {"content_guard": "off", "adult_remote_hosts": ["Img.Example.com."]}},
+                                       "packs": {"some_pack": {"adult_remote_hosts": ["bad host"]}}})
+    if "global.content_guard" not in warnings or "global.content_safety_baseline" not in warnings \
+            or data["tools"]["some_tool"].get("content_guard") != "off" \
+            or data["tools"]["some_tool"].get("adult_remote_hosts") != ["img.example.com"] \
+            or "packs.some_pack.adult_remote_hosts" not in warnings:
+        fail(f"content_guard 校验不对：{data} {warnings}")
+    relaxed = policy.newly_relaxed({}, data)
+    if sorted(relaxed) != ["tools.adult_remote_hosts", "tools.content_guard"]:
+        fail(f"放宽项不对：{relaxed}")
+    if policy.newly_relaxed({}, policy.normalize({"global": {"content_guard": "strict"}})[0]):
+        fail("strict 不算放宽")
+    # 各管各的：关审核不影响路由和本地出站；放宽路由不影响审核
+    off = policy.normalize({"global": {"content_guard": "off"}})[0]
+    if "adult_remote_hosts" in policy.newly_relaxed({}, off) or "global.send_local_to_model" in policy.newly_relaxed({}, off):
+        fail("关审核连带放宽了出站")
+    route = policy.normalize({"global": {"adult_remote_hosts": ["img.example.com"]}})[0]
+    if any(f.endswith("content_guard") for f in policy.newly_relaxed({}, route)):
+        fail("放宽路由连带改了审核")
+    rated = {"content": {"rating": "adult", "min_age": 21, "label": "分级"}}
+    general = {"content": {"rating": "general"}}
+
+    def outcome(manifest, text, level):
+        try:
+            guard.check_inputs(manifest, {"x": text}, level=level)
+            return "ok"
+        except guard.GuardError as exc:
+            return exc.code
+
+    expect = {  # (manifest, 文字) -> strict / standard / off
+        ("rated", "genshin cosplay"): ("not_original_character", "ok", "ok"),
+        ("rated", "a schoolgirl"): ("minor_unsafe",) * 3,
+        ("rated", "celebrity lookalike"): ("not_original_character",) * 3,
+        ("general", "nude figure"): ("unsafe_content", "unsafe_content", "ok"),
+        ("general", "nude teen"): ("unsafe_content", "unsafe_content", "minor_unsafe"),
+        ("general", "nude celebrity"): ("unsafe_content", "unsafe_content", "not_original_character"),
+    }
+    for (kind, text), codes in expect.items():
+        for level, code in zip(guard.LEVELS, codes):
+            got = outcome(rated if kind == "rated" else general, text, level)
+            if got != code:
+                fail(f"审核 {level} / {kind} / {text!r}：应 {code}，实际 {got}")
+    if guard.level_of("bogus") != "strict" or guard.level_of(None) != "strict":
+        fail("未知级别没按 strict")
+    print("route / moderation split ok")
+
+
 def _check_policy_switches(policy, packs, mcp_client, fake, loop_pack, source, root) -> None:
     """#93 决定 6：开放配置的四个开关。默认最严；放宽要确认（启用 / 安装），生效后行为照放宽的来；
-    本地正文底线（send_local_to_model、content_guard 等）仍然锁定。"""
+    本地正文底线（send_local_to_model 等）和内容安全底线（content_safety_baseline）仍然锁定。"""
     from services.runtime import injection
     from services.runtime import tools as runtime_tools
 
@@ -558,14 +622,14 @@ def _check_policy_switches(policy, packs, mcp_client, fake, loop_pack, source, r
     tool = "mcp_loop__lookup"
     loop = {"http_loopback": True, "auth": {"source": "env", "env": "MAS_MCP_CHECK_TOKEN", "header": "Authorization",
                                             "scheme": "bearer"}}
-    for key in ("send_local_to_model", "content_guard", "local_body_check", "remote_local_prompt_default"):
+    for key in ("send_local_to_model", "content_safety_baseline", "local_body_check", "remote_local_prompt_default"):
         if key not in policy.LOCKED:
             fail(f"{key} 应该仍然锁定")
     for key in policy.STRICT_SWITCHES:
         if key in policy.LOCKED or policy.DEFAULTS[key] is not True or key not in policy.RELAXING:
             fail(f"{key} 没开放成默认最严的开关")
-    _, warnings = policy.normalize({"global": {"send_local_to_model": True, "content_guard": "off", "schema_reauth": "no"}})
-    for path in ("global.send_local_to_model", "global.content_guard", "global.schema_reauth"):
+    _, warnings = policy.normalize({"global": {"send_local_to_model": True, "content_safety_baseline": "off", "schema_reauth": "no"}})
+    for path in ("global.send_local_to_model", "global.content_safety_baseline", "global.schema_reauth"):
         if path not in warnings:
             fail(f"{path} 没给 warning：{warnings}")
     if not runtime_tools.confirm_every_call(tool) or not runtime_tools.result_untrusted(tool):

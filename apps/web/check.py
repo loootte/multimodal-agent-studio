@@ -5593,7 +5593,7 @@ def _tool_policy_case(base: str) -> None:
             or view["defaults"]["http_private"] is not False or view["defaults"]["stdio_commands"] != []:
         fail(f"工具安全策略默认值不对：{status} {body[:300]}")
     locked = {item["key"] for item in view["locked"]}
-    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model", "content_guard"):
+    for key in ("local_body_check", "remote_local_prompt_default", "send_local_to_model", "content_safety_baseline"):
         if key not in locked:
             fail(f"底线 {key} 没有列成锁定项")
     for key in ("untrusted_results", "schema_reauth", "mcp_confirm_every_call", "sensitive_confirm_every_call"):
@@ -8221,6 +8221,160 @@ def _adult_remote_cases(base: str, provider, box: ComfyState, directory: str) ->
     print("adult remote refused ok")
 
 
+def _route_form(base: str, name: str, payload: dict, allowed: bool = True, timeout: float = 20):
+    """跑一次表单工具，自动回答确认卡（allowed），返回 (status, raw, events, cards)。"""
+    cards = []
+
+    def on_event(event):
+        if event.get("type") == "tool.confirm":
+            cards.append(event)
+            _post_confirm(base, event.get("run_id") or "", allowed, _ack_of(event))
+
+    session_id = _fresh_session(base)
+    status, raw, events = read_sse(site_port(base), f"/api/sessions/{session_id}/tools/{name}/run", payload,
+                                   on_event=on_event, timeout=timeout)
+    return status, raw, events, cards
+
+
+def _policy_relax(base: str, policy_body: dict, fields: list[str]) -> dict:
+    """放宽要两步：不带 acknowledge 先 409（列出 fields、不保存），带上再 200。"""
+    before = json.loads(request("GET", base + "/api/tool-policy")[1])["policy"]
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": policy_body})
+    refused = json.loads(body or "{}")
+    if status != 409 or refused.get("code") != "acknowledge_required" or sorted(refused.get("fields") or []) != sorted(fields):
+        fail(f"放宽 {fields} 没要求确认：{status} {body[:300]}")
+    if json.loads(request("GET", base + "/api/tool-policy")[1])["policy"] != before:
+        fail("409 之后策略被改了")
+    mark = _now_mark(base)
+    status, body = request("PUT", base + "/api/tool-policy", {"policy": policy_body, "acknowledge": fields})
+    if status != 200:
+        fail(f"确认后放宽失败：{status} {body[:300]}")
+    relaxed = _config_audit_since(base, mark, "security.policy_relaxed")
+    if not relaxed or sorted(relaxed[-1].get("fields") or []) != sorted(f.split(".")[-1] for f in fields) \
+            or any(word in json.dumps(relaxed[-1]) for word in ("127.0.0.1", "naive_")):
+        fail(f"放宽审计不对（只该有字段名）：{relaxed}")
+    return json.loads(body)
+
+
+def _route_split_cases(base: str, provider, box: ComfyState, directory: str) -> None:
+    """#93 拆分：send_local_to_model 管本地内容出站（锁定）；adult_remote_hosts 管成人内容路由；content_guard 只管审不审。
+    默认等于旧行为；放宽走 409 / 审计；实际发第三方每次弹写明主机的卡；关审核不让本地内容出本机；未成年 / 真人底线始终生效。"""
+    import module_tools
+
+    box.set_mode("ok")
+    saved = {name: os.environ.get(name) for name in _REMOTE_ENV}
+    remote = ThreadingHTTPServer(("127.0.0.1", 0), RemoteImageHandler)
+    remote.daemon_threads = True
+    remote.calls = []
+    remote.key = "sk-fake-route-93"
+    threading.Thread(target=remote.serve_forever, daemon=True).start()
+    os.environ["MAS_IMAGE_API_BASE"] = f"http://127.0.0.1:{remote.server_address[1]}/v1"
+    os.environ["MAS_IMAGE_API_KEY"] = remote.key
+    os.environ["MAS_IMAGE_API_MODEL"] = "fake-image-1"
+    adult = {"fields": {"outfit": "evening gown"}, "confirmed": True, "backend": "remote"}
+    try:
+        with _Tools("naive_rated", "naive_general"):
+            view = json.loads(request("GET", base + "/api/tool-policy")[1])
+            if view["defaults"].get("adult_remote_hosts") != [] or view["defaults"].get("content_guard") != "strict":
+                fail(f"默认值不是最严：{view['defaults']}")
+            if "content_safety_baseline" not in {i["key"] for i in view["locked"]} or "content_guard" in {i["key"] for i in view["locked"]}:
+                fail("内容安全底线应锁定、审核级别应开放")
+            # 默认 = 旧行为：分级内容不发第三方
+            status, raw, _events, _cards = _route_form(base, "naive_rated", adult)
+            if status != 400 or "nsfw_backend_not_allowed" not in raw or remote.calls:
+                fail(f"默认没拒绝分级内容发第三方：{status} {raw[:200]}")
+            if module_tools.describe(_tool("naive_rated")).get("local_only") is not True:
+                fail("默认分级工具不是只走本机")
+            # 放宽路由：409 → 确认 → 审计只有字段名
+            _policy_relax(base, {"tools": {"naive_rated": {"adult_remote_hosts": ["127.0.0.1"]}}}, ["tools.adult_remote_hosts"])
+            info = module_tools.describe(_tool("naive_rated"))
+            if info.get("local_only") is not False or info.get("remote_hosts") != ["127.0.0.1"]:
+                fail(f"放宽后工具简介没跟上：{info}")
+            if module_tools.moderation_level(_tool("naive_rated")) != "strict":
+                fail("放宽路由改变了审核级别")
+            # 路由只管去向，审核照旧：放宽后版权角色 / 未成年仍拦
+            status, raw, _e, _c = _route_form(base, "naive_rated", dict(adult, fields={"outfit": "genshin cosplay"}))
+            if status != 400 or "not_original_character" not in raw:
+                fail(f"放宽路由后审核没照旧：{status} {raw[:200]}")
+            # 用户拒绝写明主机的卡：不发
+            status, raw, events, cards = _route_form(base, "naive_rated", adult, allowed=False)
+            card_text = json.dumps([c.get("card") for c in cards] + [c.get("notice") for c in cards], ensure_ascii=False)
+            if not cards or "127.0.0.1" not in card_text or "成人" not in card_text or remote.calls \
+                    or "user_declined" not in json.dumps(events, ensure_ascii=False):
+                fail(f"发第三方前没弹写明主机的卡，或拒绝后仍发了：{card_text[:400]} {len(remote.calls)}")
+            # 同意：每次实际发送都弹卡（两张图两张卡）
+            status, raw, events, cards = _route_form(base, "naive_rated", dict(adult, count=2))
+            artifacts = [e for e in events if e.get("type") == "artifact"]
+            if status != 200 or len(cards) != 2 or len(remote.calls) != 2 or len(artifacts) != 2 \
+                    or any(a.get("rating") != "adult" for a in artifacts):
+                fail(f"同意后没逐张确认 / 没发到放行的主机：{status} {len(cards)} {len(remote.calls)} {raw[:200]}")
+            if remote.key in json.dumps(events, ensure_ascii=False):
+                fail("事件里出现了第三方 key")
+            # 本地提示词仍归 send_local_to_model 那一套：路由放行了，remote_local_prompt 默认拒绝照样拒
+            calls = len(remote.calls)
+            status, raw, events, cards = _route_form(base, "naive_rated", dict(adult, privacy="local"))
+            if "local_prompt_remote_refused" not in json.dumps(events, ensure_ascii=False) + raw or len(remote.calls) != calls:
+                fail(f"放宽成人路由让本地提示词出了本机：{raw[:200]} {len(remote.calls) - calls}")
+            # 不在名单里的主机照样拒
+            request("PUT", base + "/api/tool-policy", {"policy": {"tools": {"naive_rated": {
+                "adult_remote_hosts": ["images.example.com"]}}}, "acknowledge": ["tools.adult_remote_hosts"]})
+            status, raw, _e, _c = _route_form(base, "naive_rated", adult)
+            if status != 400 or "nsfw_backend_not_allowed" not in raw or len(remote.calls) != calls:
+                fail(f"不在 adult_remote_hosts 里的主机没拒：{status} {raw[:200]}")
+            request("PUT", base + "/api/tool-policy", {"reset": True})
+
+            # 审核：默认 strict = 旧行为（普通工具出露骨内容被拦）
+            explicit = {"fields": {"trick": "beta"}, "backend": "local"}
+            status, raw, _e, _c = _route_form(base, "naive_general", explicit)
+            if status != 400 or "unsafe_content" not in raw:
+                fail(f"默认审核没拦普通工具的露骨输出：{status} {raw[:200]}")
+            _policy_relax(base, {"tools": {"naive_general": {"content_guard": "off"}}}, ["tools.content_guard"])
+            if module_tools.moderation_level(_tool("naive_general")) != "off":
+                fail("审核级别没生效")
+            before = len(box.prompts)
+            status, raw, events, _c = _route_form(base, "naive_general", explicit)
+            artifacts = [e for e in events if e.get("type") == "artifact"]
+            if status != 200 or len(box.prompts) != before + 1 or not artifacts or artifacts[-1].get("rating") != "adult":
+                fail(f"关审核后本机出图不对：{status} {raw[:200]}")
+            # 关审核不等于放行出站：露骨内容照样只走本机；本地提示词照样不出本机
+            calls = len(remote.calls)
+            status, raw, events, _c = _route_form(base, "naive_general", dict(explicit, backend="remote"))
+            blob = json.dumps(events, ensure_ascii=False) + raw
+            if "nsfw_backend_not_allowed" not in blob or len(remote.calls) != calls:
+                fail(f"关审核让成人内容发了第三方：{blob[-300:]}")
+            status, raw, events, _c = _route_form(base, "naive_general",
+                                                  {"fields": {"outfit": "evening gown"}, "backend": "remote", "privacy": "local"})
+            blob = json.dumps(events, ensure_ascii=False) + raw
+            if "local_prompt_remote_refused" not in blob or len(remote.calls) != calls:
+                fail(f"关审核让本地提示词出了本机：{blob[-300:]}")
+            # 底线：关审核也拦未成年 / 真人
+            for fields, code in (({"age": "teen", "outfit": "nude"}, "minor_unsafe"),
+                                 ({"outfit": "nude", "scene": "celebrity"}, "not_original_character")):
+                status, raw, _e, _c = _route_form(base, "naive_general", {"fields": fields, "backend": "local"})
+                if status != 400 or code not in raw:
+                    fail(f"关审核后底线 {code} 没生效：{status} {raw[:200]}")
+            for level in ("standard", "off"):
+                request("PUT", base + "/api/tool-policy", {"policy": {"tools": {"naive_rated": {"content_guard": level}}},
+                                                          "acknowledge": ["tools.content_guard"]})
+                for fields, code in (({"age": "teen"}, "minor_unsafe"), ({"outfit": "celebrity"}, "not_original_character")):
+                    status, raw, _e, _c = _route_form(base, "naive_rated", {"fields": fields, "confirmed": True, "backend": "local"})
+                    if status != 400 or code not in raw:
+                        fail(f"{level} 级别下分级工具底线 {code} 没生效：{status} {raw[:200]}")
+                status, raw, _e, _c = _route_form(base, "naive_rated", {"fields": {"outfit": "genshin cosplay"},
+                                                                        "confirmed": True, "backend": "local"})
+                if status != 200:
+                    fail(f"{level} 级别下不该查版权角色：{status} {raw[:200]}")
+    finally:
+        request("PUT", base + "/api/tool-policy", {"reset": True})
+        remote.shutdown()
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    print("route / moderation split ok")
+
+
 def _pack_chat_cases(base: str, provider, box: ComfyState, directory: str) -> None:
     """#86 对话：分级工具要用户同一句说出清单里的关键词才可用；宿主照样查字段。"""
     box.set_mode("ok")
@@ -8273,6 +8427,7 @@ def _pack_character_cases(base: str, provider, box: ComfyState, directory: str, 
     cases["catalog_route"] = lambda: _catalog_route_cases(base)
     cases["chat"] = lambda: _pack_chat_cases(base, provider, box, directory)
     cases["adult_remote"] = lambda: _adult_remote_cases(base, provider, box, directory)
+    cases["route_split"] = lambda: _route_split_cases(base, provider, box, directory)
     if case is None:
         cases["install"] = lambda: _tool_install_cases(base)
         cases.pop("catalog_route")  # form 里已经跑过

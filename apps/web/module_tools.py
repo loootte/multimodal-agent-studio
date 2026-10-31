@@ -43,6 +43,29 @@ def is_module_tool(name) -> bool:
     return isinstance(name, str) and get(name) is not None
 
 
+def adult_remote_hosts(name: str | None) -> list:
+    """#93：成人分级内容允许发往的第三方出图主机（工具安全策略 adult_remote_hosts，tools > packs > global）。
+    name 是分级工具名；没有（提示词本身露骨）按 generate_image 算。取不到策略 = []（只走本机）。"""
+    try:
+        from services.tools import policy
+
+        pack = get(name) if name else None
+        return list(policy.resolve(pack.name if pack else None, name or "generate_image").get("adult_remote_hosts") or [])
+    except Exception:  # noqa: BLE001 策略坏了按最严
+        return []
+
+
+def moderation_level(pack) -> str:
+    """#93：这个工具的内容审核级别（工具安全策略 content_guard：strict / standard / off，默认 strict）。
+    取不到策略按 strict。底线（未成年 / 真人）任何级别都查，见 content_guard。"""
+    try:
+        from services.tools import policy
+
+        return content_guard.level_of(policy.resolve(pack.name, pack.name).get("content_guard"))
+    except Exception:  # noqa: BLE001
+        return content_guard.LEVEL_STRICT
+
+
 def describe(pack) -> dict:
     info = content_guard.content(pack.manifest)
     ui = pack.manifest.get("ui") or {}
@@ -51,8 +74,11 @@ def describe(pack) -> dict:
            "run_label": str(ui.get("run_label") or "开始出图"), "rating": info["rating"],
            "version": pack.manifest.get("version")}
     if info["rating"] == content_guard.RATING_ADULT:
+        hosts = adult_remote_hosts(pack.name)
         out.update(label=info["label"], min_age=info["min_age"], confirm=str(info.get("confirm") or ""),
-                   local_only=True)
+                   local_only=not hosts)
+        if hosts:
+            out["remote_hosts"] = hosts
     panel = panel_info(pack)
     if panel:
         out["panel"] = panel
@@ -197,7 +223,7 @@ def catalog(pack, cfg: dict | None = None) -> dict:
     """表单目录（已过守卫过滤）+ 工具说明。"""
     cfg = config(pack) if cfg is None else cfg
     view = _call(pack, "catalog", None, cfg)
-    view = content_guard.filter_catalog(pack.manifest, view)
+    view = content_guard.filter_catalog(pack.manifest, view, moderation_level(pack))
     out = {"tool": pack.name, **describe(pack),
            "fields": view.get("fields") or [], "extra_fields": view.get("extra_fields") or [],
            "defaults": view.get("defaults") if isinstance(view.get("defaults"), dict) else {}}
@@ -240,18 +266,19 @@ def compose(pack, values, cfg: dict | None = None, *, phase: str = "run") -> dic
     """preview / run：宿主先查输入，再调工具代码，再查输出。返回 {prompt, summary, fields, used_defaults, rating}。"""
     cfg = config(pack) if cfg is None else cfg
     values = _values(values)
+    level = moderation_level(pack)
     try:
-        content_guard.check_inputs(pack.manifest, values)
+        content_guard.check_inputs(pack.manifest, values, level=level)
     except GuardError as exc:
         labels = _labels(pack, cfg)  # 只在拒绝时才取标签，让提示更好读。
         if exc.field and labels.get(exc.field):
-            content_guard.check_inputs(pack.manifest, {exc.field: values[exc.field]}, labels)
+            content_guard.check_inputs(pack.manifest, {exc.field: values[exc.field]}, labels, level=level)
         raise
     function = "preview" if phase == "preview" else "run"
     result = _call(pack, function, values, cfg)
     if function == "preview" and "prompt" not in result:
         result = _call(pack, "run", values, cfg)
-    result = content_guard.check_output(pack.manifest, result)
+    result = content_guard.check_output(pack.manifest, result, level=level)
     used = result.get("used_defaults")
     fields = result.get("fields")
     return {"prompt": result["prompt"], "summary": str(result.get("summary") or "")[:2000],

@@ -171,12 +171,14 @@ anime style illustration, character illustration, full body, highly detailed, be
 | 校服 / 教室 / 学生类内容 | `minor_unsafe`（说明原因） |
 | 幼态体型：娇小、幼态、平胸幼体等 | `minor_unsafe`（说明原因） |
 | 真人、明星、熟人、版权角色（词表 + 《作品名》、@账号、英文人名规则） | `not_original_character`，“请只描述原创角色” |
-| 分级内容发第三方出图 | `nsfw_backend_not_allowed`，说明可能违反服务条款；记一条 `egress.blocked` |
+| 分级内容发第三方出图（主机不在工具安全策略的 `adult_remote_hosts` 里，默认就是） | `nsfw_backend_not_allowed`，说明可能违反服务条款；记一条 `egress.blocked` |
 | 表单没确认 / 对话这一句没关键词 | `confirm_required` |
 
 拒绝原因里用工具的 `content.label`（例如“XX不能画未成年角色”）。表单目录里，过不了守卫或标了 `minor` 的预设会被去掉；结果的 `rating` 以清单为准，工具自称 `general` 也会改成 `adult`。
 
-普通（general）工具：#53 的规则照旧，自定义文字露骨一律 `unsafe_content`，拼出的提示词露骨也拒绝。另外有一条通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，不许发第三方、结果打 `rating: adult`。
+审核级别（#93，工具安全策略的 `content_guard`）：默认 `strict` 是上表全部；`standard` 不查版权角色（《作品名》、版权角色词表）；`off` 不审核，普通工具也能出露骨内容。**未成年和真人这两类在任何级别都拦**（锁定底线 `content_safety_baseline`）。审核只管审不审：发到哪里由 `adult_remote_hosts` 管（默认只走本机，放行后每次发送弹写明主机的卡），本地提示词出站由 `remote_local_prompt` 管，详见 [tool-policy.md](tool-policy.md)。
+
+普通（general）工具：#53 的规则照旧，自定义文字露骨一律 `unsafe_content`，拼出的提示词露骨也拒绝。另外有一条通用兜底：任何提示词本身露骨（比如自己写的提示词），都算成人内容，默认不许发第三方（路由同样看 `adult_remote_hosts`，工具名用 `generate_image`）、结果打 `rating: adult`。
 
 ### 结果标记
 

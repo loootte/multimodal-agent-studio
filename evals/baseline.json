@@ -48,6 +48,7 @@
         "image.form_tool_form_local_rating": true,
         "image.form_tool_chat_consent": true,
         "image.form_tool_adult_remote_refused": true,
+        "image.route_moderation_split": true,
         "image.install_form_tool_ok": true,
         "image.install_legacy_preset_pack_rejected": true,
         "image.install_form_tool_code_and_adult_confirm": true,

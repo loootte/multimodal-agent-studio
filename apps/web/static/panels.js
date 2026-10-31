@@ -85,7 +85,7 @@
         const n = Number(r.count);
         if (!Number.isInteger(n) || n < 1 || n > 20) throw new Error("张数要是 1 到 20。");
         const backend = r.backend === "remote" ? "remote" : "local";
-        if ((rated || tool.local_only) && backend !== "local") throw new Error(`“${tool.label || tool.title}”只能用本机 ComfyUI 出图。`);
+        if (tool.local_only && backend !== "local") throw new Error(`“${tool.label || tool.title}”只能用本机 ComfyUI 出图。`);
         const payload = {
           fields: cleanFields(r.fields),
           count: n,

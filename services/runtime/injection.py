@@ -139,6 +139,11 @@ def confirm_card(name: str, arguments, summary: dict | None, *, agent: str | Non
         lines.append(f"参数会发给 MCP server {host}。" if summary.get("destination_scope") != "local"
                      else "参数会交给本机沙箱里的 MCP server。")
         lines.append("server 返回的内容会作为不可信数据交给模型。")
+    if summary.get("destination") == "third_party_image":
+        host = str(summary.get("destination_host") or "")[:253]
+        lines.append(f"提示词会发给第三方出图服务 {host}。" if host else "提示词会发给第三方出图服务。")
+    if summary.get("adult_remote"):
+        lines.append("这是成人分级内容：工具安全策略（adult_remote_hosts）放行了这个出图服务，每次发送都要你确认。")
     lines.append("会读取本地内容（经句柄）。" if summary.get("reads_local") else "不读取本地内容。")
     if summary.get("local_to_third_party"):
         lines.append("本地提示词正文会发给第三方出图服务（不发给对话模型）。")

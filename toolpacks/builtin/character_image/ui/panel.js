@@ -50,7 +50,7 @@ MASPanels.define(function mount(root, api) {
   count.value = "1";
   const aspect = select([["1:1", "1:1"], ["16:9", "16:9"], ["9:16", "9:16"]]);
   const backend = select([["local", "本机 ComfyUI"], ["remote", "第三方出图"]]);
-  if (rated || tool.local_only) {
+  if (tool.local_only) {
     backend.options[1].disabled = true;
     backend.value = "local";
   }
@@ -182,7 +182,7 @@ MASPanels.define(function mount(root, api) {
       say("张数要是 1 到 20。");
       return;
     }
-    if ((rated || tool.local_only) && backend.value !== "local") {
+    if (tool.local_only && backend.value !== "local") {
       say(`“${tool.label || tool.title}”只能用本机 ComfyUI 出图。`);
       return;
     }

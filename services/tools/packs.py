@@ -487,7 +487,10 @@ def policy_review(data: dict) -> dict:
         # 普通第三方包：只有 untrusted_results / sensitive_confirm_every_call 对它起作用（工具名就是包名）。
         perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
         relaxable = _sensitive(data) and perms.get("read_local_content") is not True
-        out["relaxations"] = policy.relaxations(policy.resolve(name, name), mcp=False, sensitive_relaxable=relaxable)
+        content = data.get("content") if isinstance(data.get("content"), dict) else {}
+        out["relaxations"] = policy.relaxations(policy.resolve(name, name), mcp=False, sensitive_relaxable=relaxable,
+                                                rated=content.get("rating") == "adult",
+                                                moderated=entry.get("kind") == "module")
         for key in out["relaxations"]:
             out["items"].append({"field": key, "text": POLICY_RELAX_TEXT[key]})
         return out
@@ -522,6 +525,10 @@ POLICY_RELAX_TEXT = {
     "schema_reauth": "策略允许 MCP server 改了工具说明或参数后照样调用，不用重新启用（新参数照样过黑名单）。",
     "mcp_confirm_every_call": "策略允许 MCP 远端工具在一轮对话里确认一次后复用，不再每次都弹确认卡。",
     "sensitive_confirm_every_call": "策略允许这个联网工具在一轮对话里确认一次后复用，不再每次都弹确认卡（读本地内容的工具不受影响）。",
+    "content_guard": "策略降低了这个工具的内容审核级别（standard 不查版权角色；off 不审核，普通工具也能出露骨内容）。"
+                     "只影响审不审，不影响内容发到哪里；未成年 / 真人的性化内容仍一律拦截。",
+    "adult_remote_hosts": "策略允许把成人分级内容发到指定的第三方出图服务（不再只走本机 ComfyUI）。第三方服务大多禁止 NSFW 内容，"
+                          "发过去可能违反其服务条款；每次发送前会弹确认卡写明目的主机。未成年 / 真人 / 版权角色仍一律拦截。",
 }
 
 
