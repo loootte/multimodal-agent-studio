@@ -108,13 +108,26 @@ function startServer() {
       button.click();
       setTimeout(() => button.click(), 0);
     });
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const again = await page.$eval("#tool-panel", (node) => ({
-      open: node.open,
-      count: node.querySelectorAll("#tool-panel-body textarea.pfi-text").length,
-      value: (node.querySelector("#tool-panel-body textarea.pfi-text") || {}).value || "",
-    }));
-    if (!again.open || again.count !== 1 || again.value !== edited) fail("连着打开后面板不对：" + JSON.stringify({ open: again.open, count: again.count, same: again.value === edited }));
+    await page.waitForFunction((selector, text) => {
+      const node = document.querySelector(selector);
+      return node && !node.disabled && node.value === text;
+    }, { timeout: 10000 }, panelText, edited).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const again = await page.$eval("#tool-panel", (node) => {
+      const area = node.querySelector("#tool-panel-body textarea.pfi-text");
+      return {
+        open: node.open,
+        count: node.querySelectorAll("#tool-panel-body textarea.pfi-text").length,
+        value: (area || {}).value || "",
+        disabled: area ? area.disabled : null,
+        note: (node.querySelector("#tool-panel-body .note") || {}).textContent || "",
+        host: (document.querySelector("#tool-panel-note") || {}).textContent || "",
+      };
+    });
+    if (!again.open || again.count !== 1 || again.value !== edited) {
+      fail("连着打开后面板不对：" + JSON.stringify({ open: again.open, count: again.count, same: again.value === edited,
+        len: again.value.length, disabled: again.disabled, note: again.note, host: again.host }));
+    }
     // 4. 出图：面板关掉，对话里出现本地提示词出图那一轮并出图
     await page.click("#tool-panel-body .dialog-actions button:not(.ghost)");
     await page.waitForFunction(() => !document.querySelector("#tool-panel").open, { timeout: 5000 });
