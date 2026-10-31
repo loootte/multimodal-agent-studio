@@ -186,3 +186,11 @@ RETRYABLE = {
     "egress_policy_denied": False,
     "local_fingerprint": False,
 }
+# 14.C（#80）规划：运行时执行 todo_write / goal_set / goal_done / plan_submit 后发出。
+# planning.todo 带整份清单（items: id / text / status，counts）；planning.goal 带目标、状态和停止原因（reason / message）；
+# plan.proposed 是 plan 模式交出的计划（plan_id / summary / steps），用户在界面确认后才执行。
+# 文字都是模型写的、写入前过本地正文检查；消费方可以忽略。
+EVENT_PLANNING_TODO = "planning.todo"
+EVENT_PLANNING_GOAL = "planning.goal"
+EVENT_PLAN_PROPOSED = "plan.proposed"
+PLANNING_EVENTS = (EVENT_PLANNING_TODO, EVENT_PLANNING_GOAL, EVENT_PLAN_PROPOSED)

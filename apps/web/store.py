@@ -242,11 +242,18 @@ def _keychain_get(entry: str) -> str | None:
 
 
 class ContextSettingsStore:
-    """14.B（#79）上下文压缩设置（context.json）。读的时候逐项校验，非法项回退默认值；文件坏了整个用默认值。"""
+    """14.B（#79）上下文压缩设置（context.json）。读的时候逐项校验，非法项回退默认值；文件坏了整个用默认值。
+    14.C（#80）规划设置（planning.json）用同一套存法，校验换成 planning.settings。"""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, module: str = "compaction"):
         self.path = path
+        self._module = module
         self._lock = threading.RLock()
+
+    def _rules(self):
+        import importlib
+
+        return importlib.import_module("services.runtime." + self._module)
 
     def _saved(self):
         try:
@@ -258,39 +265,36 @@ class ContextSettingsStore:
             return "corrupt"
 
     def current(self) -> dict:
-        from services.runtime import compaction
-
+        rules = self._rules()
         with self._lock:
             raw = self._saved()
-        values, _warnings = compaction.settings(None if raw == "corrupt" else raw)
+        values, _warnings = rules.settings(None if raw == "corrupt" else raw)
         return values
 
     def public(self) -> dict:
-        from services.runtime import compaction
-
+        rules = self._rules()
         with self._lock:
             raw = self._saved()
-        values, warnings = compaction.settings(None if raw == "corrupt" else raw)
+        values, warnings = rules.settings(None if raw == "corrupt" else raw)
         if raw == "corrupt":
             warnings = ["*"]
-        return {"values": values, "defaults": dict(compaction.DEFAULTS), "warnings": warnings}
+        return {"values": values, "defaults": dict(rules.DEFAULTS), "warnings": warnings}
 
     def update(self, body, reset: bool = False) -> dict:
         """只存校验通过的项（和已存的合并）；非法项不存，返回里列进 warnings，生效值是默认值。"""
-        from services.runtime import compaction
-
+        rules = self._rules()
         if not isinstance(body, dict):
             body = {}
         with self._lock:
             raw = self._saved()
             saved = raw if isinstance(raw, dict) and not reset else {}
-            values, warnings = compaction.settings(body)
-            accepted = {key: values[key] for key in body if key in compaction.DEFAULTS and key not in warnings}
-            cleared = [key for key in body if key in compaction.DEFAULTS and body[key] in (None, "")]
-            merged = {key: value for key, value in saved.items() if key in compaction.DEFAULTS and key not in cleared}
+            values, warnings = rules.settings(body)
+            accepted = {key: values[key] for key in body if key in rules.DEFAULTS and key not in warnings}
+            cleared = [key for key in body if key in rules.DEFAULTS and body[key] in (None, "")]
+            merged = {key: value for key, value in saved.items() if key in rules.DEFAULTS and key not in cleared}
             merged.update(accepted)
-            merged, _ = compaction.settings(merged)
-            stored = {key: value for key, value in merged.items() if value != compaction.DEFAULTS[key]}
+            merged, _ = rules.settings(merged)
+            stored = {key: value for key, value in merged.items() if value != rules.DEFAULTS[key]}
             _atomic_write(self.path, stored)
         view = self.public()
         view["warnings"] = sorted(set(view["warnings"]) | set(warnings))

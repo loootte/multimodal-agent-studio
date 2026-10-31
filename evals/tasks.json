@@ -691,6 +691,56 @@
       "fake_only": true,
       "case": "cross_run",
       "marker": "LOCAL-CROSS-91be"
+    },
+    {
+      "id": "runtime.todo_progress",
+      "category": "runtime",
+      "kind": "planning",
+      "fake_only": true,
+      "case": "todo_progress"
+    },
+    {
+      "id": "runtime.plan_mode_readonly",
+      "category": "runtime",
+      "kind": "planning",
+      "fake_only": true,
+      "case": "plan_mode_readonly"
+    },
+    {
+      "id": "runtime.goal_budget_stop",
+      "category": "runtime",
+      "kind": "planning",
+      "fake_only": true,
+      "case": "goal_budget"
+    },
+    {
+      "id": "runtime.todo_quantity_ignored",
+      "category": "runtime",
+      "kind": "planning",
+      "fake_only": true,
+      "case": "quantity_ignored"
+    },
+    {
+      "id": "security.planning_no_local_body",
+      "category": "security",
+      "kind": "planning",
+      "fake_only": true,
+      "case": "no_local_body",
+      "marker": "LOCAL-PLAN-5e1b"
+    },
+    {
+      "id": "multi.text_task_delegates",
+      "category": "multi_agent",
+      "kind": "planning_web",
+      "fake_only": true,
+      "case": "text_delegates"
+    },
+    {
+      "id": "runtime.plan_mode_approve",
+      "category": "runtime",
+      "kind": "planning_web",
+      "fake_only": true,
+      "case": "plan_mode"
     }
   ]
 }

@@ -36,6 +36,7 @@ from packages.contracts.events import (
     EVENT_TOOL_CONFIRM,
     EVENT_TOOL_REQUESTED,
     HUMAN,
+    PLANNING_EVENTS,
     RETRYABLE,
     TERMINAL_EVENTS,
 )
@@ -345,7 +346,7 @@ class RunHub:
             return [run for run in self._runs.values() if not run.done.is_set()]
 
 
-def start(app, session_id: str, text, attachments, mode=None) -> Run:
+def start(app, session_id: str, text, attachments, mode=None, plan=False, approve_plan=None) -> Run:
     if not isinstance(text, str):
         raise RequestError(400, "invalid_json", "文字需要是字符串。")
     text = text.strip()
@@ -358,6 +359,21 @@ def start(app, session_id: str, text, attachments, mode=None) -> Run:
     run = Run(session_id, message_id)
     # 多智能体只在这一轮勾了开关时打开；默认仍是单 Agent（ADR 0005）。
     run.agent_mode = "multi" if mode == "multi" else "single"
+    # 14.C（#80）：plan 模式只在这一轮勾了开关时打开；approve_plan 是用户在界面上点「按计划执行」，
+    # 只认会话里那条助手消息上真有的 plan.proposed（模型自己放不开执行）。
+    run.planning_mode = "plan" if plan is True and not approve_plan else "execute"
+    run._approved_plan = None
+    if approve_plan is not None:
+        from services.runtime import planning
+
+        try:
+            current = app.sessions.get(session_id)
+        except StoreError as exc:
+            raise RequestError(404, "not_found", "找不到这个会话。") from exc
+        approved = planning.approved_plan(current.get("messages"), approve_plan) if isinstance(approve_plan, str) else None
+        if approved is None:
+            raise RequestError(400, "plan_not_found", "找不到要执行的计划。")
+        run._approved_plan = approved
     try:
         assistant = app.sessions.append_turn(session_id, text, run.run_id, records)
     except StoreError as exc:
@@ -628,7 +644,11 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
     try:
         session = app.sessions.get(session_id)
         user_id, user_text, attachments = _latest_user(session)
-        image_request = _image_request(user_text, attachments) and not _open_prompt_request(user_text) and getattr(run, "agent_mode", "single") != "multi"
+        image_request = (
+            _image_request(user_text, attachments) and not _open_prompt_request(user_text)
+            and getattr(run, "agent_mode", "single") != "multi"
+            and getattr(run, "planning_mode", "execute") != "plan" and getattr(run, "_approved_plan", None) is None
+        )
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
             session = app.sessions.get(session_id)
@@ -680,9 +700,12 @@ def _generate_text_turn(
     multi = getattr(run, "agent_mode", "single") == "multi"
     delegator = None
     pipeline = None
+    planner = _planner_for(app, session_id, run, session, multi)
+    planning_mode = planner is not None and planner.mode == "plan"
     if multi:
         request, delegator = _orchestrate(app, session_id, message_id, run, provider, request)
-        pipeline = _Pipeline(user_text, {agent.name: agent.role for agent in agents.discover()})
+        pipeline = _Pipeline(user_text, {agent.name: agent.role for agent in agents.discover()},
+                             todo=planner is not None and not planning_mode and not planner.todos)
         telemetry.record("orchestrator.policy", turn_kind=pipeline.kind)
     spoken: list[str] = []
     seen = 0
@@ -705,6 +728,8 @@ def _generate_text_turn(
     run._turn_text = user_text
 
     def resume(text):
+        if planning_mode:
+            return None  # plan 模式：只由 planner 提醒交计划
         if multi:
             return pipeline.resume(text)
         # 出图请求第一步就只回文字（追问提示词、追问变体）时，纠正一次，让它按 plan_images → accept_local_content 走。
@@ -765,7 +790,14 @@ def _generate_text_turn(
                 return agents.not_allowed(name, agents.ORCHESTRATOR)
             if name == agents.DELEGATE:
                 pipeline.saw(arguments)
-                return delegator(arguments)
+                result = delegator(arguments)
+                if planner is not None:
+                    # 14.C：委托做完一项，清单往前推一项（失败不动），界面上逐项打勾。
+                    progressed = planner.advance(isinstance(result, dict) and result.get("ok") is not False)
+                    if progressed:
+                        _push_saved(app, session_id, message_id, run,
+                                    {**progressed, "message_id": message_id, "run_id": run.run_id})
+                return result
         if name == "generate_image" and isinstance(arguments, dict) and arguments.get("content_handle"):
             pushes["handle"] = str(arguments.get("content_handle"))
         if _is_web_tool(name) and name not in take_tools:
@@ -807,7 +839,7 @@ def _generate_text_turn(
             execute=execute,
             mutating=mutating,
             validate=validate,
-            choose=pipeline.choose if multi else None,
+            choose=pipeline.choose if multi and not planning_mode else None,
             budget=delegator.budget if multi else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
@@ -815,10 +847,14 @@ def _generate_text_turn(
             base_url=provider["base_url"],
             compaction=_compaction_settings(app),
             archive=archive,
+            planning=planner,
         ):
             flush_traces()
             kind = event.get("type")
             if kind == EVENT_RUN_STARTED:
+                continue
+            if kind in PLANNING_EVENTS:
+                _push_saved(app, session_id, message_id, run, {**event, "message_id": message_id, "run_id": run.run_id})
                 continue
             if kind == EVENT_MESSAGE_DELTA:
                 piece = event.get("text") or ""
@@ -1390,6 +1426,45 @@ def _stage(run, text: str, source: str, rating: str | None = None) -> str:
     if rating:
         staged[handle]["rating"] = rating
     return handle
+
+
+def _planning_settings(app) -> dict:
+    """14.C：设置页的规划配置；没有设置存储（测试替身）时用默认值（最严）。"""
+    from services.runtime import planning
+
+    holder = getattr(app, "planning", None)
+    try:
+        values = holder.current() if holder is not None else None
+    except Exception:  # 读不到设置不影响对话：用默认值
+        values = None
+    return planning.settings(values)[0]
+
+
+def _planner_for(app, session_id, run, session, multi):
+    """这一轮要不要规划工具：plan 模式、执行已确认的计划、多智能体（orchestrator_todo）或用户打开了
+    single_agent_tools 才有。都不满足返回 None：单 Agent 不开 plan 模式时请求和以前一致。
+    重进循环（收完本地内容接着出图）沿用同一个 Planner。"""
+    existing = getattr(run, "_planner", None)
+    if existing is not None:
+        return existing
+    from services.runtime import planning
+
+    values = _planning_settings(app)
+    mode = getattr(run, "planning_mode", "execute")
+    approved = getattr(run, "_approved_plan", None)
+    if mode != "plan" and approved is None and not (multi and values["orchestrator_todo"]) and not values["single_agent_tools"]:
+        return None
+    todos, goal = planning.carried(session.get("messages"))
+    seed = None
+    if approved is not None:
+        todos, seed = planning.seed_from_plan(approved)
+    planner = planning.Planner(mode=mode, values=values, todos=todos, goal=goal,
+                               local_bodies=app.sessions.local_bodies(session_id), seed_note=seed)
+    run._planner = planner
+    if todos and approved is not None:
+        _push_saved(app, session_id, run.message_id, run,
+                    {**planner.todo_event(), "message_id": run.message_id, "run_id": run.run_id})
+    return planner
 
 
 def _compaction_settings(app):
@@ -2622,6 +2697,8 @@ _TASK_WORDS = re.compile(
 )
 _RESEARCH_WORDS = re.compile(r"比较|对比|调研|研究|综述|分析|评估|优缺点|选型|利弊|差异|区别|为什么|compare|research|analy", re.IGNORECASE)
 _TEXT_PIPELINE = ("planner", "writer", "reviewer")
+_TODO_NOTE = ("（运行时）这一轮不能直接回答。先用 todo_write 把任务拆成条目（例如：提纲、起草、审稿、汇总），"
+              "第一项标 in_progress，其余 pending；之后按清单用 delegate 委托子 Agent。")
 _MAX_FORCED = 6
 
 
@@ -2643,12 +2720,14 @@ class _Pipeline:
     """编排者这一轮必须走的委托。非寒暄的回合：第一步强制 delegate；
     文字和研究类任务在 planner、writer、reviewer 都委托过之前，每一步都强制 delegate 并点明下一个该委托谁。"""
 
-    def __init__(self, text: str, roles: dict):
+    def __init__(self, text: str, roles: dict, todo: bool = False):
         self.kind = turn_kind(text)
         self.roles = roles
         self.done: list[str] = []
         self.forced = 0
         self.nudged = False
+        # 14.C（#80）：文字 / 研究类任务先强制一次 todo_write 拆分，再按清单委托（深度、并行上限不变）。
+        self.todo_first = todo and self.kind in ("text", "research")
 
     def saw(self, arguments) -> None:
         for item in (arguments or {}).get("tasks") or []:
@@ -2673,6 +2752,9 @@ class _Pipeline:
         missing = self.missing()
         if not missing or self.forced >= _MAX_FORCED:
             return None
+        if self.todo_first and not self.done:
+            self.todo_first = False
+            return {"tool_choice": {"name": "todo_write"}, "note": _TODO_NOTE}
         self.forced += 1
         return {"tool_choice": {"name": agents.DELEGATE}, "note": self._note(missing[0])}
 

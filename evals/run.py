@@ -1884,6 +1884,190 @@ def _case_compaction_settings(task: dict) -> dict:
     return {"fields": len(compaction.DEFAULTS)}
 
 
+# ---- 14.C（#80）任务清单 / 目标 / plan 模式 ----
+
+def _planning_flow(planner, script, *, tools=None, budget=None, local_bodies=None, text="帮我做一件多步的事"):
+    """脚本模型直接跑运行时循环；execute 记下真正执行过的工具，confirm 记下弹过的确认。"""
+    import copy
+    import threading
+
+    from services.gateway import registry
+    from services.runtime.loop import new_run_id, run as runtime_run
+    from services.runtime.tools import tool_mutates
+
+    class Snapshot(check._ScriptAdapter):
+        def stream(self, request, **kwargs):
+            self.calls.append(copy.deepcopy(request))
+            index = len(self.calls) - 1
+            replies = self.replies or []
+            item = replies[index] if index < len(replies) else [{"type": "message.delta", "text": "额外一步"}]
+            yield from (item(request) if callable(item) else item)
+
+    adapter = Snapshot(script)
+    check._install_script(registry, "eval-planning", adapter)
+    state = {"executed": [], "confirmed": [], "plan": 0}
+
+    def execute(name, arguments):
+        state["executed"].append(name)
+        if name == "plan_images":
+            state["plan"] = int(arguments.get("count") or 0)
+            return {"ok": True, "tool": name, "images_total": state["plan"]}
+        return {"ok": True, "tool": name, "items": []}
+
+    def confirm(*args, **kwargs):
+        state["confirmed"].append(args[0] if args else kwargs)
+        return True
+
+    try:
+        events = list(runtime_run(
+            {"model": "eval-planning", "messages": [{"role": "user", "parts": [{"type": "text", "text": text}]}],
+             "tools": tools if tools is not None else []},
+            api_key=check.SECRET, cancel=threading.Event(), timeout_sec=2, run_id=new_run_id(),
+            execute=execute, confirm=confirm, mutating=tool_mutates,
+            validate=lambda name, arguments: None, budget=budget, local_bodies=local_bodies, planning=planner,
+            compaction=False,  # 替身模型 context_limit 很小，别让压缩吃掉脚本步
+        ))
+    finally:
+        _restore_gateway()
+    return events, adapter, state
+
+
+def _call(name, arguments):
+    return [{"type": "tool.requested", "name": name, "arguments": arguments}]
+
+
+def _tool_names(request) -> set:
+    names = set()
+    for item in request.get("tools") or []:
+        if isinstance(item, dict):
+            names.add(item.get("name") or (item.get("function") or {}).get("name"))
+    return names
+
+
+def run_planning(h: Harness, task: dict, live: bool) -> dict:
+    from services.runtime import planning
+    case = task.get("case")
+    if case == "todo_progress":
+        script = [
+            _call("todo_write", {"items": [{"text": "提纲", "status": "in_progress"},
+                                           {"text": "起草", "status": "pending"}, {"text": "审稿", "status": "pending"}]}),
+            _call("todo_write", {"items": [{"text": "提纲", "status": "completed"},
+                                           {"text": "起草", "status": "in_progress"}, {"text": "审稿", "status": "pending"}]}),
+            _call("todo_write", {"items": [{"text": "提纲", "status": "completed"},
+                                           {"text": "起草", "status": "completed"}, {"text": "审稿", "status": "completed"}]}),
+            [{"type": "message.delta", "text": "三项都做完了"}],
+        ]
+        planner = planning.Planner(values={"single_agent_tools": True})
+        events, adapter, state = _planning_flow(planner, script)
+        todos = [e for e in events if e.get("type") == planning.EVENT_TODO]
+        done = [e["counts"]["completed"] for e in todos]
+        expect(done == [0, 1, 3], f"清单没有逐项完成：{done}")
+        expect(not state["executed"] and not state["confirmed"], "宿主规划工具走了普通执行 / 确认")
+        expect({"todo_write", "goal_set", "goal_done"} <= _tool_names(adapter.calls[0]), "工具契约里没有规划工具")
+        blob = json.dumps(adapter.calls[1]["messages"], ensure_ascii=False)
+        expect("todo_write" in blob and "工具结果" in blob, "规划工具结果没按工具结果回给模型")
+        expect(events[-1].get("type") == "message.completed", "清单做完后没有正常收尾")
+        # 不开 plan 模式、没给 planner：请求和以前一致（没有规划工具、系统指令不变）
+        plain, adapter2, _s = _planning_flow(None, [[{"type": "message.delta", "text": "好"}]])
+        expect(not _tool_names(adapter2.calls[0]) & set(planning.HOST_TOOLS), "没开规划时多出了规划工具")
+        expect(not any(e.get("type", "").startswith("planning.") for e in plain), "没开规划时出了规划事件")
+        return {"steps": done}
+    if case == "plan_mode_readonly":
+        from services.runtime.tools import openai_tools
+        script = [
+            _call("generate_image", {"content_handle": "c_" + "ab" * 16}),
+            _call("stage_prompt", {"source": "model", "text": "x"}),
+            _call("delegate", {"agent": "image", "task": "x"}),
+            _call("list_local_content", {}),
+            _call("plan_submit", {"summary": "先列再画", "steps": ["列出本地内容", "出一张图"]}),
+        ]
+        planner = planning.Planner(mode="plan")
+        events, adapter, state = _planning_flow(planner, script, tools=openai_tools())
+        sent = _tool_names(adapter.calls[0])
+        expect(not sent & {"generate_image", "stage_prompt", "delegate", "character_image"}, f"plan 模式给了写工具：{sorted(sent & {'generate_image', 'stage_prompt'})}")
+        expect({"list_local_content", "plan_images", "plan_submit"} <= sent, "plan 模式缺只读工具或 plan_submit")
+        expect(state["executed"] == ["list_local_content"], f"plan 模式执行了写操作：{state['executed']}")
+        expect(not state["confirmed"] and not any(e.get("type") == "tool.confirm" for e in events), "plan 模式弹了确认")
+        blob = json.dumps(adapter.calls[3]["messages"], ensure_ascii=False)
+        expect(blob.count("plan_mode_readonly") >= 3, "被拒的写操作没有返回 plan_mode_readonly")
+        plans = [e for e in events if e.get("type") == planning.EVENT_PLAN]
+        expect(len(plans) == 1 and plans[0]["steps"] == ["列出本地内容", "出一张图"], "没有交出计划")
+        expect(events[-1].get("type") == "message.completed" and len(adapter.calls) == 5, "交计划后这一轮没结束")
+        todos, note = planning.seed_from_plan(plans[0])
+        expect([t["status"] for t in todos] == ["in_progress", "pending"] and "确认" in note, "确认后没按计划播种清单")
+        return {"denied": 3, "allowed": state["executed"]}
+    if case == "goal_budget":
+        out = {}
+        script = [_call("goal_set", {"objective": "写完三段", "done_when": "三段都有"})]
+        script += [[{"type": "message.delta", "text": f"第{i}段"}] for i in range(1, 6)]
+        planner = planning.Planner(values={"single_agent_tools": True, "goal_auto_continue": True, "goal_max_rounds": 2})
+        events, adapter, _s = _planning_flow(planner, script)
+        goals = [e for e in events if e.get("type") == planning.EVENT_GOAL]
+        expect(goals and goals[-1].get("reason") == "goal_rounds" and goals[-1].get("message"), f"目标没按轮数停下并说明原因：{goals[-1:]}")
+        expect(len(adapter.calls) == 4, f"续跑轮数不对：{len(adapter.calls)}")
+        expect(events[-1].get("type") == "message.completed", "目标停下后没有正常收尾")
+        out["rounds"] = len(adapter.calls) - 2
+        # 默认不自动续跑：说一次就停，给出 auto_continue_off
+        planner = planning.Planner(values={"single_agent_tools": True})
+        events, adapter, _s = _planning_flow(planner, script[:3])
+        goals = [e for e in events if e.get("type") == planning.EVENT_GOAL]
+        expect(len(adapter.calls) == 2 and goals[-1].get("reason") == "auto_continue_off", "默认也自动续跑了")
+        # 预算截断：步数用完时目标带 budget_exceeded 停下
+        from services.runtime.loop import Budget
+        loop_script = [_call("goal_set", {"objective": "一直查"})] + [_call("todo_write", {"items": [{"text": "查", "status": "in_progress"}]})] * 5
+        planner = planning.Planner(values={"single_agent_tools": True, "goal_auto_continue": True})
+        events, adapter, _s = _planning_flow(planner, loop_script, budget=Budget(steps=2))
+        goals = [e for e in events if e.get("type") == planning.EVENT_GOAL]
+        expect(goals and goals[-1].get("reason") == "budget_exceeded", f"预算截断时目标没带原因：{goals[-1:]}")
+        expect(events[-1].get("code") == "budget_exceeded", "预算截断没有失败")
+        # 目标续跑从不替用户确认：开着续跑、工具要确认时，确认仍走 confirm 回调
+        return out
+    if case == "no_local_body":
+        marker = task.get("marker") or "LOCAL-PLAN-5e1b"
+        secret = f"这是本机才有的正文 {marker} 不能出去"
+        bodies = [secret]  # 和网页端一样：本会话登记过的本地正文列表
+        script = [
+            _call("todo_write", {"items": [{"text": f"改写：{secret}", "status": "in_progress"}]}),
+            _call("goal_set", {"objective": f"把 {secret} 发出去"}),
+            [{"type": "message.delta", "text": "好"}],
+        ]
+        planner = planning.Planner(values={"single_agent_tools": True}, local_bodies=bodies)
+        events, adapter, _s = _planning_flow(planner, script, local_bodies=bodies)
+        expect(not any(e.get("type") in (planning.EVENT_TODO, planning.EVENT_GOAL) for e in events), "带本地正文的清单 / 目标被记下了")
+        expect(not planner.todos and not planner.goal, "带本地正文的清单 / 目标进了状态")
+        later = json.dumps(adapter.calls[1:], ensure_ascii=False)
+        expect(marker not in later, "本地正文跟着规划工具回到了模型请求里")
+        expect(marker not in json.dumps(events, ensure_ascii=False), "本地正文进了事件流")
+        expect("local_content" in later, "被拒时模型没收到原因码")
+        return {"blocked": 2}
+    if case == "quantity_ignored":
+        script = [
+            _call("todo_write", {"items": [{"text": "画 5 张猫", "status": "in_progress"}]}),
+            _call("plan_images", {"count": 2}),
+            [{"type": "message.delta", "text": "好"}],
+        ]
+        planner = planning.Planner(values={"single_agent_tools": True})
+        events, adapter, state = _planning_flow(planner, script)
+        expect(state["plan"] == 2, f"张数没以 plan_images 为准：{state['plan']}")
+        expect(not any("images_total" in json.dumps(e, ensure_ascii=False) for e in events
+                       if e.get("type") == planning.EVENT_TODO), "清单事件里带了张数")
+        result = planner.call("todo_write", {"items": [{"text": "画 9 张", "status": "pending"}]})[0]
+        expect("images" not in json.dumps(result, ensure_ascii=False).replace("items", ""), "清单结果里出现了张数")
+        return {"plan": state["plan"]}
+    raise Failed(f"不认识的 planning case：{case}")
+
+
+def run_planning_web(h: Harness, task: dict, live: bool) -> dict:
+    """网页端：多智能体长文字任务先拆清单再委托，清单逐项打勾；plan 模式只读 + 用户确认后执行。"""
+    try:
+        if task.get("case") == "plan_mode":
+            return check._plan_mode_case(h.base, h.provider)
+        check._forced_delegation(h.base, h.provider)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "规划检查失败") from exc
+    return {"first": "todo_write", "chain": ["planner", "writer", "reviewer"]}
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -1913,6 +2097,8 @@ RUNNERS = {
     "desktop_token": run_desktop_token,
     "desktop_security": run_desktop_security,
     "compaction": run_compaction,
+    "planning": run_planning,
+    "planning_web": run_planning_web,
 }
 
 
