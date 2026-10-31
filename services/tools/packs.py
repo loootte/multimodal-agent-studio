@@ -13,9 +13,10 @@ entry.kind（#86）：
 - module  表单工具：代码是工具目录里的 .py（契约见 docs/tool-code-contract.md：catalog / preview / run），
           内置的在宿主进程里跑（受信任），第三方的在沙箱子进程里跑。content.rating=adult 的工具不管代码写了什么，
           宿主的 content_guard 都会在调用前后强制检查。
-- mcp     外部 MCP server（14.A #78，ADR 0011）：只给第三方包。transport=stdio 时 server 是工具目录里的 .py，
-          在 12.D 沙箱子进程里跑；transport=http 时宿主经 toolpack 渠道出站（见 services/tools/mcp_client.py）。
-          远端工具默认不启用，逐个启用时把描述和参数模式的摘要绑进启用记录，变了要重新启用。
+- mcp     外部 MCP server（14.A #78，ADR 0011）：只给第三方包。transport=stdio 时默认是工具目录里的 .py，
+          在 12.D 沙箱子进程里跑；策略白名单放行后才可以跑 npx 或指定命令。transport=http 时宿主经 toolpack
+          渠道出站（见 services/tools/mcp_client.py）。地址类别、认证头和参数黑名单见 services/tools/policy.py。
+          远端工具默认不启用，逐个启用时把描述、参数模式和当时的策略摘要绑进启用记录，变了要重新启用。
 
 清单字段见 docs/tool-packs.md。这里负责：读清单、校验、发现、安装、卸载、导出。
 配置值和密钥不在包里：它们存在数据目录的 tools.json，导出时不会带走。
@@ -252,13 +253,25 @@ def _mcp_problems(data: dict, entry: dict, builtin: bool) -> list[str]:
     if transport not in MCP_TRANSPORTS:
         return out + ["entry.transport 只能是 stdio 或 http。"]
     if transport == "stdio":
-        if set(entry) - {"kind", "transport", "module"}:
-            out.append("stdio 的 entry 只能有 kind、transport、module（不能写任意命令）。")
-        module = entry.get("module")
-        if not isinstance(module, str) or not module.endswith(".py"):
-            out.append("stdio 的 entry.module 必须是工具目录里的 .py（在 12.D 沙箱里跑）。")
-        elif not _relative_inside(module):
-            out.append("entry.module 必须是工具目录里的相对路径（不能是绝对路径，不能有 ..）。")
+        if entry.get("command"):
+            if set(entry) - {"kind", "transport", "command", "args"}:
+                out.append("stdio 命令模式只能有 kind、transport、command、args（不能再写 module）。")
+            command = entry.get("command")
+            if not isinstance(command, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", command):
+                out.append("stdio 的 command 只能是命令名，不能是路径。")
+            args = entry.get("args") or []
+            if not isinstance(args, list) or len(args) > 16 or not all(
+                    isinstance(arg, str) and arg and len(arg) <= 400 and not any(ch in "\n\r\x00&|;<>`" for ch in arg)
+                    for arg in args):
+                out.append("stdio 的 args 必须是字符串列表，不能含换行或 shell 符号。")
+        else:
+            if set(entry) - {"kind", "transport", "module"}:
+                out.append("stdio 的 entry 只能有 kind、transport、module（不能写任意命令）。")
+            module = entry.get("module")
+            if not isinstance(module, str) or not module.endswith(".py"):
+                out.append("stdio 的 entry.module 必须是工具目录里的 .py（在 12.D 沙箱里跑）。")
+            elif not _relative_inside(module):
+                out.append("entry.module 必须是工具目录里的相对路径（不能是绝对路径，不能有 ..）。")
     else:
         if set(entry) - {"kind", "transport", "url"}:
             out.append("http 的 entry 只能有 kind、transport、url。")
@@ -424,6 +437,12 @@ def entry_problem(folder: str, data: dict, builtin: bool = False) -> str | None:
     """入口代码必须是工具目录里真实存在的文件（解开符号链接以后也还在目录里）。
     内置和第三方一样按工具目录查（#89：内置 python 工具的代码也在自己的目录里）。"""
     entry = data.get("entry") or {}
+    if _mcp_command(data):
+        try:
+            panel_files(folder, data)
+        except PackError as exc:
+            return exc.message
+        return None
     if entry.get("kind") not in ("python", "module") and not _mcp_stdio(data):
         return None
     try:
@@ -448,8 +467,13 @@ def _mcp_stdio(data: dict) -> bool:
     return isinstance(entry, dict) and entry.get("kind") == "mcp" and entry.get("transport") == "stdio"
 
 
+def _mcp_command(data: dict) -> bool:
+    entry = data.get("entry") if isinstance(data, dict) else None
+    return _mcp_stdio(data) and bool(entry.get("command"))
+
+
 def has_code(folder: str, data: dict) -> bool:
-    if ((data.get("entry") or {}).get("kind")) in ("python", "module") or _mcp_stdio(data):
+    if _mcp_command(data) or ((data.get("entry") or {}).get("kind")) in ("python", "module") or _mcp_stdio(data):
         return True
     for _base, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -546,6 +570,10 @@ class Pack:
             return "outdated"
         if record.get("digest") != pack_digest(self.folder):
             return "changed"
+        from services.tools import policy
+
+        if not policy.grant_ok(self.name, record.get("policy")):
+            return "policy"
         return "ok"
 
     def granted(self) -> set:
@@ -562,7 +590,7 @@ class Pack:
 
     def module_path(self) -> str | None:
         entry = self.manifest["entry"]
-        if entry["kind"] not in ("python", "module") and not _mcp_stdio(self.manifest):
+        if entry["kind"] not in ("python", "module") and not (_mcp_stdio(self.manifest) and not _mcp_command(self.manifest)):
             return None
         # 代码一律在工具自己的目录里（内置 python 工具也是，#89）。
         return os.path.normpath(os.path.join(self.folder, entry["module"]))
@@ -698,6 +726,7 @@ GRANT_TEXT = {
     "missing": "没有授权记录，请重新安装并确认权限。",
     "outdated": "这个包是旧版本装的，授权没有绑定包内容，请重新安装并确认权限。",
     "changed": "装好以后包里的文件被改过，授权作废，请重新安装并确认权限。",
+    "policy": "安全策略变了，请重新安装并确认放宽项。",
 }
 
 
@@ -756,12 +785,17 @@ def review(data: dict, code: bool = False, panel: list | None = None) -> dict:
     out["confirm_every_call"] = _sensitive(data)
     entry = data.get("entry") if isinstance(data.get("entry"), dict) else {}
     if entry.get("kind") == "mcp":
-        from services.tools import mcp_client
+        from services.tools import mcp_client, policy
 
-        out["confirm_every_call"] = True
+        out["confirm_every_call"] = policy.resolve(data.get("name") if isinstance(data.get("name"), str) else None)["confirm_every_call"]
         out["mcp"] = mcp_client.review_facts(entry)
         if entry.get("transport") == "http":
             out["mode"] = "host_http"
+    from services.tools import policy as tool_policy
+
+    pack_name = data.get("name") if isinstance(data.get("name"), str) else None
+    for item in tool_policy.relaxations(pack_name):
+        items.append({"permission": item["permission"], "label": item["label"], "risk": "high", "effect": item["effect"]})
     return out
 
 
@@ -898,13 +932,20 @@ def inspect(source: str) -> dict:
             if problem:
                 problems.append(problem)
             else:
+                from services.tools import policy as tool_policy
+
+                problems.extend(tool_policy.manifest_problems(data))
                 panel = panel_listing(folder, data)
         permissions = sorted(k for k, v in (data.get("permissions") or {}).items() if v is True) \
             if isinstance(data, dict) and isinstance(data.get("permissions"), dict) else []
         code = isinstance(data, dict) and has_code(folder, data)
         level = rating(data) if isinstance(data, dict) else "general"
         content = data.get("content") if isinstance(data, dict) and isinstance(data.get("content"), dict) else {}
-        accept = sorted(permissions + ([ACCEPT_CODE] if code else []) + ([ACCEPT_ADULT] if level == "adult" else []))
+        from services.tools import policy as tool_policy
+
+        relaxed = [item["permission"] for item in tool_policy.relaxations(data.get("name"))] \
+            if isinstance(data, dict) and isinstance(data.get("name"), str) else []
+        accept = sorted(permissions + ([ACCEPT_CODE] if code else []) + ([ACCEPT_ADULT] if level == "adult" else []) + relaxed)
         summary = {"name": data.get("name"), "version": data.get("version"), "description": data.get("description"),
                    "permissions": permissions, "code": code, "rating": level,
                    "min_age": content.get("min_age"), "label": content.get("label"), "confirm": content.get("confirm"),
@@ -943,6 +984,9 @@ def install(source: str, accept_permissions) -> dict:
         if summary["rating"] == "adult" and ACCEPT_ADULT not in given:
             raise PackError("rating_not_accepted",
                             f"这个工具声明了成人分级（rating=adult，{summary.get('min_age')} 岁以上），安装前要勾选确认。")
+        missing_policy = [item for item in wanted if item.startswith("policy:") and item not in given]
+        if missing_policy:
+            raise PackError("policy_not_accepted", "安装前要确认放宽的安全策略：" + "、".join(missing_policy) + "。")
         perms = summary["permissions"]
         raise PackError("permission_not_accepted", f"安装前要确认权限：{'、'.join(perms) or '无'}。")
     folder, temp = _unpack(source)
@@ -952,8 +996,12 @@ def install(source: str, accept_permissions) -> dict:
         staging = target + ".installing"
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(folder, staging, ignore=_export_ignore)
+        from services.tools import policy as tool_policy
+
         record = {"schema": GRANT_SCHEMA, "permissions": summary["permissions"], "version": summary["version"],
-                  "code": summary["code"], "rating": summary["rating"], "digest": pack_digest(staging)}
+                  "code": summary["code"], "rating": summary["rating"], "digest": pack_digest(staging),
+                  "policy": tool_policy.fingerprint(summary["name"])}
+        tool_policy.audit(summary["name"])
         with open(os.path.join(staging, GRANTS), "w", encoding="utf-8") as handle:
             json.dump(record, handle)
         shutil.rmtree(target, ignore_errors=True)

@@ -619,6 +619,34 @@
       "marker": "INJECT-MCP-1e2f"
     },
     {
+      "id": "security.tool_policy_default_block",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "default_block"
+    },
+    {
+      "id": "security.tool_policy_relax",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "relax"
+    },
+    {
+      "id": "security.tool_policy_priority",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "priority"
+    },
+    {
+      "id": "security.tool_policy_secret",
+      "category": "security",
+      "kind": "tool_policy",
+      "fake_only": true,
+      "case": "secret"
+    },
+    {
       "id": "runtime.compaction_keeps_plan",
       "category": "runtime",
       "kind": "compaction",

@@ -88,6 +88,10 @@
 | 6.3 | 每次调用都弹宿主模板确认卡，server 写的说明不进卡片（#78） | 自动：`security.mcp_confirm_always` |
 | 6.4 | 本地正文及其编码变体在连接 MCP server 前就被拦（`egress.blocked`，渠道 `toolpack`），server 不会被启动（#78） | 自动：`security.mcp_local_content_blocked` |
 | 6.5 | MCP 结果标 `untrusted` 回传，非文字内容丢掉；出站 JSON-RPC 有字段和方法白名单（#78） | 自动：`security.mcp_untrusted_result`、`_check_mcp_client` |
+| 6.6 | 工具安全策略默认最严：回环、链路本地、局域网和白名单外命令都拒绝；没配文件不得放宽（#93） | 自动：`security.tool_policy_default_block` |
+| 6.7 | 显式放宽要在安装和启用时确认，策略变了已启用的工具要重新启用（#93） | 自动：`security.tool_policy_relax` |
+| 6.8 | 策略覆盖顺序是工具 > 包 > 全局 > 默认（#93） | 自动：`security.tool_policy_priority` |
+| 6.9 | 认证密钥只从环境变量或钥匙串读，不进策略文件、审计和工具结果（#93） | 自动：`security.tool_policy_secret` |
 
 ## 4. 发布前
 

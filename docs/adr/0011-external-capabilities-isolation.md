@@ -25,7 +25,9 @@
 - 远端工具描述或 schema 的摘要绑进授权记录，变化后要重新授权。
 - 句柄只在本机宿主解析，对外部 server 是不透明字符串，不能被它消费。
 
-> 实现说明（14.A #78，ADR 状态不变）：见 [docs/mcp-client.md](../mcp-client.md)。比本节更严的地方有四处。所有 MCP 包都 `confirm: always`。不收 `config`。HTTP 只收 https。`tools/call` 在连接前先查本地正文，查不到时也拒绝。待定的地方有两处：stdio 只收包内 Python；HTTP 拦本机地址，但不拦局域网地址。
+> 实现说明（14.A #78，ADR 状态不变）：见 [docs/mcp-client.md](../mcp-client.md)。比本节更严的地方有四处。所有 MCP 包都 `confirm: always`。不收 `config`。HTTP 只收 https。`tools/call` 在连接前先查本地正文，查不到时也拒绝。
+>
+> #93 把当时待定的两处做成可配置，默认不放宽：stdio 命令白名单默认只有包内 Python；HTTP 的回环、链路本地、局域网默认都拒绝。认证头、参数黑名单和确认 / 本地正文 / 不可信结果 / 重新启用这几个开关也在同一份策略里，默认最严。见 [docs/tool-policy.md](../tool-policy.md)。本决定仍是提议。
 
 ### 句柄新增两种作用域
 

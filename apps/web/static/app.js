@@ -57,6 +57,7 @@ document.querySelector("#toggle-sessions").addEventListener("click", () => {
 });
 document.querySelector("#open-settings").addEventListener("click", openSettings);
 document.querySelector("#close-settings").addEventListener("click", () => settings.close());
+document.querySelector("#close-settings-top").addEventListener("click", () => settings.close());
 document.querySelector("#toggle-runtime").addEventListener("click", () => {
   document.querySelector(".app").classList.toggle("runtime-collapsed");
 });
@@ -67,6 +68,17 @@ document.querySelector("#close-runtime").addEventListener("click", () => {
 });
 document.querySelector("#settings-form").addEventListener("submit", saveSettings);
 document.querySelector("#clear-key").addEventListener("click", clearKey);
+document.querySelector("#save-tool-policy").addEventListener("click", () => saveToolPolicy());
+document.querySelector("#reset-tool-policy").addEventListener("click", resetToolPolicy);
+document.querySelector("#policy-scope-use").addEventListener("click", usePolicyScope);
+document.querySelector("#policy-scope").addEventListener("change", fillPolicyForm);
+document.querySelector("#tool-policy").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.target && event.target.id === "policy-scope-new") usePolicyScope();
+  else saveToolPolicy();
+});
 document.querySelector("#file").addEventListener("change", (event) => {
   const chosen = event.target.files && event.target.files[0];
   event.target.value = "";
@@ -1557,7 +1569,318 @@ function openSettings() {
   showSettingsError("");
   refreshStorage();
   refreshContext();
+  refreshToolPolicy();
   settings.showModal();
+}
+
+// #93：工具安全策略。规则和 services/tools/policy.py 的 relaxations() 一致。页面不提交密钥。
+let policyView = null;
+
+const POLICY_SWITCHES = ["confirm_every_call", "local_body_check", "untrusted_results", "schema_reauth"];
+
+async function refreshToolPolicy() {
+  const hint = document.querySelector("#policy-hint");
+  try {
+    policyView = await api("GET", "/api/tool-policy");
+    fillPolicyScopes("global");
+    fillPolicyForm();
+    if (policyView.warning) showSettingsError(policyView.warning);
+  } catch (error) {
+    policyView = null;
+    if (hint) hint.textContent = "读不到安全策略。";
+  }
+}
+
+function fillPolicyScopes(prefer) {
+  const select = document.querySelector("#policy-scope");
+  const wanted = prefer || select.value || "global";
+  const doc = (policyView && policyView.document) || {};
+  select.replaceChildren();
+  select.append(policyOption("global", "全局默认"));
+  Object.keys(doc.packs || {}).sort().forEach((name) => {
+    select.append(policyOption("pack:" + name, "包 " + name));
+  });
+  Object.keys(doc.tools || {}).sort().forEach((name) => {
+    select.append(policyOption("tool:" + name, "工具 " + name));
+  });
+  const has = Array.from(select.options).some((item) => item.value === wanted);
+  select.value = has ? wanted : "global";
+}
+
+function policyOption(value, label) {
+  const node = document.createElement("option");
+  node.value = value;
+  node.textContent = label;
+  return node;
+}
+
+function selectedPolicyScope() {
+  const value = document.querySelector("#policy-scope").value || "global";
+  if (value === "global") return { kind: "global", name: "" };
+  const splitAt = value.indexOf(":");
+  return { kind: value.slice(0, splitAt), name: value.slice(splitAt + 1) };
+}
+
+function usePolicyScope() {
+  if (!policyView) {
+    showSettingsError("读不到安全策略。");
+    return;
+  }
+  const raw = document.querySelector("#policy-scope-new").value.trim();
+  if (!raw) return;
+  showSettingsError("");
+  if (raw.includes("__")) {
+    if (!/^[a-z][a-z0-9_]{1,47}__[a-z][a-z0-9_]{0,63}$/.test(raw)) {
+      showSettingsError("工具层要写成 包名__工具名。包名小写字母开头；工具名用小写字母、数字或下划线。");
+      return;
+    }
+    if (!policyView.document.tools) policyView.document.tools = {};
+    if (!policyView.document.tools[raw]) policyView.document.tools[raw] = {};
+    fillPolicyScopes("tool:" + raw);
+  } else {
+    if (!/^[a-z][a-z0-9_]{1,47}$/.test(raw)) {
+      showSettingsError("包名要小写字母开头，2 到 48 位，只能有小写字母、数字和下划线。");
+      return;
+    }
+    if (!policyView.document.packs) policyView.document.packs = {};
+    if (!policyView.document.packs[raw]) policyView.document.packs[raw] = {};
+    fillPolicyScopes("pack:" + raw);
+  }
+  document.querySelector("#policy-scope-new").value = "";
+  fillPolicyForm();
+}
+
+function clonePolicy(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function applyPolicyLayer(out, layer) {
+  if (!layer) return;
+  Object.keys(out).forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(layer, key)) out[key] = clonePolicy(layer[key]);
+  });
+}
+
+function policyResolved(scope) {
+  const out = clonePolicy(policyView.defaults);
+  const doc = policyView.document || {};
+  applyPolicyLayer(out, doc.global);
+  if (scope.kind === "pack") applyPolicyLayer(out, (doc.packs || {})[scope.name]);
+  if (scope.kind === "tool") {
+    applyPolicyLayer(out, (doc.packs || {})[scope.name.split("__")[0]]);
+    applyPolicyLayer(out, (doc.tools || {})[scope.name]);
+  }
+  return out;
+}
+
+function policyParent(scope) {
+  if (scope.kind === "global") return clonePolicy(policyView.defaults);
+  if (scope.kind === "pack") return policyResolved({ kind: "global", name: "" });
+  const out = clonePolicy(policyView.defaults);
+  applyPolicyLayer(out, policyView.document.global);
+  applyPolicyLayer(out, (policyView.document.packs || {})[scope.name.split("__")[0]]);
+  return out;
+}
+
+function splitPolicyNames(text) {
+  const out = [];
+  text.split(/[\s,，]+/).forEach((part) => {
+    if (part && out.indexOf(part) < 0) out.push(part);
+  });
+  return out;
+}
+
+function readPolicyForm() {
+  const form = document.querySelector("#settings-form");
+  const command = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+  const param = /^[A-Za-z_][A-Za-z0-9_]{0,40}$/;
+  const headerOk = /^[A-Za-z0-9-]{1,40}$/;
+  const envOk = /^[A-Z][A-Z0-9_]{0,60}$/;
+  const entryOk = /^[A-Za-z0-9_.-]{1,120}$/;
+  const stdio = splitPolicyNames(form.elements.pol_stdio.value);
+  const blocked = splitPolicyNames(form.elements.pol_params_block.value);
+  const allowed = splitPolicyNames(form.elements.pol_params_allow.value);
+  if (stdio.length > 8) throw new Error("命令最多 8 个。");
+  if (stdio.some((name) => !command.test(name))) {
+    throw new Error("命令名只能是程序名，例如 npx 或 python.exe，不能写路径。");
+  }
+  if (blocked.length > 32 || allowed.length > 32) throw new Error("参数名最多 32 个。");
+  if (blocked.concat(allowed).some((name) => !param.test(name))) {
+    throw new Error("参数名只能是字母、数字和下划线。");
+  }
+  const header = form.elements.pol_auth_header.value.trim();
+  const source = form.elements.pol_auth_source.value;
+  const authName = form.elements.pol_auth_name.value.trim();
+  let auth = null;
+  if (header || source || authName) {
+    if (!header || !source || !authName) {
+      throw new Error("认证要同时填写头名称、来源和变量名。不要填写密钥本身。");
+    }
+    if (!headerOk.test(header)) throw new Error("认证头名称不合法。");
+    if (source === "env" && !envOk.test(authName)) {
+      throw new Error("环境变量名要全大写，例如 MAS_MCP_TOKEN。");
+    }
+    if (source === "keychain" && !entryOk.test(authName)) throw new Error("钥匙串条目名不合法。");
+    auth = { header: header };
+    auth[source] = authName;
+  }
+  const values = {
+    stdio_commands: stdio,
+    allow_loopback: form.elements.pol_allow_loopback.checked,
+    allow_link_local: form.elements.pol_allow_link_local.checked,
+    allow_lan: form.elements.pol_allow_lan.checked,
+    auth: auth,
+    params_block: blocked,
+    params_allow: allowed,
+    content_guard: form.elements.pol_content_guard.value === "off" ? "off" : "strict",
+  };
+  POLICY_SWITCHES.forEach((key) => {
+    values[key] = form.elements["pol_" + key].checked;
+  });
+  return values;
+}
+
+function relaxFields(resolved) {
+  const found = [];
+  const base = (policyView && policyView.defaults) || {};
+  if ((resolved.stdio_commands || []).length) found.push("stdio_commands");
+  if (resolved.allow_loopback) found.push("allow_loopback");
+  if (resolved.allow_link_local) found.push("allow_link_local");
+  if (resolved.allow_lan) found.push("allow_lan");
+  if (resolved.auth) found.push("auth");
+  const allow = new Set(resolved.params_allow || []);
+  const blocked = new Set((resolved.params_block || []).filter((name) => !allow.has(name)));
+  const required = base.params_block || [];
+  if (!required.every((name) => blocked.has(name))) found.push("params_block");
+  POLICY_SWITCHES.forEach((key) => {
+    if (resolved[key] === false) found.push(key);
+  });
+  if (resolved.content_guard !== "strict") found.push("content_guard");
+  return found;
+}
+
+function relaxLabel(field) {
+  const labels = (policyView && policyView.labels) || {};
+  const item = labels[field];
+  return item && item.label ? item.label : field;
+}
+
+function fillPolicyForm() {
+  if (!policyView) return;
+  fillPolicyInputs(policyResolved(selectedPolicyScope()));
+}
+
+function fillPolicyInputs(resolved) {
+  const form = document.querySelector("#settings-form");
+  form.elements.pol_stdio.value = (resolved.stdio_commands || []).join(" ");
+  form.elements.pol_allow_loopback.checked = Boolean(resolved.allow_loopback);
+  form.elements.pol_allow_link_local.checked = Boolean(resolved.allow_link_local);
+  form.elements.pol_allow_lan.checked = Boolean(resolved.allow_lan);
+  const auth = resolved.auth || null;
+  form.elements.pol_auth_header.value = auth && auth.header ? auth.header : "";
+  form.elements.pol_auth_source.value = auth && auth.keychain ? "keychain" : (auth && auth.env ? "env" : "");
+  form.elements.pol_auth_name.value = auth ? (auth.env || auth.keychain || "") : "";
+  form.elements.pol_params_block.value = (resolved.params_block || []).join(" ");
+  form.elements.pol_params_allow.value = (resolved.params_allow || []).join(" ");
+  POLICY_SWITCHES.forEach((key) => {
+    form.elements["pol_" + key].checked = Boolean(resolved[key]);
+  });
+  form.elements.pol_content_guard.value = resolved.content_guard === "off" ? "off" : "strict";
+  const hint = document.querySelector("#policy-hint");
+  const fields = relaxFields(resolved);
+  if (!fields.length) {
+    hint.textContent = "这一层相对默认没有放宽。解析不了的地址、0.0.0.0 和 :: 永远拒绝。策略变了之后，已启用的工具要重新启用。";
+    return;
+  }
+  hint.textContent = "这一层已经放宽：" + fields.map((field) => relaxLabel(field)).join("、")
+    + "。再放宽时保存前会再问一次。策略变了之后，已启用的工具要重新启用。";
+}
+
+function policyLayerDiff(parent, next) {
+  const layer = {};
+  Object.keys(parent).forEach((key) => {
+    if (JSON.stringify(parent[key]) !== JSON.stringify(next[key])) layer[key] = clonePolicy(next[key]);
+  });
+  return layer;
+}
+
+function dropEmptyPolicyLayers(doc) {
+  ["packs", "tools"].forEach((scope) => {
+    const bucket = doc[scope] || {};
+    Object.keys(bucket).forEach((name) => {
+      if (!bucket[name] || !Object.keys(bucket[name]).length) delete bucket[name];
+    });
+  });
+}
+
+async function saveToolPolicy() {
+  if (!policyView) {
+    showSettingsError("读不到安全策略。");
+    return false;
+  }
+  showSettingsError("");
+  let next;
+  try {
+    next = readPolicyForm();
+  } catch (error) {
+    showSettingsError(error.message);
+    return false;
+  }
+  const scope = selectedPolicyScope();
+  const before = relaxFields(policyResolved(scope));
+  const after = relaxFields(next);
+  const added = after.filter((field) => before.indexOf(field) < 0);
+  if (added.length) {
+    const lines = added.map((field) => relaxLabel(field)).join("\n");
+    const accepted = window.confirm(
+      "这些项比现在更松。已安装的工具包要重新安装，已启用的 MCP 工具要重新启用。\n\n"
+      + lines + "\n\n确定写入吗？");
+    if (!accepted) {
+      showSettingsError("没有保存。");
+      return false;
+    }
+  }
+  const doc = clonePolicy(policyView.document);
+  doc.schema = "mas.toolpolicy/1";
+  const layer = policyLayerDiff(policyParent(scope), next);
+  if (scope.kind === "global") doc.global = layer;
+  else {
+    const bucket = scope.kind === "pack" ? "packs" : "tools";
+    if (!doc[bucket]) doc[bucket] = {};
+    if (Object.keys(layer).length) doc[bucket][scope.name] = layer;
+    else delete doc[bucket][scope.name];
+  }
+  dropEmptyPolicyLayers(doc);
+  try {
+    policyView = await api("PUT", "/api/tool-policy", doc);
+    const wanted = scope.kind === "global" ? "global" : scope.kind + ":" + scope.name;
+    fillPolicyScopes(wanted);
+    fillPolicyForm();
+    const hint = document.querySelector("#policy-hint");
+    hint.textContent = "已保存。" + hint.textContent;
+    document.dispatchEvent(new Event("mas:tools-changed"));
+    return true;
+  } catch (error) {
+    showSettingsError(error.message || "没能保存安全策略。");
+    return false;
+  }
+}
+
+async function resetToolPolicy() {
+  if (!policyView) {
+    showSettingsError("读不到安全策略。");
+    return;
+  }
+  let previous = null;
+  try {
+    previous = readPolicyForm();
+  } catch (error) {
+    previous = null;
+  }
+  fillPolicyInputs(policyParent(selectedPolicyScope()));
+  const ok = await saveToolPolicy();
+  if (!ok && previous) fillPolicyInputs(previous);
+  if (!ok && !previous) fillPolicyForm();
 }
 
 // 14.B（#79）：上下文压缩设置。非法取值由服务端回退默认值，这里只显示回退了哪些项。
@@ -1763,6 +2086,7 @@ function readSavedSession() {
 const toolDialog = document.querySelector("#tool-settings");
 document.querySelector("#open-tools").addEventListener("click", openToolSettings);
 document.querySelector("#close-tools").addEventListener("click", () => toolDialog.close());
+document.querySelector("#close-tools-top").addEventListener("click", () => toolDialog.close());
 document.querySelector("#tool-form").addEventListener("submit", saveToolConfig);
 document.querySelector("#tool-reset").addEventListener("click", resetToolConfig);
 document.querySelector("#tool-test").addEventListener("click", testToolConfig);
@@ -1916,6 +2240,7 @@ function renderToolMeta(view) {
     missing: "没有授权记录，请重新安装并确认权限。",
     outdated: "旧版本装的包，授权没有绑定包内容，请重新安装并确认权限。",
     changed: "装好后包里的文件被改过，授权已作废，请重新安装。",
+    policy: "安全策略变了，请重新安装并确认放宽项。",
   };
   if (pack.grant && GRANT_STATE[pack.grant]) line(GRANT_STATE[pack.grant]).className = "note";
   if ((pack.denied || []).length) line(`未授权：${pack.denied.map((key) => PERMISSION_LABEL[key] || key).join("、")}`).className = "note";
