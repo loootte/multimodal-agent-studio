@@ -23,8 +23,11 @@ def tool_specs(audience: str = "internal") -> list[dict]:
     return [_bare(item) for item in audience_tools(audience)]
 
 
-def external_contracts() -> list[dict]:
-    return [_openai(item) for item in audience_tools("external")]
+def external_contracts(include=()) -> list[dict]:
+    """给模型的工具契约。记忆工具（14.D）默认不在里面，宿主按设置放进 include 才有。"""
+    from services.tools import packs
+
+    return [_openai(item) for item in audience_tools("external") if not packs.gated_out(item.name, include)]
 
 
 def module(name: str):

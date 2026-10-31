@@ -1091,8 +1091,9 @@ class SessionStore:
             self._write(session)
             return _public_content(record)
 
-    def add_content(self, session_id: str, text: str, purpose: str = "keep") -> dict:
-        """对话框提交的正文。同一会话里相同正文和用途复用句柄。"""
+    def add_content(self, session_id: str, text: str, purpose: str = "keep", memory_id: str | None = None) -> dict:
+        """对话框提交的正文。同一会话里相同正文和用途复用句柄。
+        memory_id（14.D #81）：从长期记忆重新签发时带上，删记忆时据此作废这枚句柄（复用已有句柄时不打标记）。"""
         check_id(session_id, "会话")
         purpose = clean_purpose(purpose)
         with self._lock:
@@ -1120,6 +1121,8 @@ class SessionStore:
                 "message_id": "",
                 "created_at": _now(),
             }
+            if memory_id:
+                record["memory_id"] = memory_id
             _scope(record, session_id)
             session.setdefault("contents", []).append(record)
             session["updated_at"] = _now()
@@ -1373,6 +1376,22 @@ class SessionStore:
                     self._write(session)
                     return "revoked"
         return "absent"
+
+    def revoke_memory(self, memory_id: str) -> int:
+        """14.D：删一条长期记忆时，作废它在各会话里签发过的句柄。返回作废几枚。"""
+        if not isinstance(memory_id, str) or not memory_id:
+            return 0
+        found = []
+        for session in self.all_sessions():
+            session_id = session.get("session_id")
+            for item in session.get("contents") or []:
+                if isinstance(item, dict) and item.get("memory_id") == memory_id and not item.get("revoked_at"):
+                    found.append((session_id, item.get("handle")))
+        count = 0
+        for session_id, handle in found:
+            if isinstance(session_id, str) and self.revoke_content(session_id, handle) == "revoked":
+                count += 1
+        return count
 
     def revoke_run(self, session_id: str, run_id: str) -> int:
         """运行结束时作废绑定到这次运行的句柄。返回作废几枚。"""

@@ -278,6 +278,8 @@
    - 层：存储（`mas.memory/1`，分 preference 和 content）、运行时（`remember` / `recall` / `forget`）、网页记忆面板（默认关闭，每条写入要确认）。
    - 句柄隔离：容易破坏，约束最严。只有 preference 的文字能进上下文并要过指纹；content 类只存句柄形态（purpose `memory`）并加密，跨会话由宿主重新签发句柄，12.B 的跨会话不可消费规则不变。
    - 验收：B 会话只看到 A 会话的偏好文字和新签发的句柄，看不到正文；伪装成 preference 的正文被拦；关闭时没有记忆进上下文。
+   - 进度：实现在 `issue-81` 分支，见 [docs/long-term-memory.md](docs/long-term-memory.md)。存储在 `packages/artifacts/memory.py`（`data/memory/memory.json`，随 12.F 明文 / 加密（独立的 `memory` 作用域密钥）/ 只在内存）；宿主工具 `remember` / `recall` / `forget` 在 `services/runtime/memory.py`，默认关闭，关着时三个工具不进任何模型请求、系统提示逐字节不变；打开后只在单 Agent 文字轮提供工具；每次写入 / 删除都弹确认（`confirm: always`，且不记进「本轮已确认」）；偏好写入和注入前都过本地正文检查（当前会话、其它会话、记忆里的正文和指纹）；content 记忆只显示编号和标签，`recall` 在当前会话重新签发句柄，删除时作废各会话里重发的句柄；明文存储模式默认不收 content 记忆，要用户在面板里明确打开；网页「记忆」面板可查看、编辑、删除、导出（不含正文）、调整设置（`data/memory_settings.json`）。
+   - 后续（未做）：content 记忆支持文件（现在只收文字，文件返回 `memory_file_unsupported`）；多智能体子 Agent 和出图切片是否提供 recall；带确认的自动抽取候选（issue 明确不做无确认的自动抽取）；导出带正文要单独口令加密。
 5. [#82](https://github.com/loootte/multimodal-agent-studio/issues/82) **14.E** 调度与后台任务（P1）
    - 层：新 `services/scheduler/`（once / every / daily / weekly / cron，后台 jobs）、运行时、网页任务列表和待确认队列。
    - 句柄隔离：需要设计。任务引用本地内容时用绑定任务 id 的 `scheduled` 句柄，有 TTL，可撤销，到期或任务修改后要重新授权；无人值守**不自动确认**，`confirm: always` 和 `high_risk` 的调用永远不能预授权，遇到就挂起为待确认。

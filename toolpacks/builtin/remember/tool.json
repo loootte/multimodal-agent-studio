@@ -1,0 +1,54 @@
+{
+  "schema": "mas.tool/1",
+  "name": "remember",
+  "version": "1.0.0",
+  "description": "记进本机长期记忆（只在用户打开记忆时提供；每次写入都要用户确认）。kind=preference 记一条偏好文字（不写本地正文）；kind=content 用本会话句柄记一段本地内容，要起标签，正文不经过你。",
+  "order": 35,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": [
+          "preference",
+          "content"
+        ],
+        "description": "preference：偏好文字；content：本地内容（经句柄）。"
+      },
+      "preference": {
+        "type": "string",
+        "maxLength": 200,
+        "description": "kind=preference 时的偏好，例如「默认竖图」。不要写本地正文。"
+      },
+      "content_handle": {
+        "type": "string",
+        "description": "kind=content 时本会话本地内容的句柄。"
+      },
+      "label": {
+        "type": "string",
+        "maxLength": 40,
+        "description": "给这条记忆起的短标签（content 必填）。不要写正文。"
+      }
+    },
+    "required": [
+      "kind"
+    ]
+  },
+  "mutating": true,
+  "confirm": "always",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": true,
+    "network": false,
+    "write_files": true,
+    "send_local_to_model": false
+  }
+}

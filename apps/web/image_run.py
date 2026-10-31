@@ -25,12 +25,12 @@ def style_names() -> set[str]:
     return set(agent_tools.load_styles())
 
 
-def image_tools() -> list[dict]:
-    """发给第三方的契约。参数里没有正文、字节、路径或文件名。"""
+def image_tools(include=()) -> list[dict]:
+    """发给第三方的契约。参数里没有正文、字节、路径或文件名。include：显式放进来的记忆工具（14.D）。"""
     _ensure_poc()
     from services.tools.registry import external_contracts
 
-    return external_contracts()
+    return external_contracts(include)
 
 
 def comfy_base() -> str | None:

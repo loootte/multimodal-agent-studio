@@ -134,6 +134,10 @@ def confirm_card(name: str, arguments, summary: dict | None, *, agent: str | Non
     lines.append("会读取本地内容（经句柄）。" if summary.get("reads_local") else "不读取本地内容。")
     if summary.get("local_to_third_party"):
         lines.append("本地提示词正文会发给第三方出图服务（不发给对话模型）。")
+    if name == "remember":
+        lines.append("会写进本机长期记忆（14.D），以后的会话也能用；本地内容只以句柄出现，正文不发给模型。")
+    elif name == "forget":
+        lines.append("会删除这条长期记忆，并作废各会话里由它重发的句柄。")
     card = {
         "schema": CONFIRM_SCHEMA,
         "by": "host",

@@ -2068,6 +2068,194 @@ def run_planning_web(h: Harness, task: dict, live: bool) -> dict:
     return {"first": "todo_write", "chain": ["planner", "writer", "reviewer"]}
 
 
+
+EVENT_TOOL_CALL_TYPE = "tool_call"
+
+
+def _memory_reset(h: Harness) -> None:
+    for item in h.app.memory.list():
+        h.app.memory.delete(item["memory_id"])
+    h.app.memory_settings.update({}, reset=True)
+
+
+def _memory_on(h: Harness, **values) -> None:
+    status, body = check.request("PUT", h.base + "/api/memory/settings", {"values": dict({"enabled": True}, **values)})
+    expect(status == 200, f"打开记忆失败：{status} {body[:200]}")
+
+
+def _memory_speak(h: Harness, session_id: str, tool: str | None, arguments: dict | None, text: str = "记一下"):
+    """让替身模型调一次记忆工具（tool=None 时只普通回答一句），返回 (事件, 这一轮发给模型的请求体)。"""
+    sent = len(h.provider.requests)
+    if tool:
+        h.provider.mode = "probe"
+        h.provider.probe_tool = tool
+        h.provider.probe = arguments
+        h.provider.probe_times = 1
+    else:
+        h.provider.mode = "ok"
+    try:
+        events = check._speak(h.base, session_id, text, timeout=15)
+    except SystemExit as exc:
+        raise Failed(str(exc)) from None
+    finally:
+        h.provider.probe = None
+        h.provider.probe_tool = None
+        h.provider.mode = "ok"
+    expect(_status(events) == "completed", f"对话没有正常结束：{_status(events)}")
+    return events, [item["body"] for item in h.provider.requests[sent:]]
+
+
+def _memory_result(events: list[dict], name: str) -> dict:
+    for event in events:
+        if event.get("type") == EVENT_TOOL_CALL_TYPE and event.get("tool") == name and "result" in event:
+            result = event.get("result")
+            return result if isinstance(result, dict) else {}
+    raise Failed(f"没看到 {name} 的工具结果：{[e.get('type') for e in events]}")
+
+
+def _system_text(body: dict) -> str:
+    for item in body.get("messages") or []:
+        if isinstance(item, dict) and item.get("role") == "system":
+            return json.dumps(item.get("content"), ensure_ascii=False)
+    return ""
+
+
+def run_memory(h: Harness, task: dict, live: bool) -> dict:
+    """14.D #81：本地长期记忆。全程替身模型，经真实网页对话路径。
+    content_handle_only：content 记忆从会话 A 记下、在 B 里 recall，正文从没进任何模型请求，B 拿到的是新句柄；
+    preference_fingerprint：伪装成偏好的本地正文（原文 / base64 / 别的会话的正文 / 面板手写）都被拦，记忆库里没有；
+    cross_session_reissue：B 的新句柄只在 B 有效，A 的旧句柄在 B 里无效；偏好从 A 出现在 B 的请求里；
+    off_no_context：功能关着时请求里没有记忆工具、没有记忆文字（库里有条目也不注入）；
+    forget_recall：删掉以后 recall 返回 handle_not_found，B 里重发的句柄也被作废；
+    preference_cross_session：A 里经确认记下的偏好出现在 B 的系统提示里，并且记忆写入弹了确认卡。"""
+    from services.runtime import memory as rules
+
+    case = task["case"]
+    marker = task.get("marker", "LOCAL-MEM")
+    _memory_reset(h)
+    detail = {"case": case}
+    try:
+        if case == "off_no_context":
+            h.app.memory.add_preference(f"回答用简体中文 {marker}", "语言")
+            session_id = check._fresh_session(h.base)
+            _events, bodies = _memory_speak(h, session_id, None, None, text="你好")
+            dumped = json.dumps(bodies, ensure_ascii=False)
+            expect(bodies, "没有发出模型请求")
+            for body in bodies:
+                expect(not (_tool_names(body) & set(rules.TOOLS)), f"记忆关着，请求里还有记忆工具：{_tool_names(body)}")
+            expect(marker not in dumped and "长期记忆" not in dumped, "记忆关着，请求里还有记忆文字")
+            detail.update(requests=len(bodies))
+        elif case == "preference_cross_session":
+            _memory_on(h)
+            a = check._fresh_session(h.base)
+            pref = f"以后回答都先给结论 {marker}"
+            events, _bodies = _memory_speak(h, a, "remember", {"kind": "preference", "preference": pref, "label": "风格"})
+            confirms = [e for e in events if e.get("type") == "tool.confirm" and e.get("name") == "remember"]
+            expect(confirms, "记忆写入没有弹确认卡")
+            result = _memory_result(events, "remember")
+            expect(result.get("ok") and result.get("kind") == "preference", f"偏好没记下：{result}")
+            b = check._fresh_session(h.base)
+            _events, bodies = _memory_speak(h, b, None, None, text="你好")
+            expect(bodies and pref in _system_text(bodies[0]), "会话 B 的系统提示里没有 A 记下的偏好")
+            expect(set(rules.TOOLS) <= _tool_names(bodies[0]), f"记忆打开了，请求里没有记忆工具：{_tool_names(bodies[0])}")
+            detail.update(confirms=len(confirms))
+        elif case in ("content_handle_only", "cross_session_reissue"):
+            _memory_on(h)
+            a = check._fresh_session(h.base)
+            text = f"本地会议纪要正文 {marker}"
+            handle_a = h.app.sessions.add_content(a, text, "keep")["handle"]
+            if not h.app.memory.encrypted:  # 明文存储默认不收 content 记忆（12.F：本地正文只加密落盘）
+                events, _bodies = _memory_speak(h, a, "remember", {"kind": "content", "content_handle": handle_a, "label": "会议纪要"})
+                code = (_memory_result(events, "remember").get("error") or {}).get("code")
+                expect(code == "content_needs_encryption", f"明文存储下 content 记忆没被拒：{code}")
+                _memory_on(h, allow_plaintext_content=True)
+            events, bodies_a = _memory_speak(h, a, "remember", {"kind": "content", "content_handle": handle_a, "label": "会议纪要"})
+            result = _memory_result(events, "remember")
+            expect(result.get("ok") and result.get("kind") == "content", f"content 记忆没记下：{result}")
+            memory_id = result["memory_id"]
+            expect(h.app.memory.body(memory_id) == text, "记忆库里的正文不对")
+            b = check._fresh_session(h.base)
+            pref = f"偏好暖色调 {marker[:4]}-pref"
+            h.app.memory.add_preference(pref, "色调")
+            events, bodies_b = _memory_speak(h, b, "recall", {"query": "会议"}, text="上次的会议纪要")
+            result = _memory_result(events, "recall")
+            items = [item for item in result.get("items") or [] if item.get("memory_id") == memory_id]
+            expect(items and items[0].get("content_handle"), f"recall 没有重发句柄：{result}")
+            handle_b = items[0]["content_handle"]
+            expect(handle_b != handle_a, "B 拿到的是 A 的旧句柄")
+            dumped = json.dumps(bodies_a + bodies_b, ensure_ascii=False)
+            expect(marker not in dumped, "本地正文进了模型请求")
+            expect(memory_id in _system_text(bodies_b[0]) and "会议纪要" in _system_text(bodies_b[0]),
+                   "B 的系统提示里没有 content 记忆的编号和标签")
+            if case == "cross_session_reissue":
+                record, code = h.app.sessions.resolve_content(b, handle_b)
+                expect(record is not None and record.get("text") == text, f"新句柄在 B 里用不了：{code}")
+                record, code = h.app.sessions.resolve_content(b, handle_a)
+                expect(record is None, "A 的句柄在 B 里也能用")
+                record, code = h.app.sessions.resolve_content(a, handle_b)
+                expect(record is None, "B 的新句柄在 A 里也能用")
+                expect(pref in _system_text(bodies_b[0]), "偏好没有跨会话出现在 B 的请求里")
+                detail.update(cross=code)
+            detail.update(requests=len(bodies_a) + len(bodies_b))
+            if case == "content_handle_only":  # 12.F 加密模式：不用明文开关就收 content，盘上读不到正文
+                with _StorageSite(h, "on") as site:
+                    expect(rules.content_allowed(site.app.memory, {"enabled": True, "allow_plaintext_content": False}),
+                           "加密模式下 content 记忆不能用")
+                    site.app.memory.add_content(text, "会议纪要")
+                    blob, names = _tree_bytes(os.path.join(site.directory, "memory"))
+                    expect(names and marker.encode("utf-8") not in blob and "会议纪要".encode("utf-8") not in blob,
+                           f"记忆文件里读得到明文：{names}")
+                    reopened = server.App(site.directory, timeout_sec=5).memory
+                    expect(reopened.list() and reopened.list()[0]["label"] == "会议纪要", "重开以后读不出记忆")
+        elif case == "preference_fingerprint":
+            _memory_on(h)
+            other = check._fresh_session(h.base)
+            other_text = f"另一个会话里的本地正文 {marker} 不该被当成偏好"
+            h.app.sessions.add_content(other, other_text, "keep")
+            a = check._fresh_session(h.base)
+            text = f"这是本地私密正文 {marker} 请记住"
+            h.app.sessions.add_content(a, text, "keep")
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            blocked = []
+            for disguise in (text, encoded, other_text):
+                events, _bodies = _memory_speak(h, a, "remember", {"kind": "preference", "preference": disguise[:200]})
+                result = _memory_result(events, "remember")
+                code = (result.get("error") or {}).get("code") or ""
+                expect(not result.get("ok") and code.startswith("local_"), f"伪装成偏好的正文没被拦：{result}")
+                blocked.append(code)
+            status, body = check.request("POST", h.base + "/api/memory", {"kind": "preference", "text": other_text[:200]})
+            expect(status == 400 and "local_" in body, f"面板手写的正文没被拦：{status} {body[:200]}")
+            expect(not h.app.memory.list(), f"记忆库里出现了条目：{h.app.memory.list()}")
+            detail.update(blocked=blocked, panel=status)
+        elif case == "forget_recall":
+            _memory_on(h, allow_plaintext_content=True)
+            a = check._fresh_session(h.base)
+            text = f"要忘掉的正文 {marker}"
+            item = h.app.memory.add_content(text, "待删", origin_purpose="keep")
+            memory_id = item["memory_id"]
+            events, _bodies = _memory_speak(h, a, "recall", {"memory_id": memory_id}, text="取出来")
+            handle = (_memory_result(events, "recall").get("items") or [{}])[0].get("content_handle")
+            expect(handle, "recall 没有发句柄")
+            status, body = check.request("POST", h.base + f"/api/memory/{memory_id}/delete", {})
+            expect(status == 200 and json.loads(body).get("revoked_handles") == 1, f"面板删除失败：{status} {body[:200]}")
+            record, code = h.app.sessions.resolve_content(a, handle)
+            expect(record is None, "删掉以后重发的句柄还能用")
+            events, _bodies = _memory_speak(h, a, "recall", {"memory_id": memory_id}, text="再取一次")
+            result = _memory_result(events, "recall")
+            expect((result.get("error") or {}).get("code") == "handle_not_found", f"删掉以后 recall 不是 handle_not_found：{result}")
+            pref = h.app.memory.add_preference("用短句", "风格")
+            events, _bodies = _memory_speak(h, a, "forget", {"memory_id": pref["memory_id"]}, text="忘掉风格")
+            result = _memory_result(events, "forget")
+            expect(result.get("status") == "forgotten" and not h.app.memory.list(), f"forget 没删掉：{result}")
+            expect(any(e.get("type") == "tool.confirm" and e.get("name") == "forget" for e in events), "forget 没弹确认")
+            detail.update(after=code)
+        else:
+            raise Failed(f"未知 case {case}")
+    finally:
+        _memory_reset(h)
+    return detail
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -2099,6 +2287,7 @@ RUNNERS = {
     "compaction": run_compaction,
     "planning": run_planning,
     "planning_web": run_planning_web,
+    "memory": run_memory,
 }
 
 
