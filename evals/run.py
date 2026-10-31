@@ -31,6 +31,8 @@ sys.path.insert(0, ROOT)
 
 import check  # noqa: E402  假件和工具函数都在这里
 import server  # noqa: E402
+import schedule_api  # noqa: E402
+from services.runtime import scheduler as scheduler_rules  # noqa: E402
 
 TASKS_PATH = os.path.join(EVAL_DIR, "tasks.json")
 FAKE_MODEL = "demo-vision"
@@ -2256,6 +2258,356 @@ def run_memory(h: Harness, task: dict, live: bool) -> dict:
     return detail
 
 
+# ---------- 14.E #82 定时任务 ----------
+
+def _schedule_reset(h: Harness) -> None:
+    for job_id in h.app.schedules.ids():
+        try:
+            schedule_api.delete(h.app, job_id)
+        except Exception:
+            pass
+    with h.app.scheduler._lock:
+        h.app.scheduler.pending.clear()
+        h.app.scheduler.running.clear()
+        h.app.scheduler._caught_up.clear()
+    h.app.schedule_settings.update({}, reset=True)
+    h.provider.mode = "ok"
+    h.provider.sched_backend = None
+
+
+def _schedule_on(h: Harness, **values) -> None:
+    status, body = check.request("PUT", h.base + "/api/schedule/settings",
+                                 {"values": dict({"enabled": True, "allow_plaintext_image": True}, **values)})
+    expect(status == 200, f"打开定时任务失败：{status} {body[:200]}")
+
+
+def _schedule_post(h: Harness, path: str, payload=None, method="POST"):
+    status, body = check.request(method, h.base + "/api/schedule" + path, payload if payload is not None else {})
+    try:
+        data = json.loads(body)
+    except ValueError:
+        data = {}
+    return status, data
+
+
+def _schedule_job(h: Harness, marker: str, kind: str = "image", **extra) -> dict:
+    payload = {"name": "每日出图", "kind": kind, "schedule": {"kind": "daily", "time": "09:00"},
+               "body": f"定时出图的本地提示词 {marker}" if kind == "image" else "列一下本机内容",
+               **extra}
+    status, data = _schedule_post(h, "/jobs", payload)
+    expect(status == 200 and data.get("job_id"), f"新建定时任务失败：{status} {data}")
+    return data
+
+
+def _schedule_fire(h: Harness, job_id: str) -> dict:
+    status, data = _schedule_post(h, f"/jobs/{job_id}/run-now")
+    expect(status == 200, f"run-now 失败：{status} {data}")
+    return data
+
+
+def _schedule_run(h: Harness, job_id: str, answer=True, timeout: float = 20.0) -> tuple[dict, list[dict]]:
+    """到点 → 待开始 → 点「开始本次」→ 跑完。answer：遇到确认卡怎么回（True / False / None=不回）。返回 (历史最后一条, 事件)。"""
+    fired = _schedule_fire(h, job_id)
+    expect(fired.get("action") == "waiting_start", f"到点没有进待开始队列：{fired}")
+    status, started = _schedule_post(h, f"/pending/{fired['pending_id']}/start")
+    expect(status == 200 and started.get("run_id"), f"开始本次失败：{status} {started}")
+    run = h.app.runs.get(started["run_id"])
+    answered = set()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for index, event in enumerate(list(run.events)):
+            if event.get("type") == "tool.confirm" and index not in answered and answer is not None:
+                answered.add(index)
+                check._post_confirm(h.base, run.run_id, bool(answer), check._ack_of(event) if answer else None)
+        if run.done.is_set() and h.app.scheduler.running.get(job_id) != run.run_id:
+            break
+        time.sleep(0.05)
+    expect(run.done.is_set(), "定时任务这一轮没有结束")
+    time.sleep(0.1)
+    job = h.app.schedules.raw(job_id) or {}
+    last = (job.get("history") or [{}])[-1]
+    return last, list(run.events)
+
+
+def _schedule_tool_names(h: Harness, start: int) -> set:
+    names = set()
+    for item in h.provider.requests[start:]:
+        names |= _tool_names(item["body"])
+    return names
+
+
+def run_schedule(h: Harness, task: dict, live: bool) -> dict:
+    """14.E #82：定时任务。全程替身模型 + 假 ComfyUI，经真实网页面板和对话路径。
+    off_no_tools：总开关默认关；关着时请求里没有 schedule_*、和打开再关掉以后逐字节一致；到点也不触发；
+    no_auto_confirm：到点只进待开始队列（不碰模型）；点了「开始本次」后 generate_image 照常弹确认；
+      用户打开常驻授权后，本机出图不再弹确认、只出 images 张；远端出图即使有常驻授权也照样弹（高危）；
+    handle_expiry：句柄过期 / 改任务 → handle_expired，常驻授权作废，旧会话句柄失效；「重新授权」发新句柄；
+    cross_job_handle：A 任务的句柄在 B 任务上是 handle_forbidden；模型视图里没有正文和句柄；
+    budget_stop：步数上限到了停下，历史记 budget_exceeded；每日次数上限到了跳过；
+    overlap_missed：上一轮没完 → skipped_overlap；错过不补；勾了补跑启动后最多补一次；待开始超时 → confirm_timeout，
+      运行里确认超时 → confirm_timeout；
+    model_create_confirm：模型建任务每次弹确认、不能设常驻授权、本地内容只收句柄、正文伪装成指令被拦。"""
+    case = task["case"]
+    marker = task.get("marker", "LOCAL-SCHED")
+    _schedule_reset(h)
+    detail = {"case": case}
+    try:
+        if case == "off_no_tools":
+            expect(h.app.schedule_settings.current().get("enabled") is False, "定时任务默认不是关的")
+            session_id = check._fresh_session(h.base)
+            before = len(h.provider.requests)
+            _memory_speak(h, session_id, None, None, text="你好")
+            first = [item["body"] for item in h.provider.requests[before:]]
+            expect(first and not (_schedule_tool_names(h, before) & set(scheduler_rules.TOOLS)),
+                   "关着时请求里有 schedule_* 工具")
+            _schedule_on(h)
+            mid = len(h.provider.requests)
+            session_b = check._fresh_session(h.base)
+            _memory_speak(h, session_b, None, None, text="你好")
+            expect(set(scheduler_rules.TOOLS) <= _schedule_tool_names(h, mid), "打开以后请求里没有 schedule_* 工具")
+            job = _schedule_job(h, marker)
+            _schedule_post(h, "/settings", {"values": {"enabled": False}}, method="PUT")
+            h.app.schedules.mutate(job["job_id"], lambda j: j.update(next_at="2000-01-01T00:00:00"))
+            actions = h.app.scheduler.tick()
+            expect(not actions and not h.app.scheduler.pending, f"关着时到点还触发了：{actions}")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}/run-now")
+            expect(status == 409 and data.get("code") == "scheduler_disabled", f"关着时 run-now 没被拒：{status}")
+            again = len(h.provider.requests)
+            session_c = check._fresh_session(h.base)
+            _memory_speak(h, session_c, None, None, text="你好")
+            second = [item["body"] for item in h.provider.requests[again:]]
+            norm = lambda bodies: json.dumps(bodies, ensure_ascii=False, sort_keys=False)
+            expect(norm(first) == norm(second), "关掉以后请求和默认关时不是逐字节一致")
+            status, page = check.request("GET", h.base + "/")
+            expect(status == 200 and 'id="open-schedule"' in page and "/static/schedule.js" in page, "首页没有定时任务面板")
+            status, script = check.request("GET", h.base + "/static/schedule.js")
+            expect(status == 200 and "开始本次" in script, "schedule.js 没有发出来")
+            detail.update(requests=len(first))
+        elif case == "no_auto_confirm":
+            _schedule_on(h)
+            h.provider.mode = "schedimage"
+            job = _schedule_job(h, marker, images=2)
+            before = len(h.provider.requests)
+            fired = _schedule_fire(h, job["job_id"])
+            time.sleep(0.3)
+            expect(len(h.provider.requests) == before, "到点后没等用户点「开始本次」就请求了模型")
+            pend = schedule_api.view(h.app)["pending"]
+            expect(pend and pend[0]["pending_id"] == fired["pending_id"], "待开始队列里没有这一次")
+            _schedule_post(h, f"/pending/{fired['pending_id']}/dismiss")
+            last, events = _schedule_run(h, job["job_id"], answer=True)
+            confirms = [e for e in events if e.get("type") == "tool.confirm" and e.get("name") == "generate_image"]
+            expect(confirms, "没有常驻授权时定时出图没有弹确认")
+            expect(last.get("status") == "completed", f"确认后没有完成：{last}")
+            dumped = json.dumps([item["body"] for item in h.provider.requests[before:]], ensure_ascii=False)
+            expect(marker not in dumped, "定时任务的提示词正文进了模型请求")
+            # 常驻授权：两步（宿主确认卡 + acknowledge）
+            status, offer = _schedule_post(h, f"/jobs/{job['job_id']}/standing")
+            expect(status == 200 and offer.get("offer_id") and offer.get("card"), f"没有常驻授权确认卡：{status} {offer}")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}/standing-confirm", {"offer_id": offer["offer_id"]})
+            expect(status == 409, "没有 acknowledge 也打开了常驻授权")
+            status, offer = _schedule_post(h, f"/jobs/{job['job_id']}/standing")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}/standing-confirm",
+                                          {"offer_id": offer["offer_id"], "acknowledge": "standing"})
+            expect(status == 200 and data.get("standing"), f"常驻授权没打开：{status} {data}")
+            images_before = len(h.box.prompts) if hasattr(h.box, "prompts") else None
+            last, events = _schedule_run(h, job["job_id"], answer=None)
+            confirms = [e for e in events if e.get("type") == "tool.confirm"]
+            expect(not confirms, f"有常驻授权时本机出图还弹了确认：{[e.get('name') for e in confirms]}")
+            done = [e for e in events if e.get("type") == "tool_call" and e.get("tool") == "generate_image"
+                    and e.get("status") == "success"]
+            expect(last.get("status") == "completed", f"常驻授权这一轮没有完成：{last}")
+            expect(len(done) == 2, f"常驻授权这一轮出图张数不对：{len(done)}")
+            # 远端出图：常驻授权不覆盖，照样要确认（不回答 → 拒绝后结束）
+            h.provider.sched_backend = "remote"
+            last, events = _schedule_run(h, job["job_id"], answer=False)
+            confirms = [e for e in events if e.get("type") == "tool.confirm" and e.get("name") == "generate_image"]
+            expect(confirms, "远端出图有常驻授权时没有弹确认")
+            detail.update(standing_confirms=0, images_before=images_before, remote_confirms=len(confirms))
+        elif case == "handle_expiry":
+            _schedule_on(h)
+            saved = os.environ.get("MAS_SCHEDULED_HANDLE_TTL_SEC")
+            os.environ["MAS_SCHEDULED_HANDLE_TTL_SEC"] = "1"
+            try:
+                job = _schedule_job(h, marker)
+                old = h.app.schedules.raw(job["job_id"])["handle"]
+            finally:
+                if saved is None:
+                    os.environ.pop("MAS_SCHEDULED_HANDLE_TTL_SEC", None)
+                else:
+                    os.environ["MAS_SCHEDULED_HANDLE_TTL_SEC"] = saved
+            time.sleep(1.3)
+            fired = _schedule_fire(h, job["job_id"])
+            expect(fired.get("action") == "handle_expired", f"句柄过期后还进了队列：{fired}")
+            raw = h.app.schedules.raw(job["job_id"])
+            expect(raw["state"] == "needs_reauth" and raw["stop_reason"] == "handle_expired", f"过期后状态不对：{raw['state']}")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}/reauthorize")
+            expect(status == 200 and data.get("state") == "active", f"重新授权失败：{status} {data}")
+            new = h.app.schedules.raw(job["job_id"])["handle"]
+            expect(new and new != old, "重新授权没有发新句柄")
+            body, code = h.app.schedules.resolve(job["job_id"], old)
+            expect(body is None and code == "handle_expired", f"旧句柄还能用：{code}")
+            # 跑一轮拿到会话句柄，再改任务：任务句柄、会话句柄、常驻授权一起作废
+            h.provider.mode = "schedimage"
+            _schedule_run(h, job["job_id"], answer=True)
+            raw = h.app.schedules.raw(job["job_id"])
+            session_handles = [dict(item) for item in raw.get("session_handles") or []]
+            expect(session_handles, "运行后没有记下会话句柄")
+            h.app.schedules.grant_standing(job["job_id"], "127.0.0.1")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}", {"body": f"改过的提示词 {marker}"}, method="PUT")
+            expect(status == 200 and data.get("state") == "needs_reauth", f"改任务后不是 needs_reauth：{status} {data}")
+            raw = h.app.schedules.raw(job["job_id"])
+            expect(raw.get("standing") is None, "改任务后常驻授权还在")
+            for item in session_handles:
+                record, code = h.app.sessions.resolve_content(item["session_id"], item["handle"])
+                expect(record is None, "改任务后旧会话句柄还能用")
+            fired = _schedule_fire(h, job["job_id"])
+            expect(fired.get("action") == "handle_expired", f"改任务后还进了队列：{fired}")
+            # 只改开关不算改内容
+            _schedule_post(h, f"/jobs/{job['job_id']}/reauthorize")
+            status, data = _schedule_post(h, f"/jobs/{job['job_id']}", {"catch_up": True}, method="PUT")
+            expect(status == 200 and data.get("state") == "active", "只改「补跑」也把句柄作废了")
+            # 删任务：正文和会话句柄清掉
+            _schedule_run(h, job["job_id"], answer=True)
+            raw = h.app.schedules.raw(job["job_id"])
+            last_handles = [dict(item) for item in raw.get("session_handles") or []]
+            status, _data = _schedule_post(h, f"/jobs/{job['job_id']}/delete")
+            expect(status == 200 and h.app.schedules.raw(job["job_id"]) is None, "删任务失败")
+            for item in last_handles:
+                record, code = h.app.sessions.resolve_content(item["session_id"], item["handle"])
+                expect(record is None, "删任务后会话句柄还能用")
+            expect(marker not in json.dumps(h.app.schedules.bodies(), ensure_ascii=False), "删任务后正文还在")
+            detail.update(expired=True)
+        elif case == "cross_job_handle":
+            _schedule_on(h)
+            a = _schedule_job(h, marker)
+            b = _schedule_job(h, marker + "-b")
+            handle_a = h.app.schedules.raw(a["job_id"])["handle"]
+            body, code = h.app.schedules.resolve(b["job_id"], handle_a)
+            expect(body is None and code == "handle_forbidden", f"A 的句柄在 B 上不是 handle_forbidden：{code}")
+            body, code = h.app.schedules.resolve(a["job_id"], handle_a)
+            expect(code == "ok" and marker in (body or ""), "A 的句柄在 A 上用不了")
+            model_view = json.dumps(h.app.schedules.list(audience="model"), ensure_ascii=False)
+            expect(marker not in model_view and handle_a not in model_view, "模型视图里有正文或任务句柄")
+            panel = json.dumps(schedule_api.view(h.app), ensure_ascii=False)
+            expect(marker not in panel, "面板总览里直接带了正文")
+            expect(not h.app.schedules.standing_ok(a["job_id"], "127.0.0.1"), "没打开也算有常驻授权")
+            h.app.schedules.grant_standing(a["job_id"], "127.0.0.1")
+            expect(h.app.schedules.standing_ok(a["job_id"], "127.0.0.1"), "常驻授权打开后不算数")
+            expect(not h.app.schedules.standing_ok(a["job_id"], "localhost"), "换了后端主机常驻授权还算数")
+            expect(not h.app.schedules.standing_ok(b["job_id"], "127.0.0.1"), "A 的常驻授权在 B 上也算数")
+            detail.update(code=code)
+        elif case == "budget_stop":
+            _schedule_on(h)
+            job = _schedule_job(h, marker, kind="text", budget={"steps": 1, "daily_runs": 2})
+            h.provider.mode = "probe"
+            h.provider.probe_tool = "list_local_content"
+            h.provider.probe = {}
+            h.provider.probe_times = 5
+            try:
+                last, _events = _schedule_run(h, job["job_id"], answer=True)
+            finally:
+                h.provider.probe_tool = None
+                h.provider.probe = None
+                h.provider.mode = "ok"
+            expect(last.get("status") == "stopped" and last.get("code") == "budget_exceeded",
+                   f"步数上限没有停下：{last}")
+            last, _events = _schedule_run(h, job["job_id"], answer=True)
+            expect(last.get("status") == "completed", f"第二次没有完成：{last}")
+            fired = _schedule_fire(h, job["job_id"])
+            expect(fired.get("action") == "daily_runs", f"每日次数到了还进了队列：{fired}")
+            detail.update(code="budget_exceeded")
+        elif case == "overlap_missed":
+            import datetime as _dt
+
+            _schedule_on(h)
+            job = _schedule_job(h, marker, kind="text", schedule={"kind": "every", "minutes": 5})
+            job_id = job["job_id"]
+            now = _dt.datetime.now().replace(microsecond=0)
+            first = _schedule_fire(h, job_id)
+            second = _schedule_fire(h, job_id)
+            expect(second.get("action") == "skipped_overlap", f"上一轮没完还进了队列：{second}")
+            # 待开始超时
+            later = now + _dt.timedelta(minutes=31)
+            h.app.scheduler.tick(later)
+            expect(not h.app.scheduler.pending, "超过等待时间还在待开始队列里")
+            entry = [item for item in h.app.schedules.raw(job_id)["history"] if item.get("id") == first["pending_id"]]
+            expect(entry and entry[-1].get("status") == "confirm_timeout", f"待开始超时没有记 confirm_timeout：{entry}")
+            # 错过：next_at 在很久以前，没勾补跑 → missed，不补
+            stamp = (now - _dt.timedelta(hours=3)).isoformat()
+            h.app.schedules.mutate(job_id, lambda j: j.update(next_at=stamp))
+            actions = h.app.scheduler.tick(now)
+            expect(not h.app.scheduler.pending and any(a.get("action") == "missed" for a in actions),
+                   f"错过的没补也没记 missed：{actions}")
+            # 勾了补跑：补一次，第二次错过不再补
+            h.app.schedules.update(job_id, {"catch_up": True})
+            h.app.schedules.mutate(job_id, lambda j: j.update(next_at=stamp))
+            actions = h.app.scheduler.tick(now)
+            expect(any(a.get("action") == "waiting_start" for a in actions), f"勾了补跑也没补：{actions}")
+            h.app.scheduler.forget(job_id)
+            h.app.scheduler._caught_up.add(job_id)
+            h.app.schedules.mutate(job_id, lambda j: j.update(next_at=stamp))
+            actions = h.app.scheduler.tick(now)
+            expect(not h.app.scheduler.pending, f"启动后补了不止一次：{actions}")
+            # 运行里的确认超时
+            h.app.schedules.update(job_id, {"catch_up": False})
+            image = _schedule_job(h, marker + "-img")
+            h.provider.mode = "schedimage"
+            saved_fn = schedule_api.confirm_timeout_sec
+            schedule_api.confirm_timeout_sec = lambda app: 0.5
+            try:
+                last, events = _schedule_run(h, image["job_id"], answer=None)
+            finally:
+                schedule_api.confirm_timeout_sec = saved_fn
+            expect(last.get("status") == "stopped" and last.get("code") == "confirm_timeout",
+                   f"运行里确认超时没有停下：{last}")
+            detail.update(missed=True)
+        elif case == "model_create_confirm":
+            _schedule_on(h)
+            session_id = check._fresh_session(h.base)
+            spec = {"kind": "daily", "time": "08:30"}
+            events, bodies = _memory_speak(h, session_id, "schedule_create",
+                                           {"kind": "text", "name": "早报", "schedule": spec, "instruction": "总结一下今天的待办"},
+                                           text="每天早上提醒我")
+            confirms = [e for e in events if e.get("type") == "tool.confirm" and e.get("name") == "schedule_create"]
+            expect(confirms, "模型建定时任务没有弹确认")
+            result = _memory_result(events, "schedule_create")
+            expect(result.get("ok") and result["job"].get("source") == "model", f"模型没建成任务：{result}")
+            job_id = result["job"]["job_id"]
+            expect(h.app.schedules.raw(job_id).get("standing") is None, "模型建的任务带了常驻授权")
+            # 模型想设常驻授权：被拒
+            events, _ = _memory_speak(h, session_id, "schedule_update", {"job_id": job_id, "standing": True}, text="不用再问我")
+            ok_calls = [e for e in events if e.get("type") == EVENT_TOOL_CALL_TYPE and e.get("tool") == "schedule_update"
+                        and isinstance(e.get("result"), dict) and e["result"].get("ok")]
+            expect(not ok_calls, f"模型设置常驻授权没被拒：{ok_calls}")
+            expect(h.app.schedules.raw(job_id).get("standing") is None, "模型改出了常驻授权")
+            # 本地正文伪装成文字指令：被拦
+            text = f"本地私密提示词 {marker} 不能发出去"
+            handle = h.app.sessions.add_content(session_id, text, "image_prompt")["handle"]
+            events, bodies = _memory_speak(h, session_id, "schedule_create",
+                                           {"kind": "text", "name": "偷渡", "schedule": spec, "instruction": text},
+                                           text="定时做这个")
+            result = _memory_result(events, "schedule_create")
+            expect(not result.get("ok") and str((result.get("error") or {}).get("code")).startswith("local_"),
+                   f"伪装成指令的本地正文没被拦：{result}")
+            # 出图任务只收句柄
+            events, bodies = _memory_speak(h, session_id, "schedule_create",
+                                           {"kind": "image", "name": "每日图", "schedule": spec, "content_handle": handle},
+                                           text="每天出这张图")
+            result = _memory_result(events, "schedule_create")
+            expect(result.get("ok"), f"用句柄建出图任务失败：{result}")
+            dumped = json.dumps(bodies, ensure_ascii=False)
+            expect(marker not in dumped, "本地正文进了模型请求")
+            events, _ = _memory_speak(h, session_id, "schedule_delete", {"job_id": job_id}, text="删掉早报")
+            expect(any(e.get("type") == "tool.confirm" and e.get("name") == "schedule_delete" for e in events), "删任务没弹确认")
+            expect(h.app.schedules.raw(job_id) is None, "删任务没删掉")
+            detail.update(confirms=len(confirms))
+        else:
+            raise Failed(f"未知 case {case}")
+    finally:
+        _schedule_reset(h)
+    return detail
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
@@ -2288,6 +2640,7 @@ RUNNERS = {
     "planning": run_planning,
     "planning_web": run_planning_web,
     "memory": run_memory,
+    "schedule": run_schedule,
 }
 
 

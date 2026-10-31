@@ -21,6 +21,7 @@ import content_guard
 import module_tools
 import image_run
 import memory_api
+import schedule_api
 import skill_page
 import store
 from packages.contracts.events import (
@@ -134,8 +135,13 @@ _WEB_TOOLS = (
     "remember",  # 14.D（#81）长期记忆：只在记忆打开时出现在请求里
     "recall",
     "forget",
+    "schedule_create",  # 14.E（#82）定时任务：只在调度打开、单 Agent 文字轮时出现在请求里
+    "schedule_list",
+    "schedule_update",
+    "schedule_delete",
 )
 _MEMORY_TOOLS = ("remember", "recall", "forget")
+_SCHEDULE_TOOLS = ("schedule_create", "schedule_list", "schedule_update", "schedule_delete")
 EVENT_AGENT = "agent"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
@@ -195,6 +201,10 @@ class Run:
         self._confirm_value: bool | str | None = None
         self._confirm_requires: str | None = None
         self.waiting_confirm = False
+        self.confirm_timed_out = False
+        # 14.E：定时任务那一轮的上下文（任务编号、句柄、张数、预算、确认超时）；普通对话是 None。
+        self.job: dict | None = None
+        self._stop_code: str | None = None
 
     def begin_content_wait(self, kind: str = "text") -> None:
         self._content_ready.clear()
@@ -259,6 +269,7 @@ class Run:
         signaled = self._confirm_ready.wait(timeout)
         with self._confirm_lock:
             self.waiting_confirm = False
+            self.confirm_timed_out = not signaled and not self.cancel.is_set()
             if self.cancel.is_set() or not signaled:
                 return False
             # 高危卡被二次确认时返回 high_risk（运行时据此放行）；其余是布尔值。
@@ -351,7 +362,7 @@ class RunHub:
             return [run for run in self._runs.values() if not run.done.is_set()]
 
 
-def start(app, session_id: str, text, attachments, mode=None, plan=False, approve_plan=None) -> Run:
+def start(app, session_id: str, text, attachments, mode=None, plan=False, approve_plan=None, job=None) -> Run:
     if not isinstance(text, str):
         raise RequestError(400, "invalid_json", "文字需要是字符串。")
     text = text.strip()
@@ -364,6 +375,10 @@ def start(app, session_id: str, text, attachments, mode=None, plan=False, approv
     run = Run(session_id, message_id)
     # 多智能体只在这一轮勾了开关时打开；默认仍是单 Agent（ADR 0005）。
     run.agent_mode = "multi" if mode == "multi" else "single"
+    # 14.E：只有调度器（用户点了「开始本次」）会带 job；定时任务一律单 Agent。
+    if isinstance(job, dict):
+        run.job = job
+        run.agent_mode = "single"
     # 14.C（#80）：plan 模式只在这一轮勾了开关时打开；approve_plan 是用户在界面上点「按计划执行」，
     # 只认会话里那条助手消息上真有的 plan.proposed（模型自己放不开执行）。
     run.planning_mode = "plan" if plan is True and not approve_plan else "execute"
@@ -653,6 +668,7 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
             _image_request(user_text, attachments) and not _open_prompt_request(user_text)
             and getattr(run, "agent_mode", "single") != "multi"
             and getattr(run, "planning_mode", "execute") != "plan" and getattr(run, "_approved_plan", None) is None
+            and getattr(run, "job", None) is None
         )
         if image_request and user_id:
             app.sessions.put_content(session_id, user_id, user_text)
@@ -674,6 +690,13 @@ def _generate(app, session_id: str, message_id: str, run: Run, provider: dict) -
         print(f"chat run failed {type(exc).__name__}", file=sys.stderr)
     finally:
         _log(session_id, provider["model"], status, time.monotonic() - started)
+
+
+def _job_budget(job: dict) -> Budget:
+    """14.E：定时任务按任务自己的步数 / 时间 / token 上限跑，超了停下（budget_exceeded，原因写进历史）。"""
+    values = job.get("budget") if isinstance(job.get("budget"), dict) else {}
+    return Budget(steps=int(values.get("steps") or 12), time_sec=float(values.get("time_min") or 10) * 60,
+                  tokens=int(values.get("tokens") or 50000))
 
 
 def _generate_image_turn(app, session_id, message_id, run, provider, session, user_id, user_text) -> str:
@@ -702,9 +725,12 @@ def _generate_text_turn(
     app, session_id, message_id, run, provider, session, user_text, extra=None, take_tools=_TAKE_TOOLS,
 ) -> str:
     multi = getattr(run, "agent_mode", "single") == "multi"
+    job = getattr(run, "job", None)
     # 14.D：记忆工具只在记忆打开、单 Agent 时放进请求；关着时请求和以前逐字节一致。
-    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra),
-                               include=() if multi else memory_api.tool_include(app))
+    # 14.E：schedule_* 同理，只在调度打开时放进来；定时任务自己那一轮不给（任务不能改自己）。
+    include = () if multi else tuple(memory_api.tool_include(app)) + (
+        () if job is not None else tuple(schedule_api.tool_include(app)))
+    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra), include=include)
     delegator = None
     pipeline = None
     planner = _planner_for(app, session_id, run, session, multi)
@@ -765,6 +791,15 @@ def _generate_text_turn(
         return _continue_line(done, total, handle)
 
     def confirm(name, arguments):
+        if job is not None:
+            # 14.E：定时任务里的确认等 confirm_timeout（默认 30 分钟），到点停下，原因记 confirm_timeout。
+            ok = run.wait_confirm(float(job.get("confirm_timeout_sec") or 1800))
+            if not ok and run.confirm_timed_out:
+                run._stop_code = "confirm_timeout"
+                run.cancel.set()
+            elif ok and not confirm_every_call(name):
+                allowed.add(name)
+            return ok
         ok = run.wait_confirm()
         # 12.E：联网 / 读本地内容的第三方工具每次都问，不记进「本轮已确认」。
         if ok and not confirm_every_call(name):
@@ -779,6 +814,9 @@ def _generate_text_turn(
             return False
         # 同一轮里已经确认过的工具（如连续出图的 generate_image）不再逐次确认。
         if name in allowed:
+            return False
+        # 14.E 常驻授权：只免内置 generate_image → 本机 ComfyUI、用任务句柄、不超过张数；其余照常确认。
+        if job is not None and schedule_api.standing_allows(app, run, name, arguments):
             return False
         return tool_mutates(name, arguments)
 
@@ -847,10 +885,10 @@ def _generate_text_turn(
             mutating=mutating,
             validate=validate,
             choose=pipeline.choose if multi and not planning_mode else None,
-            budget=delegator.budget if multi else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
+            budget=delegator.budget if multi else _job_budget(job) if job is not None else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
-            local_bodies=memory_api.egress_bodies(app, session_id),
+            local_bodies=schedule_api.egress_bodies(app, session_id),
             base_url=provider["base_url"],
             compaction=_compaction_settings(app),
             archive=archive,
@@ -1090,7 +1128,7 @@ def _follow_local_tool(app, session_id, message_id, run, provider, user_text, to
 def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None:
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
     denied = authorize_tool(name) if name in ("list_local_content", "retrieve_local", "forget_local_content",
-                                              *_MEMORY_TOOLS) else None
+                                              *_MEMORY_TOOLS, *_SCHEDULE_TOOLS) else None
     ok = denied is None
     if denied:  # 12.D：清单没声明它要的权限（例如被改过），不碰会话存储
         result = denied
@@ -1124,6 +1162,15 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         ok = bool(result.get("ok"))
         arguments = {key: raw[key] for key in ("kind", "label", "preference", "content_handle", "memory_id", "query")
                      if isinstance(raw.get(key), str)}
+    elif name in _SCHEDULE_TOOLS:
+        raw = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        if getattr(run, "job", None) is not None or getattr(run, "agent_mode", "single") == "multi":
+            # 14.E：定时任务那一轮和多智能体都不提供 schedule_*；模型硬调也不执行。
+            result = {"ok": False, "tool": name, "error": {"code": "invalid_tool_call", "message": HUMAN["invalid_tool_call"]}}
+        else:
+            result = schedule_api.call_tool(app, session_id, run.run_id, name, raw)
+        ok = bool(result.get("ok"))
+        arguments = {key: raw[key] for key in ("job_id", "name", "kind", "content_handle") if isinstance(raw.get(key), str)}
     elif name == "lookup_demo":
         arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
         result = execute_tool(name, arguments)

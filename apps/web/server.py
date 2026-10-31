@@ -30,6 +30,7 @@ import chat_run
 import desktop_notify
 import image_run
 import memory_api
+import schedule_api
 import resources
 import tool_panels
 import store
@@ -59,6 +60,7 @@ _STATIC = {
     "markdown.js": "text/javascript; charset=utf-8",
     "resources.js": "text/javascript; charset=utf-8",
     "memory.js": "text/javascript; charset=utf-8",
+    "schedule.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
@@ -92,6 +94,8 @@ class App:
         # 14.D（#81）：本地长期记忆（mas.memory/1），跟随 12.F 的存储模式；功能默认关闭。
         self.memory = MemoryStore(data_dir, self.storage)
         self.memory_settings = store.ContextSettingsStore(os.path.join(data_dir, "memory_settings.json"), module="memory")
+        # 14.E（#82）：定时任务（mas.schedule/1，跟随 12.F 存储模式）。总开关默认关；调度线程只在 main() 里启动。
+        schedule_api.install(self, data_dir)
         self.runs = chat_run.RunHub()
         # 13.B（#75）：桌面通知只在桌面壳模式挂上；文本只来自宿主模板。
         self.notify = desktop_notify.NotifyHub() if self.desktop_token else None
@@ -174,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     if token:
         print("desktop_token_required=1", flush=True)
     print(f"MAS_READY {json.dumps(ready, ensure_ascii=False)}", flush=True)
+    app.scheduler.start()  # 14.E：总开关关着时每一拍什么都不做
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -515,6 +520,71 @@ def _memory_route(handler, app, method, path) -> None:
     _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
 
 
+def _schedule_route(handler, app, method, path) -> None:
+    """14.E（#82）定时任务面板。只给本机；写操作还要同源（12.G）并记审计。返回值只进浏览器，不进模型。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        _send_json(handler, 403, {"code": "forbidden", "message": "定时任务只给本机看。"})
+        return
+    rest = path[len("/api/schedule"):].strip("/")
+    parts = [urllib.parse.unquote(part) for part in rest.split("/")] if rest else []
+    try:
+        if not parts and method == "GET":
+            _send_json(handler, 200, schedule_api.view(app))
+            return
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "preview" and method == "GET":
+            _send_json(handler, 200, schedule_api.preview(app, parts[1]))
+            return
+        if method not in ("POST", "PUT"):
+            _send_json(handler, 405, {"code": "method_not_allowed", "message": "不支持这个方法。"})
+            return
+        if not _config_write_allowed(handler, "schedule"):
+            return
+        body = _read_json(handler)
+        if parts == ["settings"] and method == "PUT":
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            view = app.schedule_settings.update(values, reset=bool(body.get("reset")))
+            from services.runtime import scheduler as _scheduler
+            fields = [key for key in values if key in _scheduler.DEFAULTS]  # 审计只记已知字段名，不记取值
+            _audit_config_write("schedule", fields + (["reset"] if body.get("reset") else []))
+            out = schedule_api.view(app)
+            out["settings"]["warnings"] = view.get("warnings") or []
+            _send_json(handler, 200, out)
+            return
+        if parts == ["jobs"] and method == "POST":
+            _send_json(handler, 200, schedule_api.create(app, body))
+            return
+        if len(parts) == 2 and parts[0] == "jobs" and method == "PUT":
+            _send_json(handler, 200, schedule_api.update(app, parts[1], body))
+            return
+        if len(parts) == 3 and parts[0] == "jobs" and method == "POST":
+            action = {
+                "delete": schedule_api.delete, "reauthorize": schedule_api.reauthorize,
+                "standing": schedule_api.standing_offer, "standing-revoke": schedule_api.standing_revoke,
+                "cancel": schedule_api.cancel, "run-now": schedule_api.run_now,
+            }.get(parts[2])
+            if parts[2] == "standing-confirm":
+                _send_json(handler, 200, schedule_api.standing_confirm(app, parts[1], body))
+                return
+            if action is not None:
+                _send_json(handler, 200, action(app, parts[1]))
+                return
+        if len(parts) == 3 and parts[0] == "pending" and method == "POST":
+            if parts[2] == "start":
+                _send_json(handler, 200, schedule_api.start_pending(app, parts[1]))
+                return
+            if parts[2] == "dismiss":
+                _send_json(handler, 200, schedule_api.dismiss_pending(app, parts[1]))
+                return
+    except schedule_api.PanelError as exc:
+        _send_json(handler, exc.status, {"code": exc.code, "message": exc.message})
+        return
+    except schedule_api.JobError as exc:
+        _send_json(handler, exc.status, {"code": exc.code, "message": exc.message})
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
 def _meta_loopback(handler) -> bool:
     host = (handler.client_address or ("",))[0]
     if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
@@ -800,6 +870,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             return
         if path == "/api/memory" or path.startswith("/api/memory/"):
             _memory_route(handler, app, method, path)
+            return
+        if path == "/api/schedule" or path.startswith("/api/schedule/"):
+            _schedule_route(handler, app, method, path)
             return
         if path == "/api/tool-policy" and method in ("GET", "PUT"):
             _tool_policy_http(handler, method)

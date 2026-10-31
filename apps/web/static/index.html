@@ -17,6 +17,7 @@
       <ul id="session-list"></ul>
       <button type="button" class="ghost" id="open-resources">本地资源</button>
       <button type="button" class="ghost" id="open-memory">记忆</button>
+      <button type="button" class="ghost" id="open-schedule">定时</button>
       <div id="tool-panels" class="tool-panels"></div>
     </aside>
     <main>
@@ -319,6 +320,51 @@
       </div>
     </div>
   </dialog>
+  <dialog id="schedule" aria-labelledby="schedule-title">
+    <div id="schedule-form">
+      <h2 id="schedule-title">定时任务</h2>
+      <p class="hint">只在本机：到点只把任务放进「待开始」并发桌面通知，每次都要你点「开始本次」才会跑；超过等待时间记为 confirm_timeout。
+        正文加密存在本机，模型只见任务名和句柄。上一轮没跑完就跳过；错过的不补，勾了「补跑」启动后最多补一次。</p>
+      <fieldset id="schedule-settings" class="context-settings">
+        <label><input type="checkbox" name="sch_enabled"> 打开定时任务（关着时不调度，模型也拿不到 schedule_* 工具）</label>
+        <label>「开始本次」和运行里确认的等待上限（分钟，1–1440）<input name="sch_confirm_timeout_min" type="number" min="1" max="1440"></label>
+        <label>最多几个任务（1–100）<input name="sch_max_jobs" type="number" min="1" max="100"></label>
+        <label><input type="checkbox" name="sch_allow_plaintext_image"> 明文存储模式下也收出图任务（不推荐：提示词会以明文写在 data/schedules/）</label>
+      </fieldset>
+      <p id="schedule-storage" class="hint"></p>
+      <div class="dialog-actions">
+        <button type="button" id="schedule-save-settings">保存定时设置</button>
+      </div>
+      <h3>待开始</h3>
+      <ul id="schedule-pending" class="res-list"></ul>
+      <h3>任务</h3>
+      <ul id="schedule-list" class="res-list"></ul>
+      <div id="schedule-preview" class="res-preview" hidden></div>
+      <details>
+        <summary>新建任务</summary>
+        <form id="schedule-add" onsubmit="return false">
+          <label>名字<input name="sch_new_name" maxlength="40" autocomplete="off"></label>
+          <label>类型<select name="sch_new_kind"><option value="image">出图（本地 ComfyUI）</option><option value="text">文字</option></select></label>
+          <label>张数（出图，1–4）<input name="sch_new_images" type="number" min="1" max="4" value="1"></label>
+          <label>周期<select name="sch_new_spec">
+            <option value="daily">每天</option><option value="weekly">每周</option><option value="every">每隔几分钟</option>
+            <option value="once">一次</option><option value="cron">cron</option></select></label>
+          <label>时间（每天 / 每周，HH:MM）<input name="sch_new_time" value="09:00"></label>
+          <label>星期（每周，0=周一，逗号分隔）<input name="sch_new_weekdays" value="0"></label>
+          <label>间隔分钟（每隔）<input name="sch_new_minutes" type="number" value="60"></label>
+          <label>时刻（一次）<input name="sch_new_at" type="datetime-local"></label>
+          <label>cron 表达式<input name="sch_new_cron" value="0 9 * * 1-5"></label>
+          <label>正文（出图提示词 / 文字指令，只存本机）<textarea name="sch_new_body" rows="3"></textarea></label>
+          <label><input type="checkbox" name="sch_new_catch_up"> 补跑（启动时错过了，最多补一次）</label>
+          <div class="dialog-actions"><button type="button" id="schedule-create">新建</button></div>
+        </form>
+      </details>
+      <p id="schedule-note" class="note" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="close-schedule">关闭</button>
+      </div>
+    </div>
+  </dialog>
   <dialog id="tool-panel" class="tool-panel">
     <div class="dialog-bar">
       <button type="button" id="close-tool-panel">关闭</button>
@@ -330,6 +376,7 @@
   <script src="/static/app.js"></script>
   <script src="/static/resources.js"></script>
   <script src="/static/memory.js"></script>
+  <script src="/static/schedule.js"></script>
   <script src="/static/panels.js"></script>
 </body>
 </html>

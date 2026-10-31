@@ -1,0 +1,132 @@
+{
+  "schema": "mas.tool/1",
+  "name": "schedule_update",
+  "version": "1.0.0",
+  "description": "修改定时任务（每次都要用户确认）。改了内容或时间表，任务的句柄立即作废，要用户在面板里「重新授权」后才会再跑。",
+  "order": 48,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string",
+        "maxLength": 40,
+        "description": "任务短名字。不要写本地正文。"
+      },
+      "schedule": {
+        "type": "object",
+        "description": "时间表。kind=once {at:'YYYY-MM-DDTHH:MM'}；every {minutes}；daily {time:'HH:MM'}；weekly {days:[0-6，周一=0], time}；cron {expr:'分 时 日 月 周'}。本机时间。",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "once",
+              "every",
+              "daily",
+              "weekly",
+              "cron"
+            ]
+          },
+          "at": {
+            "type": "string"
+          },
+          "minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10080
+          },
+          "time": {
+            "type": "string"
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 6
+            }
+          },
+          "expr": {
+            "type": "string",
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "content_handle": {
+        "type": "string",
+        "description": "kind=image 时：本会话里出图提示词的句柄（正文不经过你）。"
+      },
+      "instruction": {
+        "type": "string",
+        "maxLength": 2000,
+        "description": "kind=text 时：到点发给模型的文字指令。不要写本地正文。"
+      },
+      "images": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4,
+        "description": "kind=image 时每次出几张（默认 1）。"
+      },
+      "budget": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "每次运行的上限（不填用默认：12 步、10 分钟、50000 token、每天 4 次）。",
+        "properties": {
+          "steps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 24
+          },
+          "time_min": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 120
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 200000
+          },
+          "daily_runs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 48
+          }
+        }
+      },
+      "catch_up": {
+        "type": "boolean",
+        "description": "错过（程序没开）时，启动后最多补跑一次。默认 false。"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "job_id": {
+        "type": "string",
+        "description": "任务编号（j_ 开头）。"
+      }
+    },
+    "required": [
+      "job_id"
+    ]
+  },
+  "mutating": true,
+  "confirm": "always",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": true,
+    "network": false,
+    "write_files": true,
+    "send_local_to_model": false
+  }
+}

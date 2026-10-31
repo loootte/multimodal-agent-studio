@@ -284,6 +284,8 @@
    - 层：新 `services/scheduler/`（once / every / daily / weekly / cron，后台 jobs）、运行时、网页任务列表和待确认队列。
    - 句柄隔离：需要设计。任务引用本地内容时用绑定任务 id 的 `scheduled` 句柄，有 TTL，可撤销，到期或任务修改后要重新授权；无人值守**不自动确认**，`confirm: always` 和 `high_risk` 的调用永远不能预授权，遇到就挂起为待确认。
    - 验收：定时出图按时运行并留审计；需要确认的调用挂起而不是执行；句柄过期后任务停止，重新授权后能继续；有预算上限。
+   - 进度：实现在 `issue-82` 分支，见 [docs/scheduler.md](docs/scheduler.md)。调度器在 `services/scheduler/`（周期、`JobStore`、`Scheduler`），面板和模型工具在 `apps/web/schedule_api.py`；总开关默认关，关着时不调度、`schedule_*` 不进任何请求、请求逐字节不变；任务正文随 12.F 加密存本机（明文模式默认不收出图任务），每个任务一枚绑定任务 id 的 `scheduled` 句柄（TTL `MAS_SCHEDULED_HANDLE_TTL_SEC`，默认 7 天），过期或改内容后 `handle_expired` / 待重新授权，删任务全部清掉；到点只进「待开始」队列并发桌面通知，每次都要用户点「开始本次」，超时记 `confirm_timeout`；上一轮没完就跳过，错过不补（勾「补跑」启动后最多补一次）；每个任务有步数 / 时间 / token / 每日次数上限，停止原因进历史；每个任务一个会话，可看历史、取消。用户选择方案 C：可以在面板经宿主确认卡给出图任务开「常驻授权」，只免「内置 `generate_image` → 本机 ComfyUI」的确认，绑定任务 id + 句柄 + 主机，任何变化即作废；远端出图和其它 `confirm: always` 的调用照样每次确认；模型不能设置常驻授权。模型工具 `schedule_create/list/update/delete` 只在打开后的单 Agent 文字轮提供，写操作每次确认，本地内容只收句柄。ADR 0011 仍是提议。
+   - 后续（未做）：任务带文件；多智能体任务；待开始队列跨重启保留；局域网 ComfyUI 的常驻授权；#43 接入。
 6. [#83](https://github.com/loootte/multimodal-agent-studio/issues/83) **14.F** 实验性浏览器 / computer use 工具包（P2，依赖 14.A）
    - 层：通过 MCP 接入的沙箱工具包，声明 `network`，`confirm: always`，域名白名单默认为空，默认关闭。
    - 句柄隔离：风险高。网页内容全部标 `untrusted`，不进确认卡；往网页输入前过 `local_fingerprint`；禁止访问 `file://`、本机和局域网地址。

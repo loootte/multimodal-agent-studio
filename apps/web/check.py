@@ -221,6 +221,23 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 "seed": 7,
             })
             return
+        if mode == "schedimage":
+            # 14.E：定时出图那一轮。宿主那句话里只有句柄和张数：先 plan_images，再逐张 generate_image。
+            body = json.dumps(self.server.requests[-1]["body"], ensure_ascii=False)
+            found = re.search(r"共 (\d+) 张", body)
+            want = int(found.group(1)) if found else 1
+            if self._tool_result_count("generate_image") >= want:
+                self._piece(_delta(content="定时出图好了"))
+                self._done()
+                return
+            if self._tool_result_count("plan_images") == 0:
+                self._emit_tool("plan_images", {"count": want})
+                return
+            arguments = {"content_handle": _content_handle(body) or ("c_" + "00" * 16), "aspect_ratio": "1:1", "seed": 7}
+            if getattr(self.server, "sched_backend", None):
+                arguments["backend"] = self.server.sched_backend
+            self._emit_tool("generate_image", arguments)
+            return
         if mode == "character":
             self._character()
             return
@@ -6122,8 +6139,10 @@ def _egress_http_case(base: str, provider, directory: str) -> None:
 
 BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
                  "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image",
-                 "remember", "recall", "forget"}  # 14.D：长期记忆，默认不进模型请求
-MODEL_TOOLS = BUILTIN_TOOLS - {"generate_video", "remember", "recall", "forget"}  # 默认给模型的内置工具
+                 "remember", "recall", "forget",  # 14.D：长期记忆，默认不进模型请求
+                 "schedule_create", "schedule_list", "schedule_update", "schedule_delete"}  # 14.E：定时任务，默认不进
+MODEL_TOOLS = BUILTIN_TOOLS - {"generate_video", "remember", "recall", "forget",
+                               "schedule_create", "schedule_list", "schedule_update", "schedule_delete"}  # 默认给模型的内置工具
 
 
 def _packs_module():

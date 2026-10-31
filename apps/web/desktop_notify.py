@@ -28,6 +28,8 @@ TEMPLATES = {
     "done": ("completed", "已完成：{tool}"),
     "done_images": ("completed", "已完成：{tool}，共 {count} 张图"),
     "failed": ("failed", "未完成：{tool} 出错了，回窗口查看"),
+    # 14.E（#82）：定时任务到点进「待开始」队列。文案固定，不带任务名和提示词。
+    "schedule": ("waiting_start", "待开始：有定时任务到点了，回窗口点「开始本次」"),
 }
 
 
@@ -110,6 +112,11 @@ class NotifyHub:
             if event.get("code") != "cancelled":  # 用户自己点的停止，不打扰
                 self._emit(render("failed", state["tool"]))
             self._drop(run_id)
+
+    def schedule(self, kind: str = "schedule") -> None:
+        """14.E：调度器到点时调用。只发固定模板。"""
+        if enabled() and kind in TEMPLATES:
+            self._emit(render(kind))
 
     def _drop(self, run_id) -> None:
         with self._lock:
