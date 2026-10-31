@@ -35,7 +35,7 @@ v1 **不做**：侧栏入口（面板只由对话唤起）、负向提示词 / �
 | 来源 | 说明 |
 | --- | --- |
 | PNG tEXt / iTXt / zTXt `parameters` | Automatic1111 / Forge 风格；只取「Negative prompt:」之前的正向段 |
-| PNG `prompt` | ComfyUI API 格式 JSON；只扫 `CLIPTextEncode` 的 `text`，取最长一段作为正向；**不做** UI workflow 深解 |
+| PNG `prompt` | ComfyUI API 格式 JSON；沿 `KSampler` / `SamplerCustom*` 等节点的 `positive` 边找到 `CLIPTextEncode.text`（可经 `Conditioning*` 包装）。找不到边时排除已被 `negative` 引用的 CLIP，且不选「像负向词表」的那段；**绝不**再按「最长即正向」。**不做** UI 版 `workflow` 深解；v1 不抽负向 |
 | JPEG / WebP EXIF | `UserComment` / `ImageDescription` 尽力；失败当无提示词 |
 
 不做：NovelAI 隐写、LSB、视频、PSD。

@@ -6035,7 +6035,7 @@ def _png_with_text(key: str, value: str) -> bytes:
 
 
 def _prompt_extract_units() -> None:
-    """#101：抽取纯函数——A1111 / ComfyUI CLIPTextEncode / 无元数据。"""
+    """#101：抽取纯函数——A1111 正/负；ComfyUI 沿 KSampler.positive（负向更长也不误抽）；无元数据。"""
     import importlib.util
     path = os.path.join(ROOT, "toolpacks", "builtin", "prompt_from_image", "extract.py")
     spec = importlib.util.spec_from_file_location("mas_prompt_extract_check", path)
@@ -6043,22 +6043,52 @@ def _prompt_extract_units() -> None:
     spec.loader.exec_module(mod)
     params = (
         "a cute cat sitting on a mat\n"
-        "Negative prompt: blurry, lowres\n"
+        "Negative prompt: blurry, lowres, worst quality, bad hands, deformed, extra fingers\n"
         "Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1, Size: 512x512"
     )
     hit = mod.extract(_png_with_text("parameters", params), "image/png")
     if not hit.get("found") or hit.get("source") != "a1111_parameters" or hit.get("positive") != "a cute cat sitting on a mat":
         fail(f"A1111 抽取不对：{hit}")
-    if "Negative" in (hit.get("positive") or "") or "Steps" in (hit.get("positive") or ""):
+    if "Negative" in (hit.get("positive") or "") or "Steps" in (hit.get("positive") or "") or "blurry" in (hit.get("positive") or ""):
         fail("A1111 把负向/采样参数带进了正向")
+    # 负向明显更长：旧逻辑取最长会抽错；必须跟 KSampler.positive 边
+    positive = "short fox in tall grass"
+    negative = (
+        "bad hands, lowres, worst quality, blurry, deformed, extra fingers, "
+        "jpeg artifacts, mutated, nsfw, long negative that is longer than positive"
+    )
+    if not len(negative) > len(positive):
+        fail("测试夹具：负向应比正向长")
     comfy = json.dumps({
-        "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "masterpiece, best quality, fox"}},
-        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "bad hands"}},
-        "3": {"class_type": "KSampler", "inputs": {"seed": 1}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["1", 0]}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["1", 0]}},
+        "4": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 1,
+                "positive": ["2", 0],
+                "negative": ["3", 0],
+                "model": ["5", 0],
+                "latent_image": ["6", 0],
+            },
+        },
     })
     hit2 = mod.extract(_png_with_text("prompt", comfy), "image/png")
-    if not hit2.get("found") or hit2.get("source") != "comfyui_prompt" or hit2.get("positive") != "masterpiece, best quality, fox":
-        fail(f"ComfyUI 抽取不对：{hit2}")
+    if not hit2.get("found") or hit2.get("source") != "comfyui_prompt" or hit2.get("positive") != positive:
+        pos = hit2.get("positive") or ""
+        fail(f"ComfyUI 应沿 positive 边抽取（负向更长也不该中）：found={hit2.get('found')} source={hit2.get('source')} len={len(pos)}")
+    if hit2.get("positive") == negative or "bad hands" in (hit2.get("positive") or ""):
+        fail("ComfyUI 抽成了负向")
+    # 经 ConditioningCombine 再进采样器
+    wrapped = json.dumps({
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": positive}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative}},
+        "7": {"class_type": "ConditioningCombine", "inputs": {"conditioning_1": ["2", 0], "conditioning_2": ["2", 0]}},
+        "4": {"class_type": "KSampler", "inputs": {"positive": ["7", 0], "negative": ["3", 0], "seed": 1}},
+    })
+    hit3 = mod.extract(_png_with_text("prompt", wrapped), "image/png")
+    if hit3.get("positive") != positive:
+        fail(f"经 ConditioningCombine 应仍抽到正向：source={hit3.get('source')} len={len(hit3.get('positive') or '')}")
     miss = mod.extract(_png_with_text("Description", "just a caption"), "image/png")
     if miss.get("found"):
         fail(f"无关 tEXt 不该当提示词：{miss}")
