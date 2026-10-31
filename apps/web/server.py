@@ -29,12 +29,14 @@ import module_tools
 import chat_run
 import desktop_notify
 import image_run
+import memory_api
 import resources
 import tool_panels
 import store
 import tool_config
 from packages.artifacts import ArtifactStore
 from packages.artifacts import crypto as storage_crypto
+from packages.artifacts.memory import MemoryStore
 from services import telemetry
 from services.gateway import egress
 
@@ -56,6 +58,7 @@ _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
     "markdown.js": "text/javascript; charset=utf-8",
     "resources.js": "text/javascript; charset=utf-8",
+    "memory.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
@@ -86,6 +89,9 @@ class App:
             telemetry.record("security.storage_key_created", trace_id="sto_" + uuid.uuid4().hex,
                              key_id=self.storage.key_id, key_source=self.storage.key_source)
         self.sessions = store.SessionStore(os.path.join(data_dir, "sessions"), self.artifacts, storage=self.storage)
+        # 14.D（#81）：本地长期记忆（mas.memory/1），跟随 12.F 的存储模式；功能默认关闭。
+        self.memory = MemoryStore(data_dir, self.storage)
+        self.memory_settings = store.ContextSettingsStore(os.path.join(data_dir, "memory_settings.json"), module="memory")
         self.runs = chat_run.RunHub()
         # 13.B（#75）：桌面通知只在桌面壳模式挂上；文本只来自宿主模板。
         self.notify = desktop_notify.NotifyHub() if self.desktop_token else None
@@ -452,6 +458,63 @@ def _resource_route(handler, app, method, path, query) -> None:
     _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
 
 
+def _memory_route(handler, app, method, path) -> None:
+    """14.D（#81）记忆面板。只给本机；写操作还要同源（12.G）并记审计。返回值只进浏览器，不进模型。"""
+    host = (handler.client_address or ("",))[0]
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        _send_json(handler, 403, {"code": "forbidden", "message": "记忆只给本机看。"})
+        return
+    rest = path[len("/api/memory"):].strip("/")
+    parts = [urllib.parse.unquote(part) for part in rest.split("/")] if rest else []
+    try:
+        if not parts and method == "GET":
+            _send_json(handler, 200, memory_api.view(app))
+            return
+        if parts == ["export"] and method == "GET":
+            raw = memory_api.export_bytes(app)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.send_header("Content-Length", str(len(raw)))
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("Content-Disposition", 'attachment; filename="memory-export.json"')
+            handler.end_headers()
+            handler.wfile.write(raw)
+            return
+        if len(parts) == 2 and parts[1] == "preview" and method == "GET":
+            _send_json(handler, 200, memory_api.preview(app, parts[0]))
+            return
+        if method not in ("POST", "PUT"):
+            _send_json(handler, 405, {"code": "method_not_allowed", "message": "不支持这个方法。"})
+            return
+        if not _config_write_allowed(handler, "memory"):
+            return
+        body = _read_json(handler)
+        if parts == ["settings"] and method == "PUT":
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            view = app.memory_settings.update(values, reset=bool(body.get("reset")))
+            from services.runtime import memory as _memory
+            fields = [key for key in values if key in _memory.DEFAULTS]  # 审计只记已知字段名，不记取值
+            _audit_config_write("memory", fields + (["reset"] if body.get("reset") else []))
+            out = memory_api.view(app)
+            out["settings"]["warnings"] = view.get("warnings") or []
+            _send_json(handler, 200, out)
+            return
+        if not parts and method == "POST":
+            _send_json(handler, 200, memory_api.create(app, body))
+            return
+        if len(parts) == 1 and method == "PUT":
+            _send_json(handler, 200, memory_api.update(app, parts[0], body))
+            return
+        if len(parts) == 2 and parts[1] == "delete" and method == "POST":
+            _send_json(handler, 200, memory_api.delete(app, parts[0]))
+            return
+    except memory_api.PanelError as exc:
+        _send_json(handler, exc.status, {"code": exc.code, "message": exc.message})
+        return
+    _send_json(handler, 404, {"code": "not_found", "message": "找不到。"})
+
+
 def _meta_loopback(handler) -> bool:
     host = (handler.client_address or ("",))[0]
     if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
@@ -734,6 +797,9 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             fields = [key for key in values if key in _planning.DEFAULTS]  # 审计只记已知字段名，不记取值
             _audit_config_write("planning", fields + (["reset"] if body.get("reset") else []))
             _send_json(handler, 200, view)
+            return
+        if path == "/api/memory" or path.startswith("/api/memory/"):
+            _memory_route(handler, app, method, path)
             return
         if path == "/api/tool-policy" and method in ("GET", "PUT"):
             _tool_policy_http(handler, method)

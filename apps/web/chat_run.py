@@ -20,6 +20,7 @@ import time
 import content_guard
 import module_tools
 import image_run
+import memory_api
 import skill_page
 import store
 from packages.contracts.events import (
@@ -130,7 +131,11 @@ _WEB_TOOLS = (
     "plan_images",
     "build_skill_page",
     "stage_prompt",
+    "remember",  # 14.D（#81）长期记忆：只在记忆打开时出现在请求里
+    "recall",
+    "forget",
 )
+_MEMORY_TOOLS = ("remember", "recall", "forget")
 EVENT_AGENT = "agent"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
@@ -696,8 +701,10 @@ def _generate_image_turn(app, session_id, message_id, run, provider, session, us
 def _generate_text_turn(
     app, session_id, message_id, run, provider, session, user_text, extra=None, take_tools=_TAKE_TOOLS,
 ) -> str:
-    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra))
     multi = getattr(run, "agent_mode", "single") == "multi"
+    # 14.D：记忆工具只在记忆打开、单 Agent 时放进请求；关着时请求和以前逐字节一致。
+    request = _gateway_request(provider, _turn_messages(app, session_id, session, extra=extra),
+                               include=() if multi else memory_api.tool_include(app))
     delegator = None
     pipeline = None
     planner = _planner_for(app, session_id, run, session, multi)
@@ -843,7 +850,7 @@ def _generate_text_turn(
             budget=delegator.budget if multi else Budget(steps=24, time_sec=max(120.0, float(app.timeout_sec))),  # 连续出图：列出句柄 + 多次 generate_image + 收尾
             run_id=run.run_id,
             artifacts=_session_artifacts(app, session_id, session),
-            local_bodies=app.sessions.local_bodies(session_id),
+            local_bodies=memory_api.egress_bodies(app, session_id),
             base_url=provider["base_url"],
             compaction=_compaction_settings(app),
             archive=archive,
@@ -1082,7 +1089,8 @@ def _follow_local_tool(app, session_id, message_id, run, provider, user_text, to
 
 def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None:
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
-    denied = authorize_tool(name) if name in ("list_local_content", "retrieve_local", "forget_local_content") else None
+    denied = authorize_tool(name) if name in ("list_local_content", "retrieve_local", "forget_local_content",
+                                              *_MEMORY_TOOLS) else None
     ok = denied is None
     if denied:  # 12.D：清单没声明它要的权限（例如被改过），不碰会话存储
         result = denied
@@ -1110,12 +1118,19 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         if handle:
             result["handle"] = handle
         arguments = {"content_handle": handle} if handle else {}
+    elif name in _MEMORY_TOOLS:
+        raw = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        result = memory_api.host(app, session_id, run.run_id).call(name, raw)
+        ok = bool(result.get("ok"))
+        arguments = {key: raw[key] for key in ("kind", "label", "preference", "content_handle", "memory_id", "query")
+                     if isinstance(raw.get(key), str)}
     elif name == "lookup_demo":
         arguments = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
         result = execute_tool(name, arguments)
     else:
         return None
-    telemetry.record("tool", name=name, ms=0, ok=ok, via="web", error_code=None if ok else "permission_denied")
+    code = None if ok else ((result.get("error") or {}).get("code") if isinstance(result, dict) else None)
+    telemetry.record("tool", name=name, ms=0, ok=ok, via="web", error_code=None if ok else (code or "permission_denied"))
     _emit_runtime(
         app, session_id, message_id, run,
         {"kind": "tool", "name": name, "ms": 0, "ok": ok},
@@ -1184,7 +1199,7 @@ def _ask(app, session_id, message_id, run, provider, messages, hide_text: bool) 
     return tool_call, "".join(parts)
 
 
-def _gateway_request(provider: dict, messages: list[dict]) -> dict:
+def _gateway_request(provider: dict, messages: list[dict], include=()) -> dict:
     system = None
     items = []
     for message in messages:
@@ -1213,7 +1228,7 @@ def _gateway_request(provider: dict, messages: list[dict]) -> dict:
         "model": provider["model"],
         "system": system,
         "messages": items,
-        "tools": image_run.image_tools(),
+        "tools": image_run.image_tools(include) if include else image_run.image_tools(),
     }
 
 
@@ -2551,7 +2566,16 @@ def _seed_from_text(text: str) -> int | None:
 
 
 def _turn_messages(app, session_id: str, session: dict, **kwargs) -> list[dict]:
-    return _model_messages(session, extra_bodies=app.sessions.secret_pairs(session_id), **kwargs)
+    messages = _model_messages(session, extra_bodies=app.sessions.secret_pairs(session_id), **kwargs)
+    # 14.D：长期记忆（偏好 + content 的编号和标签）每轮重新注入系统提示，压缩只动对话消息，所以不会被压掉。
+    # 记忆关着时 note 是空串，系统提示和以前逐字节一致。
+    try:
+        note = memory_api.context_note(app, session_id)
+    except Exception:
+        note = ""
+    if note and messages and messages[0].get("role") == "system":
+        messages[0] = {**messages[0], "content": messages[0]["content"] + note}
+    return messages
 
 
 def _model_messages(

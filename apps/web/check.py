@@ -975,6 +975,16 @@ def _storage_crypto_cases() -> None:
         if os.name != "nt" and os.stat(os.path.join(keys, "master.key")).st_mode & 0o077:
             fail("主密钥文件权限不是 0600")
         master, _source = C.load_master(data)
+        # 14.D：长期记忆用独立的 memory 作用域密钥，和同名会话的密文互不相通。
+        sealed = app.storage.cipher.seal_json("store", {"x": 1}, scope="memory")
+        if app.storage.cipher.open_json("store", sealed, scope="memory") != {"x": 1}:
+            fail("memory 作用域密文解不开")
+        try:
+            app.storage.cipher.open_json("store", sealed)
+        except C.StorageError:
+            pass
+        else:
+            fail("memory 作用域的密文被当成会话密文解开了")
         sessions = app.sessions
         sid = sessions.create(user)["session_id"]
         kept = sessions.add_content(sid, secret, "keep")
@@ -6111,7 +6121,9 @@ def _egress_http_case(base: str, provider, directory: str) -> None:
 # ---------- #31 工具包 ----------
 
 BUILTIN_TOOLS = {"accept_local_content", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
-                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image"}
+                 "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image",
+                 "remember", "recall", "forget"}  # 14.D：长期记忆，默认不进模型请求
+MODEL_TOOLS = BUILTIN_TOOLS - {"generate_video", "remember", "recall", "forget"}  # 默认给模型的内置工具
 
 
 def _packs_module():
@@ -6214,7 +6226,7 @@ def _toolpack_cases() -> None:
         if problems:
             fail(f"{pack.name} 的清单不合格：{problems}")
     exposed = [item["function"]["name"] for item in openai_tools()]
-    if set(exposed) != BUILTIN_TOOLS - {"generate_video"}:
+    if set(exposed) != MODEL_TOOLS:  # 14.D：记忆工具默认不给模型
         fail(f"给模型的工具不是按清单来的：{exposed}")
     image = next(item for item in openai_tools() if item["function"]["name"] == "generate_image")["function"]
     if "prompt" in image["parameters"]["properties"] or "count" in image["parameters"]["properties"] or "n" in image["parameters"]["properties"]:
@@ -6348,7 +6360,7 @@ def _toolpack_cases() -> None:
             os.environ["MAS_TOOLPACKS_DIR"] = saved
         shutil.rmtree(folder, ignore_errors=True)
         shutil.rmtree(source, ignore_errors=True)
-    if set(item["function"]["name"] for item in openai_tools()) != BUILTIN_TOOLS - {"generate_video"}:
+    if set(item["function"]["name"] for item in openai_tools()) != MODEL_TOOLS:
         fail("测试装的工具包没有清干净")
 
 

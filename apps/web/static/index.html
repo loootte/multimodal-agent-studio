@@ -16,6 +16,7 @@
       <p id="user-line" class="hint">本机用户</p>
       <ul id="session-list"></ul>
       <button type="button" class="ghost" id="open-resources">本地资源</button>
+      <button type="button" class="ghost" id="open-memory">记忆</button>
       <div id="tool-panels" class="tool-panels"></div>
     </aside>
     <main>
@@ -287,6 +288,37 @@
       </div>
     </div>
   </dialog>
+  <dialog id="memory" aria-labelledby="memory-title">
+    <div id="memory-form">
+      <h2 id="memory-title">长期记忆</h2>
+      <p class="hint">只在本机：跨会话记住你的偏好和要复用的本地内容。偏好文字会进模型上下文；本地内容只以编号和标签出现，
+        用的时候在当前会话重新发一枚句柄，正文不发给模型。模型每次写入或删除都要你确认。</p>
+      <fieldset id="memory-settings" class="context-settings">
+        <label><input type="checkbox" name="mem_enabled"> 打开长期记忆（关着时模型看不到任何记忆，也拿不到 remember / recall / forget）</label>
+        <label><input type="checkbox" name="mem_inject_preferences"> 每轮把偏好放进系统提示</label>
+        <label>最多注入几条（1–50）<input name="mem_max_inject" type="number" min="1" max="50"></label>
+        <label><input type="checkbox" name="mem_allow_plaintext_content"> 明文存储模式下也收本地内容记忆（不推荐：正文会以明文写在 data/memory/）</label>
+      </fieldset>
+      <p id="memory-storage" class="hint"></p>
+      <div class="dialog-actions">
+        <button type="button" id="memory-save-settings">保存记忆设置</button>
+      </div>
+      <h3>条目</h3>
+      <ul id="memory-list" class="res-list"></ul>
+      <div id="memory-preview" class="res-preview" hidden></div>
+      <details id="memory-add">
+        <summary>手写一条偏好</summary>
+        <label>标签（可选）<input id="memory-new-label" maxlength="40" autocomplete="off"></label>
+        <label>偏好（最多 200 字，不能是本地内容的正文）<textarea id="memory-new-text" maxlength="200" rows="2"></textarea></label>
+        <div class="dialog-actions"><button type="button" id="memory-create">添加</button></div>
+      </details>
+      <p id="memory-note" class="note" hidden></p>
+      <div class="dialog-actions">
+        <a id="memory-export" class="button ghost" href="/api/memory/export" download="memory-export.json">导出（不含正文）</a>
+        <button type="button" id="close-memory">关闭</button>
+      </div>
+    </div>
+  </dialog>
   <dialog id="tool-panel" class="tool-panel">
     <div class="dialog-bar">
       <button type="button" id="close-tool-panel">关闭</button>
@@ -297,6 +329,7 @@
   <script src="/static/markdown.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/resources.js"></script>
+  <script src="/static/memory.js"></script>
   <script src="/static/panels.js"></script>
 </body>
 </html>

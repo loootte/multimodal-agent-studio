@@ -88,6 +88,8 @@ def confirm_every_call(name: str) -> bool:
     from services.tools import packs
 
     pack = packs.find_tool(name)
+    if pack is not None and pack.builtin and pack.name in packs.MEMORY_WRITES:  # 14.D：每条记忆写入都问
+        return True
     if packs.is_mcp(pack):  # 14.A：默认每次确认。#93 起这个开关走策略，默认仍是每次确认。
         from services.tools import policy
 

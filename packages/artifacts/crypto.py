@@ -107,6 +107,9 @@ def key_id_of(master: bytes) -> str:
     return hmac.new(master, b"mas/key-id", hashlib.sha256).hexdigest()[:16]
 
 
+SCOPES = ("session", "memory")  # 派生密钥的作用域（14.D #81 加 memory）
+
+
 class Cipher:
     """按会话派生密钥的 AES-256-GCM。会话密钥只在内存里。"""
 
@@ -118,40 +121,42 @@ class Cipher:
         self.key_id = key_id_of(master)
         self._cache: dict[str, bytes] = {}
 
-    def _session_key(self, session_id: str) -> bytes:
-        if not isinstance(session_id, str) or not session_id:
+    def _session_key(self, session_id: str, scope: str = "session") -> bytes:
+        if not isinstance(session_id, str) or not session_id or scope not in SCOPES:
             raise StorageError("storage_decrypt_failed", "bad_scope")
-        key = self._cache.get(session_id)
+        cached = session_id if scope == "session" else scope + "/" + session_id
+        key = self._cache.get(cached)
         if key is None:
-            key = hkdf(self._master, b"mas/session/" + session_id.encode("ascii"))
-            self._cache[session_id] = key
+            key = hkdf(self._master, b"mas/" + scope.encode("ascii") + b"/" + session_id.encode("ascii"))
+            self._cache[cached] = key
         return key
 
-    def _header(self, session_id: str) -> dict:
-        return {"schema": ENVELOPE_SCHEMA, "alg": ALG, "key_id": self.key_id, "scope": "session",
+    def _header(self, session_id: str, scope: str = "session") -> dict:
+        return {"schema": ENVELOPE_SCHEMA, "alg": ALG, "key_id": self.key_id, "scope": scope,
                 "session_id": session_id}
 
     @staticmethod
     def _aad(header: dict) -> bytes:
         return json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-    def seal_json(self, session_id: str, payload: dict) -> dict:
-        header = self._header(session_id)
+    def seal_json(self, session_id: str, payload: dict, scope: str = "session") -> dict:
+        """scope=session：会话记录；scope=memory（14.D #81）：长期记忆，用 mas/memory/<id> 派生的独立密钥。"""
+        header = self._header(session_id, scope)
         nonce = secrets.token_bytes(NONCE_BYTES)
         plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        sealed = _aesgcm(self._session_key(session_id)).encrypt(nonce, plain, self._aad(header))
+        sealed = _aesgcm(self._session_key(session_id, scope)).encrypt(nonce, plain, self._aad(header))
         return dict(header, nonce=_b64e(nonce), ct=_b64e(sealed))
 
-    def open_json(self, session_id: str, envelope: dict) -> dict:
+    def open_json(self, session_id: str, envelope: dict, scope: str = "session") -> dict:
         if not is_envelope(envelope):
             raise StorageError("storage_decrypt_failed", "not_envelope")
         if envelope.get("key_id") != self.key_id:
             raise StorageError("storage_decrypt_failed", "wrong_key")
-        if envelope.get("session_id") != session_id or envelope.get("scope") != "session":
+        if envelope.get("session_id") != session_id or envelope.get("scope") != scope:
             raise StorageError("storage_decrypt_failed", "wrong_scope")
-        header = self._header(session_id)
+        header = self._header(session_id, scope)
         try:
-            plain = _aesgcm(self._session_key(session_id)).decrypt(
+            plain = _aesgcm(self._session_key(session_id, scope)).decrypt(
                 _b64d(envelope.get("nonce")), _b64d(envelope.get("ct")), self._aad(header))
             data = json.loads(plain.decode("utf-8"))
         except StorageError:

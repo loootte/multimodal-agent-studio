@@ -741,6 +741,54 @@
       "kind": "planning_web",
       "fake_only": true,
       "case": "plan_mode"
+    },
+    {
+      "id": "security.memory_content_handle_only",
+      "category": "security",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "content_handle_only",
+      "marker": "LOCAL-MEM-c41a"
+    },
+    {
+      "id": "security.memory_preference_fingerprint",
+      "category": "security",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "preference_fingerprint",
+      "marker": "LOCAL-MEM-f7d2"
+    },
+    {
+      "id": "security.memory_cross_session_reissue",
+      "category": "security",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "cross_session_reissue",
+      "marker": "LOCAL-MEM-9b3e"
+    },
+    {
+      "id": "runtime.memory_off_no_context",
+      "category": "runtime",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "off_no_context",
+      "marker": "LOCAL-MEM-0ff1"
+    },
+    {
+      "id": "runtime.memory_forget_recall",
+      "category": "runtime",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "forget_recall",
+      "marker": "LOCAL-MEM-d31e"
+    },
+    {
+      "id": "runtime.memory_preference_cross_session",
+      "category": "runtime",
+      "kind": "memory",
+      "fake_only": true,
+      "case": "preference_cross_session",
+      "marker": "LOCAL-MEM-a2b5"
     }
   ]
 }

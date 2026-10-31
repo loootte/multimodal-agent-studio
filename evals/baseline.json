@@ -97,7 +97,13 @@
         "runtime.todo_quantity_ignored": true,
         "security.planning_no_local_body": true,
         "multi.text_task_delegates": true,
-        "runtime.plan_mode_approve": true
+        "runtime.plan_mode_approve": true,
+        "security.memory_content_handle_only": true,
+        "security.memory_preference_fingerprint": true,
+        "security.memory_cross_session_reissue": true,
+        "runtime.memory_off_no_context": true,
+        "runtime.memory_forget_recall": true,
+        "runtime.memory_preference_cross_session": true
       }
     }
   }
