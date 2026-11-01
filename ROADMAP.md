@@ -2,7 +2,7 @@
 
 顺序固定。上一阶段的完成标准没达到，不开始下一阶段的功能。每一阶段只做列出的范围。
 
-[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐第 1 阶段的网关。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 补齐第 2 阶段的运行时。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐第 3 阶段的网页。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 补齐第 4 阶段的工件库、检索和会话记忆。[issue #25](https://github.com/loootte/multimodal-agent-studio/issues/25) 把 Anatomy 装进这个 Agent。它不完成第 5 或第 6 阶段，也不开始插件市场。 [issue #101](https://github.com/loootte/multimodal-agent-studio/issues/101) 提供内置 `prompt_from_image`：对话选图抽出正向嵌入提示词并登记本地句柄，读到后在对话唤起的本机面板里编辑、保存或出图（v1 不做负向/采样编辑）。
+[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天和第三方 API key 这一刀。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页调用已有的文生图工具。[issue #11](https://github.com/loootte/multimodal-agent-studio/issues/11) 让模型调用 `accept_local_content`，画面描述留在本机，第三方只看到工具契约。[issue #12](https://github.com/loootte/multimodal-agent-studio/issues/12) 把本地内容扩成语义唤起、文字或上传文件，并用专用工具列出和删除。这四条都不计入下面任一阶段的完成。[issue #15](https://github.com/loootte/multimodal-agent-studio/issues/15) 补齐第 1 阶段的网关。[issue #18](https://github.com/loootte/multimodal-agent-studio/issues/18) 补齐第 2 阶段的运行时。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐第 3 阶段的网页。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 补齐第 4 阶段的工件库、检索和会话记忆。[issue #25](https://github.com/loootte/multimodal-agent-studio/issues/25) 把 Anatomy 装进这个 Agent。它不完成第 5 或第 6 阶段，也不开始插件市场。 [issue #101](https://github.com/loootte/multimodal-agent-studio/issues/101) 提供内置 `prompt_from_image`：对话选图抽出正向嵌入提示词并登记本地句柄，读到后在对话唤起的本机面板里编辑、保存或出图（v1 不做负向/采样编辑）。[issue #103](https://github.com/loootte/multimodal-agent-studio/issues/103) 把分级隔离写进第 15 阶段：文字可控披露，图片、音频、视频强隔离，后续工具按句柄和标签做。
 
 ## 0. 工程基线
 
@@ -179,7 +179,7 @@
 - 未经用户批准，`skills/`、已安装工具和 Agent 清单不变；批准的改动可以回滚。
 - 现有检查和评测全部通过。
 
-状态：进行中。9.1（#39，PR #47）和 9.2（#40，PR #48）已完成并合并；9.3–9.6（#41–#44）未开始，沿用原 issue。第 14 阶段的调度器（14.E，#82）建好后，#43 的定时入口复用它。
+状态：进行中。9.1（#39，PR #47）和 9.2（#40，PR #48）已完成并合并；9.3–9.6（#41–#44）未开始，沿用原 issue。第 14 阶段的调度器（14.E，#82）建好后，#43 的定时入口复用它。剩余工作继续推进。「观察轨迹但不看内容」与第 15 阶段分级隔离一致，可用于挖掘本地处理流程并固化成工具。
 
 ## 10. 可配置出图技能
 
@@ -218,6 +218,8 @@
 
 [#72](https://github.com/loootte/multimodal-agent-studio/issues/72)。从「明确延后」里的「桌面或移动客户端」提前桌面客户端，紧接第 12 阶段。**开工前先写 ADR 0010**，草稿见 [docs/adr/0010-desktop-client.md](docs/adr/0010-desktop-client.md)：第 3 阶段「首版是 Web」已经兑现，本阶段不替换它，只推迟移动端。现有本机 Web 界面装进桌面壳，壳托管本机 Python 服务；直接跑 Web 服务的行为不变。
 
+分级隔离：本阶段更好支持本地资源分级管理。原生文件选择只产生句柄、桌面版默认加密、通知不含正文，这些已有目标覆盖桌面侧。文字可控披露和媒体强隔离的工具见第 15 阶段（[#103](https://github.com/loootte/multimodal-agent-studio/issues/103)）。
+
 按顺序（上一子阶段完成标准未达不开始下一阶段功能；13.D 可与 13.B / 13.C 并行）：
 
 1. [#74](https://github.com/loootte/multimodal-agent-studio/issues/74) **13.A** 桌面壳与本机服务托管（P0）
@@ -251,6 +253,8 @@
 ## 14. 对标 DeepSeek Harness 的能力补齐
 
 [#73](https://github.com/loootte/multimodal-agent-studio/issues/73)。对照 DeepSeek Harness（DSH）补齐 MAS 落后的通用 agent 能力，前提是第 12 阶段的隔离一条都不放松。**开工前先写 ADR 0011**，草稿见 [docs/adr/0011-external-capabilities-isolation.md](docs/adr/0011-external-capabilities-isolation.md)。第 9 阶段剩下的 #41–#44 沿用原 issue，不在这里重复；14.E 建好后，#43 的定时入口复用它。
+
+分级隔离：接入外部 MCP / 工具时，媒体资源继续只给句柄并走出站检查；文字披露需额外确认。工具方向见第 15 阶段（[#103](https://github.com/loootte/multimodal-agent-studio/issues/103)）。
 
 按顺序（上一子阶段完成标准未达不开始下一阶段功能；14.G 可提前做回归底座）：
 
@@ -304,6 +308,59 @@
 本阶段明确不做：插件市场、社区插件与官方同权、Code 模式批量调用、Agent Teams 式自由消息协作、通用编码能力（bash / LSP / worktree）进核心、整机桌面控制、云端常驻执行。
 
 状态：未开始。
+
+## 15. 本地资源分级隔离与工具应用
+
+[#103](https://github.com/loootte/multimodal-agent-studio/issues/103)。排在第 14 阶段之后。建立在第 12 阶段的句柄、出站审计、存储加密、工具沙箱和本地资源面板（含标签）之上。第三方模型默认只能看到工具契约和不透明句柄，本地正文和字节不进供应商请求。本阶段把「分级隔离 + 基于句柄 / 标签的实用工具」写成后续工具应用的指导原则。第 13、14 阶段开工时就遵守这些原则，工具本身在本阶段落地。**开工前先写 ADR 0012**（本地资源分级隔离），说明文字披露和媒体隔离各自约束哪些出站路径。草稿随本阶段第一个子 issue 落库。
+
+原则：
+
+- 文字用可控披露。校验、摘要、结构化提取和一致性检查需要看见文字；默认仍走句柄，打开内容必须有用户确认和审计。
+- 图片、音频、视频强隔离。版权、隐私和原始像素 / 波形风险更高。本地理解、描述和嵌入可以发挥模型能力，原始字节默认不进第三方。
+- 第 12 阶段的隔离规则一条不放松：句柄、egress 检查、沙箱、确认卡。
+
+按优先级（上一子阶段完成标准未达不开始下一子阶段功能）：
+
+1. **15.A** 媒体强隔离工具（P0）
+   - 层：内置工具或本机工具包。对句柄做本地理解（VLM 描述、CLIP 嵌入、OCR、转写摘要），只把描述或结构化结果交给模型。
+   - 受控生成与变体：基于本地资源句柄做图生图、风格迁移、角色一致性保持。原始像素不发给第三方。
+   - 版权与来源元数据：给图片 / 音频打上生成来源、授权标签、水印或不可见指纹。模型只能看到标签；原始文件导出需用户明确允许。
+   - 句柄隔离：收紧媒体。新工具参数只收句柄，结果只回公开字段或新句柄。
+   - 验收：至少 1 个本地媒体理解工具可通过句柄安全使用；供应商请求里没有原始媒体字节。
+2. **15.B** 标签驱动的资源检索与规划工具（P0）
+   - 层：只读宿主工具，建在本地资源面板已有的标签、类型、时间和引用关系上（见 [docs/local-resources.md](docs/local-resources.md)）。
+   - 句柄隔离：不打开内容。返回摘要（类型、大小、标签、引用会话）。某些标签的资源默认只允许本地工具访问；另一些允许生成描述后共享。
+   - 资源关系与引用图支持模型基于元数据做规划。
+   - 验收：至少 1 个标签检索工具可通过句柄安全使用；检索结果无正文、无文件字节。
+3. **15.C** 文字可控披露（P1）
+   - 层：运行时确认与审计。明确「打开盲盒」路径：用户确认 + 审计记录 + 按用途限定的句柄（purpose-scoped）。
+   - 敏感文字优先用本机能力做校验、抽取和摘要，只把脱敏结果或结构化标签交给第三方。本阶段不实现完整的本地小模型推理栈，可先用现有本机能力，或在 ADR 0012 里写明延后。
+   - 可选伪名化 / 可逆脱敏代理：占位符替换后发给第三方，回复后映射回来。
+   - 句柄隔离：默认仍走句柄。文字可以选择性披露，但必须有确认与审计。
+   - 验收：「打开盲盒」有确认卡、审计事件和评测覆盖；未确认时正文不进供应商请求。
+4. **15.D** 本地批量处理管道（P1）
+   - 层：工具包，在现有沙箱内执行。
+   - 按标签筛选一批本地图片 / 音频，用本地工具做统一处理（缩放、格式转换、质量检查、生成缩略图描述），再把结果句柄交给模型编排。
+   - 句柄隔离：处理留在本机。模型只拿到结果句柄和公开字段。
+   - 验收：一批带标签的媒体可在沙箱内处理完，模型请求里只有新句柄。
+
+完成标准：
+
+- 至少落地 1 个本地媒体理解工具 + 1 个标签检索工具，可通过句柄安全使用。
+- 文字「打开盲盒」路径有确认卡、审计事件和评测覆盖。
+- 安全类评测（egress、handle、sandbox 等）全部通过，无回退。
+- 文档更新：[docs/local-resources.md](docs/local-resources.md)，以及 ADR 0012 或相关 ADR，说明分级策略。
+- 不变量不变：一次 `generate_image` 出一张，张数由 `plan_images` 决定，单 Agent 模式不变，`remote_local_prompt` 默认 `refuse`。
+- 现有检查和评测全部通过。
+
+本阶段明确不做：
+
+- 不把文字完全盲盒作为默认或强化目标。
+- 不放宽未成年、出站、句柄作用域等已有安全规则。
+- 不实现完整的本地小模型推理栈。
+- 不做云同步、多租户、远程授权。
+
+状态：未开始。路线图见 [#103](https://github.com/loootte/multimodal-agent-studio/issues/103)。
 
 ## 支线：角色图片定制工具（原第 13 阶段）
 
