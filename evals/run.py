@@ -2617,6 +2617,11 @@ def run_prompt_from_image(h: Harness, task: dict, live: bool) -> dict:
         if case == "extract_units":
             check._prompt_extract_units()
             return {"case": case}
+        if case == "repick":
+            # 第一张图没有嵌入提示词 → 宿主原地再弹选图；换一张带元数据的 → 打开面板；不报"太长"、字节不进供应商
+            check._prompt_repick_units()
+            check._prompt_repick_case(h.base, h.provider, h.directory)
+            return {"case": case, "marker": task.get("marker")}
         if case in ("draft_save", "draft_generate"):
             # 读图后在本机面板里编辑 → 保存 / 出图；原文和改后的正文都不进任何供应商请求
             session_id, handle, secret, sent = check._prompt_draft_setup(h.base, h.provider, h.box)

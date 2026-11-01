@@ -878,6 +878,14 @@
       "fake_only": true,
       "case": "draft_generate",
       "marker": "LOCAL-PROMPT-EDITED2-0b9d"
+    },
+    {
+      "id": "runtime.prompt_from_image_repick",
+      "category": "runtime",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "repick",
+      "marker": "LOCAL-PROMPT-REPICK-7c3d"
     }
   ]
 }

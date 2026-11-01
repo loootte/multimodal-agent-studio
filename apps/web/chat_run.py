@@ -149,6 +149,11 @@ _SCHEDULE_TOOLS = ("schedule_create", "schedule_list", "schedule_update", "sched
 EVENT_AGENT = "agent"
 # #101：宿主让网页打开某个内置工具的面板（对话唤起）。只带 tool、content_handle、source、label，没有正文。
 EVENT_TOOL_PANEL = "tool.panel"
+PROMPT_PICK_ATTEMPTS = 3  # #101：一次读图最多让用户选几张（第一张 + 换图两次）
+PROMPT_PICK_HINT = "请选择带有嵌入提示词的图片（PNG / JPEG / WebP）。图片只在本机解析，模型只看到句柄。"
+PROMPT_PICK_RETRY_HINT = "这张图里没有可读的嵌入提示词（ComfyUI / A1111 元数据）。请换一张图，或点「取消」。图片只在本机解析。"
+PROMPT_PICK_STOPPED = "好的，已停止读图：刚才选的图片里没有可读的嵌入提示词。换一张带 ComfyUI / A1111 元数据的图再让我读，或直接描述想要的画面都可以。"
+PROMPT_PICK_GAVE_UP = "这几张图里都没有可读的嵌入提示词。可以换一张带 ComfyUI / A1111 元数据的图再让我读，或直接描述想要的画面。"
 PROMPT_PANEL_READY = "已读出图片里的正向提示词，并在本机打开了编辑面板：改好后可以直接「出图」或「保存」。没看到面板的话，点这条消息下方的「编辑提示词」按钮。提示词正文只留在本机。"
 _AGENT_PUBLIC = ("run_id", "parent_run_id", "agent", "role", "model", "depth", "status", "ms", "steps", "summary")
 
@@ -462,6 +467,12 @@ def skip_content(app, run_id: str) -> dict:
     return _offer(app, run_id, kind, {"kind": kind, "skip": True})
 
 
+def _size_label(limit: int) -> str:
+    if limit >= 1024 * 1024:
+        return f"{limit // (1024 * 1024)} MB"
+    return f"{max(1, limit // 1024)} KB"
+
+
 def submit_file(app, run_id: str, encoded, media_type) -> dict:
     if not isinstance(encoded, str) or not encoded.strip():
         raise RequestError(400, "empty", "请选择要留在本机的文件。")
@@ -472,12 +483,16 @@ def submit_file(app, run_id: str, encoded, media_type) -> dict:
     if not data:
         raise RequestError(400, "empty", "请选择要留在本机的文件。")
     run = app.runs.get(run_id)
+    if run is not None and run.waiting_content and run._expect_kind != "file":
+        # 先判种类再判大小：在等文字时交来的文件不该被报成"太大/太长"。
+        raise RequestError(400, "invalid_json", "这次要留下的是文字。")
     # #101：读图提示词允许更大的图片（与附件上限对齐）；普通 accept_local_content 文件仍用 MAX_FILE。
     limit = int(getattr(run, "_file_max", 0) or 0) if run is not None else 0
     if limit <= 0:
         limit = store.MAX_FILE
     if len(data) > limit:
-        raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
+        # 说清楚是文件超限（不是"消息太长"），用户可以直接再选一张；运行仍在等待。
+        raise RequestError(400, "payload_too_large", f"文件太大了（这里最大 {_size_label(limit)}），请换一个。")
     payload = {"kind": "file", "data": data, "media_type": store.clean_media_type(media_type)}
     return _offer(app, run_id, "file", payload)
 
@@ -506,7 +521,7 @@ def add_attachment(app, session_id: str, encoded, media_type, name="") -> dict:
     if not data:
         raise RequestError(400, "empty", "请选择附件。")
     if len(data) > store.MAX_ATTACHMENT:
-        raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"])
+        raise RequestError(400, "payload_too_large", f"附件太大了（最大 {_size_label(store.MAX_ATTACHMENT)}）。")
     try:
         return app.sessions.add_attachment(
             session_id, data, store.clean_media_type(media_type), store.clean_filename(name),
@@ -515,7 +530,7 @@ def add_attachment(app, session_id: str, encoded, media_type, name="") -> dict:
         if exc.message == "空文件。":
             raise RequestError(400, "empty", "请选择附件。") from exc
         if exc.message == "太大。":
-            raise RequestError(400, "payload_too_large", HUMAN["payload_too_large"]) from exc
+            raise RequestError(400, "payload_too_large", f"附件太大了（最大 {_size_label(store.MAX_ATTACHMENT)}）。") from exc
         if exc.message == "找不到这个会话。":
             raise RequestError(404, "not_found", "找不到这个会话。") from exc
         raise RequestError(400, "invalid_json", "没能留下这个附件。") from exc
@@ -1128,32 +1143,47 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         {"kind": "tool", "name": "prompt_from_image", "ms": 0, "ok": True},
         persist=True,
     )
-    run.begin_content_wait("file")
-    run._file_max = store.MAX_ATTACHMENT  # 选图可比普通 keep 文件更大；只抽元数据，不把图存成 keep
-    _push_saved(app, session_id, message_id, run, {
-        "type": EVENT_CONTENT_REQUEST,
-        "message_id": message_id,
-        "run_id": run.run_id,
-        "purpose": "image_prompt",
-        "kind": "file",
-        "hint": "请选择带有嵌入提示词的图片（PNG / JPEG / WebP）。图片只在本机解析，模型只看到句柄。",
-        "draft": "",
-    })
-    payload = run.wait_content()
-    run._file_max = 0
-    if run.cancel.is_set():
-        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
-    if payload and payload.get("skip"):
-        return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", "已取消。"))
-    if not payload:
-        current = app.sessions.message_text(session_id, message_id)
-        return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要解析的图片。", current)
-    data = payload.get("data") or b""
-    media_type = payload.get("media_type") or ""
-    if not isinstance(data, bytes) or not data:
-        current = app.sessions.message_text(session_id, message_id)
-        return _error_finish(app, session_id, message_id, run, "empty", "请选择要解析的图片。", current)
-    extracted = _extract_image_prompt(data, media_type)
+    # #101：没读到嵌入提示词时由宿主直接再弹一次选图（同一个 file 请求、同样的大小上限），
+    # 不交给模型去走 accept_local_content(text)——那条路没有选图框，用户只能去点输入框旁的附件按钮，
+    # 结果要么被附件上限挡下（"这条消息太长了"），要么把图片字节作为附件发给模型。
+    extracted: dict = {"found": False}
+    for attempt in range(PROMPT_PICK_ATTEMPTS):
+        hint = PROMPT_PICK_HINT if attempt == 0 else PROMPT_PICK_RETRY_HINT
+        run.begin_content_wait("file")
+        run._file_max = store.MAX_ATTACHMENT  # 选图可比普通 keep 文件更大；只抽元数据，不把图存成 keep
+        _push_saved(app, session_id, message_id, run, {
+            "type": EVENT_CONTENT_REQUEST,
+            "message_id": message_id,
+            "run_id": run.run_id,
+            "purpose": "image_prompt",
+            "kind": "file",
+            "hint": hint,
+            "draft": "",
+            "attempt": attempt + 1,
+        })
+        payload = run.wait_content()
+        run._file_max = 0
+        if run.cancel.is_set():
+            return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", HUMAN["cancelled"]))
+        if payload and payload.get("skip"):
+            if attempt:
+                # 换图时点「取消」：正常结束这一轮，不算错误，也不再问模型。
+                _complete(app, session_id, message_id, run, PROMPT_PICK_STOPPED)
+                return "completed"
+            return _fail_status(app, session_id, message_id, run, GatewayError("cancelled", "已取消。"))
+        if not payload:
+            current = app.sessions.message_text(session_id, message_id)
+            return _error_finish(app, session_id, message_id, run, "timeout", "没有收到要解析的图片。", current)
+        data = payload.get("data") or b""
+        media_type = payload.get("media_type") or ""
+        if not isinstance(data, bytes) or not data:
+            current = app.sessions.message_text(session_id, message_id)
+            return _error_finish(app, session_id, message_id, run, "empty", "请选择要解析的图片。", current)
+        extracted = _extract_image_prompt(data, media_type)
+        del data, payload
+        if extracted.get("found") and extracted.get("positive"):
+            break
+        print(f"prompt_from_image {session_id} not_found attempt={attempt + 1}", file=sys.stderr)
     positive = extracted.get("positive") if extracted.get("found") else None
     source = extracted.get("source") if extracted.get("found") else None
     result = {
@@ -1181,8 +1211,9 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         print(f"prompt_from_image {session_id} {handle} {source} {len(positive)}", file=sys.stderr)
     else:
         result["next"] = (
-            "这张图没有可读的嵌入提示词。"
-            "请调用 accept_local_content（purpose=image_prompt）让用户手写画面描述，或请用户换一张带 ComfyUI/A1111 元数据的图。"
+            f"用户连续选了 {PROMPT_PICK_ATTEMPTS} 张图，都没有可读的嵌入提示词（本机已让用户换过图）。"
+            "现在不要调用任何工具，用一两句话告诉用户：可以换一张带 ComfyUI/A1111 元数据的图再让你读，"
+            "或者直接说想要的画面，你再用 accept_local_content（purpose=image_prompt）让用户在本机手写。"
         )
         print(f"prompt_from_image {session_id} not_found", file=sys.stderr)
 
@@ -1227,12 +1258,8 @@ def _continue_prompt_from_image(app, session_id, message_id, run, provider, user
         # 出图由用户在面板里点「出图」发起；模型这时要的任何工具调用都不执行。
         _complete(app, session_id, message_id, run, reply or PROMPT_PANEL_READY)
         return "completed"
-    if isinstance(follow, dict) and follow.get("name") == "accept_local_content":
-        purpose, kind = _accept_args(follow)
-        return _continue_after_content(
-            app, session_id, message_id, run, provider, "", user_text, False, "", purpose, kind,
-        )
-    _complete(app, session_id, message_id, run, reply)
+    # 没读到：宿主已经让用户换过图，这一轮只收模型的一句话说明；它要的工具调用不执行（不再弹文字框）。
+    _complete(app, session_id, message_id, run, reply or PROMPT_PICK_GAVE_UP)
     return "completed"
 
 

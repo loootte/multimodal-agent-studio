@@ -6,7 +6,9 @@ v1 **不做**：侧栏入口（面板只由对话唤起）、负向提示词 / �
 
 ## 怎么用
 
-对话里说「从这张图读出提示词」「把图里的 A1111 / ComfyUI 提示词抽出来」等。模型调用 `prompt_from_image`（无参数）→ 本机文件选择框 → 宿主在本机解析 → 有提示词则登记句柄并告诉模型；没有则 `found=false`，模型再调用 `accept_local_content`（`purpose=image_prompt`）让你手写。
+对话里说「从这张图读出提示词」「把图里的 A1111 / ComfyUI 提示词抽出来」等。模型调用 `prompt_from_image`（无参数）→ 本机文件选择框 → 宿主在本机解析 → 有提示词则登记句柄并告诉模型；没有则**宿主原地再弹一次选图**（提示「这张图里没有可读的嵌入提示词，请换一张图，或点取消」，同一个 file 请求、同样 8 MB 上限，不经模型），最多选 3 张；换图时点「取消」正常结束这一轮。3 张都没有才把 `found=false` 交给模型，模型只用一句话说明（这一轮不再弹文字框；想手写可以接着说，模型再用 `accept_local_content` 让你在本机写）。等待选图时，用输入框旁的附件按钮选的文件也交给这个选图请求，不会当成发给模型的附件。
+
+> 以前的「这条消息太长了」：没读到时模型改要文字（`accept_local_content` text），但界面把同一运行里的第二个 `content_request` 当回放去重吞掉了，还停在旧选图框上；再选的图交给了在等文字的运行，读图的 8 MB 上限已复位成 256 KB，于是报 `payload_too_large`（文案正是「这条消息太长了」）。现在前端按请求本身去重，服务端先判种类再判大小，超限文案改成「文件太大了（这里最大 …）」。
 
 读到提示词后，宿主推一条 `tool.panel` 事件（只有工具名、句柄、来源），网页自动打开「编辑读出的提示词」面板；这条回复下面也有「编辑提示词」按钮，关掉后可以再打开。即使你这句话里说了要出图，也不会自动出图：出图由你在面板里点。
 
@@ -70,5 +72,5 @@ v1 **不做**：侧栏入口（面板只由对话唤起）、负向提示词 / �
 
 - `apps/web/check.py` `_prompt_from_image_case` / `_prompt_draft_case`：读到就推 `tool.panel`、说要出图也不自动出图、草稿接口拒绝不相干句柄、编辑+保存原句柄更新、编辑+出图按新正文提交 ComfyUI 且不经模型；原文和改后的正文都不在事件、会话视图、后续对话历史和任何供应商请求里。
 - `apps/web/check.py` `_prompt_panel_page_case`：`X-MAS-Build` 头、`/favicon.ico` 204、`index.html` 没有内联事件处理器、`app.js` / `panels.js` 里有刷新提示和可重入 open。
-- 浏览器 e2e `apps/web/e2e/prompt_panel.cjs`（不进五项检查，要 Chrome/Edge 和 `puppeteer-core`）：自己起假供应商 + 假 ComfyUI（`prompt_panel_serve.py`），真浏览器里选图 → 面板自动打开、文本框可见可编辑且是读出的正文 → 一轮结束后面板不被清空 → 保存 → 关掉用「编辑提示词」再开读回新正文 → 连点几次只有一个文本框 → 出图 → 对话里没有正文 → 构建指纹变了顶上提示刷新；控制台不许有报错。用法：`CHROME=/usr/bin/google-chrome PYTHON=python3 node apps/web/e2e/prompt_panel.cjs`（Windows：`$env:CHROME="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`；`NODE_PATH` 指向装了 `puppeteer-core` 的 `node_modules`）。
-- `evals/tasks.json`：`security.prompt_from_image_no_body`、`runtime.prompt_from_image_extract`、`security.prompt_draft_edit_save`、`security.prompt_draft_edit_generate`。
+- 浏览器 e2e `apps/web/e2e/prompt_panel.cjs`（不进五项检查，要 Chrome/Edge 和 `puppeteer-core`）：自己起假供应商 + 假 ComfyUI（`prompt_panel_serve.py`），真浏览器里先选一张没有嵌入提示词的图 → 原地再弹选图（不是文字框）→ 用附件按钮换一张带元数据的 → 面板自动打开、不出现「太长」、附件栏是空的、文本框可见可编辑且是读出的正文 → 一轮结束后面板不被清空 → 保存 → 关掉用「编辑提示词」再开读回新正文 → 连点几次只有一个文本框 → 出图 → 对话里没有正文 → 构建指纹变了顶上提示刷新；控制台不许有报错。用法：`CHROME=/usr/bin/google-chrome PYTHON=python3 node apps/web/e2e/prompt_panel.cjs`（Windows：`$env:CHROME="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"`；`NODE_PATH` 指向装了 `puppeteer-core` 的 `node_modules`）。
+- `evals/tasks.json`：`security.prompt_from_image_no_body`、`runtime.prompt_from_image_extract`、`security.prompt_draft_edit_save`、`security.prompt_draft_edit_generate`、`runtime.prompt_from_image_repick`（`_prompt_repick_units` / `_prompt_repick_case`：没读到 → 再弹 file 选图 → 超限图报「文件太大」而运行仍在等 → 换带元数据的图打开面板；全程只问模型 2 次，图片字节 / base64 / 正文不进供应商和会话消息；换图时取消正常结束）。

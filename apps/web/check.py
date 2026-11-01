@@ -6192,6 +6192,11 @@ def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str
     for item in provider.requests[sent2:]:
         if "no prompt here" in _provider_blob(item):
             fail("无元数据图的 Comment 进了供应商")
+    asks2 = [e for e in events2 if e.get("type") == "content_request"]
+    if len(asks2) != 3 or any(e.get("kind") != "file" or e.get("purpose") != "image_prompt" for e in asks2):
+        fail(f"没读到提示词时没有让用户换图（应连续 3 次 file 选图）：{[(e.get('kind'), e.get('purpose')) for e in asks2]}")
+    _prompt_repick_units()
+    _prompt_repick_case(base, provider, directory)
     # 读到提示词就推 tool.panel（只带工具名/句柄/来源），没有正文
     panel_ev = next((e for e in events if e.get("type") == "tool.panel"), None)
     if not panel_ev or panel_ev.get("tool") != "prompt_from_image" or panel_ev.get("content_handle") != handle \
@@ -6224,6 +6229,152 @@ def _prompt_from_image_case(base: str, provider, box: ComfyState, directory: str
         fail("读图路径事件里出现了提示词正文")
     _prompt_draft_case(base, provider, box, directory, session3, handle3, secret3, sent3, app)
     print("prompt_from_image cases ok")
+
+
+def _prompt_repick_case(base: str, provider, directory: str) -> None:
+    """#101 回归：第一张图没有嵌入提示词 → 宿主直接再弹 file 选图（不走文字框、不经模型）；
+    换一张带元数据的图 → 打开面板。全程不出现"太长"，图片字节/base64 与正文都不进供应商请求和会话消息。"""
+    provider.mode = "promptimage"
+    secret = "LOCAL-PROMPT-REPICK-7c3d silver fox on a frozen lake"
+    bare = _png_with_text("Comment", "repick bare no prompt")
+    good = _png_with_text("prompt", json.dumps({"1": {"class_type": "CLIPTextEncode", "inputs": {"text": secret}}}))
+    big = b"\x89PNG\r\n\x1a\n" + b"\0" * (store.MAX_ATTACHMENT + 1)
+
+    session_id = _fresh_session(base)
+    sent = len(provider.requests)
+    events, notes = _speak_picks(base, session_id, "从这张图读出提示词。", [
+        ("file", bare), ("big", big), ("file", good),
+    ])
+    asks = [e for e in events if e.get("type") == "content_request"]
+    if len(asks) != 2 or any(e.get("kind") != "file" or e.get("purpose") != "image_prompt" for e in asks):
+        fail(f"换图没有走 file 选图：{[(e.get('kind'), e.get('purpose')) for e in asks]}")
+    if "没有可读的嵌入提示词" not in str(asks[1].get("hint") or ""):
+        fail("第二次选图没有提示「这张图没有可读的嵌入提示词」")
+    if len(notes) != 1 or notes[0][0] != 400 or "文件太大" not in notes[0][1] or "太长" in notes[0][1]:
+        fail(f"换图时超大文件的提示不对：{notes}")
+    panel = next((e for e in events if e.get("type") == "tool.panel"), None)
+    if not panel or not str(panel.get("content_handle") or "").startswith("c_"):
+        fail("第一张没读到、换一张后没有打开编辑面板")
+    if events[-1].get("type") != "message.completed":
+        fail(f"换图读提示词没有正常结束：{events[-1]}")
+    blob = json.dumps(events, ensure_ascii=False)
+    if "太长" in blob or "payload_too_large" in blob or secret in blob:
+        fail("换图路径事件里出现了「太长」错误或提示词正文")
+    calls = provider.requests[sent:]
+    if len(calls) != 2:
+        fail(f"换图不该再问模型：读图前后应只有 2 次模型请求，实际 {len(calls)}")
+    for item in calls:
+        raw = _provider_blob(item)
+        for data in (bare, good):
+            if base64.b64encode(data).decode("ascii") in raw:
+                fail("图片 base64 进了模型请求")
+        if secret in raw or "repick bare" in raw or "image_url" in raw:
+            fail("换图路径把正文或图片发给了模型")
+    saved = _saved_contents(directory, session_id)
+    matches = [item for item in saved if item.get("handle") == panel["content_handle"]]
+    if len(matches) != 1 or matches[0].get("text") != secret:
+        fail("换图后登记的提示词不对")
+    _status, view = request("GET", base + f"/api/sessions/{session_id}")
+    if base64.b64encode(good).decode("ascii")[:200] in view or any(
+            m.get("attachments") for m in json.loads(view).get("messages") or []):
+        fail("换图后会话消息里带了图片附件或字节")
+    for message in json.loads(view).get("messages") or []:
+        if len(message.get("text") or "") > 2000:
+            fail("换图后会话消息正文异常变长")
+
+    # 换图时点「取消」：正常结束（completed），不报错，也不再问模型
+    session2 = _fresh_session(base)
+    sent2 = len(provider.requests)
+    events2, _ = _speak_picks(base, session2, "从这张图读出提示词。", [("file", bare), ("skip", b"")])
+    if events2[-1].get("type") != "message.completed" or "已停止读图" not in _assistant_text(events2):
+        fail(f"换图时取消没有正常结束：{events2[-1]}")
+    if len(provider.requests) - sent2 != 1:
+        fail("换图时取消后又去问了模型")
+    if any(e.get("type") == "tool.panel" for e in events2):
+        fail("取消换图也打开了面板")
+    print("prompt_from_image repick ok")
+
+
+def _prompt_repick_units() -> None:
+    """#101 回归（单元）：旧界面把模型后来要的文字请求吞掉，用户在旧选图框里再选的图交给了「在等文字」的运行，
+    _file_max 已复位成 256 KB → 报"这条消息太长了"。现在先判种类；读图上限只在等图时生效；前端按请求去重。"""
+    import chat_run
+
+    class _Runs:
+        def __init__(self, run):
+            self.run = run
+
+        def get(self, run_id):
+            return self.run if run_id == self.run.run_id else None
+
+    class _App:
+        pass
+
+    run = chat_run.Run("s_" + "1" * 32, "m_" + "1" * 32)
+    app = _App()
+    app.runs = _Runs(run)
+    picture = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\0" * (store.MAX_FILE + 10)).decode("ascii")
+    run.begin_content_wait("text")
+    try:
+        chat_run.submit_file(app, run.run_id, picture, "image/png")
+        fail("在等文字时交文件居然被收下了")
+    except chat_run.RequestError as exc:
+        if exc.code == "payload_too_large" or "太长" in exc.message:
+            fail(f"在等文字时交来的图片被报成太长：{exc.message}")
+    run.begin_content_wait("file")
+    try:
+        chat_run.submit_file(app, run.run_id, picture, "image/png")
+        fail("普通本机文件超过 256 KB 也被收下了")
+    except chat_run.RequestError as exc:
+        if exc.code != "payload_too_large" or "太长" in exc.message or "文件太大" not in exc.message:
+            fail(f"超限文件的提示不对：{exc.message}")
+    run._file_max = store.MAX_ATTACHMENT
+    if chat_run.submit_file(app, run.run_id, picture, "image/png") != {"ok": True}:
+        fail("读图时 8 MB 以内的图片没被收下")
+    run._file_max = 0
+    script = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "app.js"), encoding="utf-8").read()
+    if 'events.some((item) => item.type === "content_request"))' in script or "function sameContentRequest" not in script:
+        fail("前端仍按「已有任何 content_request」去重，会吞掉同一运行里的新请求")
+    if "waitingLocalFileForm()" not in script or "这条消息太长了" in script:
+        fail("附件按钮没有交给等待中的选图，或文件超限仍提示「这条消息太长了」")
+
+
+def _speak_picks(base: str, session_id: str, text: str, picks: list):
+    """按顺序回应每个 content_request：("file", 字节) 提交；("big", 字节) 先提交一次超限的再继续等下一项；("skip", _) 取消。"""
+    queue = list(picks)
+    notes: list = []
+
+    def on_event(event):
+        if event.get("type") == "tool.confirm":
+            _post_confirm(base, event.get("run_id") or "", True, _ack_of(event))
+            return
+        if event.get("type") != "content_request":
+            return
+        url = base + f"/api/runs/{event.get('run_id')}/content"
+        while queue:
+            kind, data = queue.pop(0)
+            if kind == "skip":
+                request("POST", url, {"skip": True})
+                return
+            status, body = request("POST", url, {"file": base64.b64encode(data).decode("ascii"), "media_type": "image/png"})
+            if kind == "big":
+                try:
+                    message = json.loads(body).get("message") or ""
+                except ValueError:
+                    message = ""
+                notes.append((status, message))
+                continue
+            if status != 200:
+                fail(f"提交选图失败：{status}")
+            return
+        fail("选图请求比预期多")
+
+    status, raw, events = read_sse(
+        site_port(base), f"/api/sessions/{session_id}/messages", {"text": text}, on_event=on_event, timeout=20,
+    )
+    if status != 200 or not events or events[-1].get("type") not in TERMINAL:
+        fail("换图读提示词没有收到结束事件")
+    return events, notes
 
 
 def _jreq(method: str, url: str, payload: dict | None = None):

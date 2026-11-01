@@ -82,7 +82,15 @@ document.querySelector("#tool-policy").addEventListener("keydown", (event) => {
 document.querySelector("#file").addEventListener("change", (event) => {
   const chosen = event.target.files && event.target.files[0];
   event.target.value = "";
-  if (chosen) addPendingFile(chosen);
+  if (!chosen) return;
+  // #101：有等待中的「本机文件」请求（如读图换一张）时，附件按钮选的文件交给它（只在本机解析），
+  // 不当成发给模型的附件。
+  const waiting = waitingLocalFileForm();
+  if (waiting) {
+    waiting._localDrop(chosen);
+    return;
+  }
+  addPendingFile(chosen);
 });
 document.querySelector("#stop").addEventListener("click", stopRun);
 
@@ -396,9 +404,15 @@ function resetAssistantForReplay() {
   assistant.error = null;
 }
 
+function sameContentRequest(a, b) {
+  return ["run_id", "kind", "purpose", "hint", "attempt"].every((key) => (a[key] || "") === (b[key] || ""));
+}
+
 function rememberAgentEvent(assistant, event) {
   const events = assistant.events || (assistant.events = []);
-  if (event.type === "content_request" && events.some((item) => item.type === "content_request")) return;
+  // 回放去重只去掉「同一个」请求；同一运行里后来的新请求（读图换一张、模型改要文字）要换掉旧的输入框，
+  // 否则界面停在旧的选图框上，用户再选的图会交给已经在等文字的请求。
+  if (event.type === "content_request" && events.some((item) => item.type === "content_request" && sameContentRequest(item, event))) return;
   if (event.type === "agent") {
     const node = events.find((item) => item.type === "agent" && item.run_id === event.run_id);
     if (node) {
@@ -1281,7 +1295,7 @@ async function pickNativeFile(message, request, pick, button) {
       button.disabled = false;
       if (result && result.code === "cancelled") return;
       const reasons = {
-        payload_too_large: "文件太大了，本机内容最大 256 KB。",
+        payload_too_large: "文件太大了（本机内容最大 256 KB，读图最大 8 MB）。",
         empty: "这个文件是空的。",
         not_waiting: "现在没有在等待本地内容。",
       };
@@ -1296,6 +1310,11 @@ async function pickNativeFile(message, request, pick, button) {
 
 // 13.B：拖进窗口的文件。WebView 默认会跳转去打开 file://，这里拦下来：
 // 有等待中的「本机文件」请求就交给它（走同一个上传接口、只得句柄），否则只提示，不读文件。
+function waitingLocalFileForm() {
+  const forms = [...document.querySelectorAll("form.local-entry-file")].filter((form) => form._localDrop);
+  return forms[forms.length - 1] || null;
+}
+
 document.addEventListener("dragover", (event) => event.preventDefault());
 document.addEventListener("drop", (event) => {
   event.preventDefault();
@@ -1545,7 +1564,7 @@ async function addPendingFile(file) {
     return;
   }
   if (file.size > 8 * 1024 * 1024) {
-    showNote("这条消息太长了。");
+    showNote("附件太大了（最大 8 MB）。");
     return;
   }
   const kind = kindFromFile(file);

@@ -114,7 +114,8 @@
         "security.prompt_from_image_no_body": true,
         "runtime.prompt_from_image_extract": true,
         "security.prompt_draft_edit_save": true,
-        "security.prompt_draft_edit_generate": true
+        "security.prompt_draft_edit_generate": true,
+        "runtime.prompt_from_image_repick": true
       }
     }
   }

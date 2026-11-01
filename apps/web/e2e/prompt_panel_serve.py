@@ -1,6 +1,6 @@
 """#101 浏览器端到端用的假环境：假供应商（promptimage 模式）+ 假 ComfyUI + 临时数据目录的网页服务。
 
-用法：python apps/web/e2e/prompt_panel_serve.py  → 打印 MAS_URL=… 和 PNG=…，一直跑到 Ctrl+C / stdin 关闭。
+用法：python apps/web/e2e/prompt_panel_serve.py  → 打印 MAS_URL=…、PNG=…（带 ComfyUI 提示词）和 PNG_NONE=…（没有嵌入提示词），一直跑到 Ctrl+C / stdin 关闭。
 apps/web/e2e/prompt_panel.cjs 会自己起它；别对正在用的服务（比如 8766）跑。
 """
 import json
@@ -26,6 +26,10 @@ def main() -> None:
         path = os.path.join(tempfile.mkdtemp(prefix="e2e-png-"), "comfy.png")
         with open(path, "wb") as handle:
             handle.write(png)
+        bare = os.path.join(os.path.dirname(path), "bare.png")
+        with open(bare, "wb") as handle:
+            handle.write(check._png_with_text("Comment", "e2e bare image without prompt"))
+        print(f"PNG_NONE={bare}", flush=True)
         print(f"MAS_URL={h.base}", flush=True)
         print(f"PNG={path}", flush=True)
         print(f"SECRET={SECRET}", flush=True)

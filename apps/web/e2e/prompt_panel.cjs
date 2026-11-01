@@ -25,7 +25,7 @@ function startServer() {
         const at = line.indexOf("=");
         if (at > 0) info[line.slice(0, at)] = line.slice(at + 1).trim();
       }
-      if (info.MAS_URL && info.PNG && info.SECRET) {
+      if (info.MAS_URL && info.PNG && info.PNG_NONE && info.SECRET) {
         clearTimeout(timer);
         resolve({ child, info });
       }
@@ -52,9 +52,25 @@ function startServer() {
     if (await page.$('#tool-panels [data-tool="prompt_from_image"]')) fail("读图提示词出现在侧栏");
     await page.type("#input", "从这张图读出提示词。");
     await page.click("#send");
+    // 0. 先选一张没有嵌入提示词的图：应原地再弹选图（不是文字框），不出现「太长」
     const picker = await page.waitForSelector(".local-entry-file input[type=file]", { timeout: 15000 });
-    await picker.uploadFile(info.PNG);
+    await picker.uploadFile(info.PNG_NONE);
     await page.click(".local-entry-file button[type=submit]");
+    await page.waitForFunction(() => {
+      const form = document.querySelector("form.local-entry-file");
+      return form && form.innerText.includes("没有可读的嵌入提示词");
+    }, { timeout: 15000 }).catch(async () => {
+      const state = await page.evaluate(() => ({
+        forms: [...document.querySelectorAll("form.local-entry")].map((f) => f.className + ":" + f.innerText.slice(0, 80)),
+        note: document.querySelector("#composer-note") ? document.querySelector("#composer-note").innerText : "",
+      }));
+      fail("没读到提示词后没有再弹选图：" + JSON.stringify(state));
+    });
+    if (await page.$("form.local-entry:not(.local-entry-file) textarea")) fail("没读到提示词后弹出了文字框");
+    // 再换一张带元数据的：用输入框旁的附件按钮选（应交给等待中的选图，不当附件发给模型）
+    const attach = await page.$("#file");
+    await attach.uploadFile(info.PNG);
+    await page.evaluate(() => document.querySelector("#file").dispatchEvent(new Event("change", { bubbles: true })));
     // 1. 自动打开面板，文本框里是读出的正文，可编辑
     await page.waitForFunction((selector, secret) => {
       const node = document.querySelector(selector);
@@ -69,6 +85,12 @@ function startServer() {
       }));
       fail("读图后面板里没有带正文的可编辑文本框：" + JSON.stringify(state) + " 页面错误：" + errors.join(" | "));
     });
+    const repick = await page.evaluate(() => ({
+      note: document.querySelector("#composer-note") ? document.querySelector("#composer-note").innerText : "",
+      pending: document.querySelectorAll("#attach-list .attach-chip").length,
+    }));
+    if (repick.note.includes("太长")) fail("换图后出现了「太长」提示：" + repick.note);
+    if (repick.pending) fail("换图的图片被当成了发给模型的附件");
     if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
     const box = await page.$eval(panelText, (node) => {
       const r = node.getBoundingClientRect();

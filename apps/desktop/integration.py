@@ -28,7 +28,7 @@ import urllib.request
 
 RUN_ID = re.compile(r"r_[0-9a-f]{32}")
 SESSION_ID = re.compile(r"s_[0-9a-f]{32}")
-MAX_LOCAL_FILE = 262144  # 与 apps/web/store.MAX_FILE 一致
+MAX_LOCAL_FILE = 8 * 1024 * 1024  # 宿主读取上限与 apps/web/store.MAX_ATTACHMENT 一致；每种请求的实际上限由服务端 submit_file 判（keep 256 KB，读图 8 MB）
 JS_METHODS = ("capabilities", "pick_local_file", "save_egress_export", "open_external", "open_data_dir")
 
 
