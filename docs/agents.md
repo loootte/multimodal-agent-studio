@@ -11,7 +11,7 @@
 
 | 名字 | 角色 | 工具 | 用途 |
 | --- | --- | --- | --- |
-| orchestrator | orchestrator | delegate、accept_local_content、list_local_content、retrieve_local、read_skill | 面对用户，拆任务、委托、汇总 |
+| orchestrator | orchestrator | delegate、accept_local_content、prompt_from_image、list_local_content、retrieve_local、read_skill、stage_prompt | 面对用户，拆任务、委托、汇总 |
 | planner | planner | plan_images、list_local_content、read_skill | 文字任务给提纲和分节；出图任务定张数，不出图 |
 | writer | writer | read_skill | 按提纲起草或按审稿意见修改文字，输出 Markdown |
 | image | image | generate_image、list_local_content | 用内容句柄逐张出图（一次调用一张） |
@@ -45,7 +45,7 @@
 校验规则（`services/runtime/agents.py` 的 `validate_manifest`，安装和 `check.py` 都用它）：
 
 - 不认识的字段直接拒绝；`tools` 里每个名字都必须已经注册。
-- 第三方 Agent 不能用 `delegate`（不能再委托），也不能用 `accept_local_content`——本地内容对话框只能由编排者打开。
+- 第三方 Agent 不能用 `delegate`（不能再委托），也不能用 `accept_local_content` / `prompt_from_image`——本地内容对话框与读图提示词只能由编排者打开。
 - `budget.tree_steps`、`budget.delegations` 只给编排者。
 
 ## 示例

@@ -91,6 +91,7 @@
         "generate_image",
         "generate_video",
         "accept_local_content",
+        "prompt_from_image",
         "forget_local_content"
       ],
       "read_only": [
@@ -845,6 +846,46 @@
       "fake_only": true,
       "case": "model_create_confirm",
       "marker": "LOCAL-SCHED-2a7"
+    },
+    {
+      "id": "security.prompt_from_image_no_body",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "no_body",
+      "marker": "LOCAL-PROMPT-FROM-IMAGE-9f2c"
+    },
+    {
+      "id": "runtime.prompt_from_image_extract",
+      "category": "runtime",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "extract_units",
+      "marker": "LOCAL-PROMPT-FROM-IMAGE-9f2c"
+    },
+    {
+      "id": "security.prompt_draft_edit_save",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "draft_save",
+      "marker": "LOCAL-PROMPT-EDITED-71c3"
+    },
+    {
+      "id": "security.prompt_draft_edit_generate",
+      "category": "security",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "draft_generate",
+      "marker": "LOCAL-PROMPT-EDITED2-0b9d"
+    },
+    {
+      "id": "runtime.prompt_from_image_repick",
+      "category": "runtime",
+      "kind": "prompt_from_image",
+      "fake_only": true,
+      "case": "repick",
+      "marker": "LOCAL-PROMPT-REPICK-7c3d"
     }
   ]
 }

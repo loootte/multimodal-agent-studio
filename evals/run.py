@@ -518,7 +518,7 @@ def run_trajectory_export(h: Harness, task: dict, live: bool) -> dict:
 
 
 def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
-    """子 Agent 越权调用（accept_local_content、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
+    """子 Agent 越权调用（accept_local_content、prompt_from_image、清单外的 generate_image）被运行时拒绝，且请求里没有本地正文。"""
     import threading
 
     from services.runtime import Budget, agents
@@ -528,12 +528,13 @@ def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     try:
         adapter = _script("eval-agent", [
             [{"type": "tool.requested", "name": "accept_local_content", "arguments": {"purpose": "x", "kind": "text"}}],
+            [{"type": "tool.requested", "name": "prompt_from_image", "arguments": {}}],
             [{"type": "tool.requested", "name": "generate_image", "arguments": {"content_handle": "c_" + "ab" * 16}}],
             [{"type": "message.delta", "text": "计划好了"}],
         ])
         out = agents.run_child(
             agents.find("planner"), "规划两张", model="eval-agent", api_key=check.SECRET, base_url=None,
-            cancel=threading.Event(), budget=Budget(steps=6), run_id="r_eval_child", depth=1,
+            cancel=threading.Event(), budget=Budget(steps=8), run_id="r_eval_child", depth=1,
             tool_source=[], execute=lambda name, args: executed.append(name) or {"ok": True, "tool": name},
             mutating=lambda name, args=None: False, confirm=lambda name, args: True,
             local_bodies={"c_" + "ab" * 16: secret}, timeout_sec=5,
@@ -543,11 +544,11 @@ def run_multi_agent_guard(h: Harness, task: dict, live: bool) -> dict:
     expect(not executed, f"越权工具被执行了：{executed}")
     expect(out["status"] == "completed", f"子 Agent 没有正常收尾：{out}")
     blob = json.dumps(adapter.calls, ensure_ascii=False)
-    expect(blob.count("tool_not_allowed") >= 2, "越权调用没有返回 tool_not_allowed")
+    expect(blob.count("tool_not_allowed") >= 3, "越权调用没有返回 tool_not_allowed")
     expect(secret not in blob, "子 Agent 请求里出现了本地正文")
     names = [agents._contract_name(item) for item in adapter.calls[0].get("tools") or []]
-    expect("accept_local_content" not in names and "delegate" not in names, f"子 Agent 拿到了不该有的工具：{names}")
-    return {"refused": ["accept_local_content", "generate_image"]}
+    expect("accept_local_content" not in names and "prompt_from_image" not in names and "delegate" not in names, f"子 Agent 拿到了不该有的工具：{names}")
+    return {"refused": ["accept_local_content", "prompt_from_image", "generate_image"]}
 
 
 def _egress_read(h: Harness, session_id: str | None) -> tuple[list[dict], str]:
@@ -2608,9 +2609,36 @@ def run_schedule(h: Harness, task: dict, live: bool) -> dict:
     return detail
 
 
+
+def run_prompt_from_image(h: Harness, task: dict, live: bool) -> dict:
+    """#101：从图片读嵌入正向提示词。正文/原图不得进供应商；抽取单测；完整选图流程走 check 夹具。"""
+    case = task.get("case") or "no_body"
+    try:
+        if case == "extract_units":
+            check._prompt_extract_units()
+            return {"case": case}
+        if case == "repick":
+            # 第一张图没有嵌入提示词 → 宿主原地再弹选图；换一张带元数据的 → 打开面板；不报"太长"、字节不进供应商
+            check._prompt_repick_units()
+            check._prompt_repick_case(h.base, h.provider, h.directory)
+            return {"case": case, "marker": task.get("marker")}
+        if case in ("draft_save", "draft_generate"):
+            # 读图后在本机面板里编辑 → 保存 / 出图；原文和改后的正文都不进任何供应商请求
+            session_id, handle, secret, sent = check._prompt_draft_setup(h.base, h.provider, h.box)
+            step = "save" if case == "draft_save" else "generate"
+            check._prompt_draft_case(h.base, h.provider, h.box, h.directory, session_id, handle, secret, sent,
+                                     h.app, steps=(step,))
+            return {"case": case, "marker": task.get("marker")}
+        check._prompt_from_image_case(h.base, h.provider, h.box, h.directory, h.app)
+    except SystemExit as exc:
+        raise Failed(str(exc) or "prompt_from_image 检查失败") from exc
+    return {"case": case, "marker": task.get("marker")}
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
+    "prompt_from_image": run_prompt_from_image,
     "confirm_web": run_confirm_web,
     "confirm_runtime": run_confirm_runtime,
     "injection": run_injection,

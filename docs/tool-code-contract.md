@@ -126,6 +126,9 @@ def preview(fields, ctx):
 "permissions": {"ui": true}
 ```
 
+- 可选 `launcher`：`sidebar`（默认，侧栏有入口）或 `chat`（没有侧栏入口，只能由对话里宿主发出的 `tool.panel` 事件打开，见 [prompt-from-image.md](prompt-from-image.md)）。
+- 可选 `local_draft: true`：只对**内置**面板生效，从对话打开时多给 `api.draft`（见下表）。已安装面板的 iframe 永远没有它。
+- 内置宿主工具（`entry.kind=host`，只限 `HOST_TOOLS` 名单）也可以带 `ui.panel`（只能有 `title`、`panel`，不能有表单）。
 - `script` 必填、`style` 可选，都要匹配 `^ui/[A-Za-z0-9][A-Za-z0-9_-]{0,47}\.(js|css)$`（扩展名要对得上），解开符号链接以后必须在工具目录的 `ui/` 里，文件存在，单个不超过 256 KB；否则 `invalid_manifest`。`title` 是侧栏入口的文字，`mount` 目前只有 `dialog`。
 - 声明了 `panel` 就必须声明 `permissions.ui: true`，反过来也一样。安装时审阅里有一项“网页面板”（`ui`），列出面板文件、大小和 sha256，要单独勾选，没勾 `permission_not_accepted`。授权后改了面板文件，授权作废，面板和工具一起不可用。
 
@@ -151,8 +154,9 @@ def preview(fields, ctx):
 | `api.notify(text)` | 在对话框底部显示一行宿主提示 |
 | `api.close()` | 关面板 |
 | `api.handle.is(value)` | 是不是本地内容句柄 |
+| `api.draft`（只有内置 + `local_draft` + 从对话打开） | `handle`；`read()` → 草稿正文；`save(text)` 原句柄保存；`generate({text, count, aspect_ratio, backend})` 先保存再出图。正文只在本机网页和宿主之间，不经对话模型 |
 
-面板**拿不到本地内容本身**：接口里没有读资源、读文件、取会话正文的方法，最多看到句柄。面板也不应该自己 `fetch`；内置面板的检查会确认 `panel.js` 里没有 `fetch` 和 `/api/`。
+面板**拿不到本地内容本身**：接口里没有读资源、读文件、取会话正文的方法，最多看到句柄（唯一例外是上面的 `api.draft`：只给内置面板，只能读写这个工具自己登记、用户刚在对话里交给它的那一份草稿）。面板也不应该自己 `fetch`；内置面板的检查会确认 `panel.js` 里没有 `fetch` 和 `/api/`。
 
 分级工具（`content.rating=adult`）：打开面板前宿主先弹 `content.confirm`，用户确认后才挂载；`api.run` 的 `confirmed` 只来自这次宿主确认，面板传不进来；后端锁在本机。服务端的 `content_guard`、`confirm_required`、`nsfw_backend_not_allowed` 照旧生效，面板绕不过去。
 
@@ -166,10 +170,11 @@ def preview(fields, ctx):
 
 | 接口 | 作用 |
 | --- | --- |
-| `GET /api/tools` | 多了 `form_tools`：`[{name, title, builtin, form, preview, run_label, rating, version, label?, min_age?, confirm?, local_only?, unavailable?, panel?}]`；`panel` 是 `{title, mount, isolated, script?, style?, frame?}`（内置给 `script`/`style`，安装的给 `frame`） |
+| `GET /api/tools` | 多了 `form_tools`：`[{name, title, builtin, form, preview, run_label, rating, version, label?, min_age?, confirm?, local_only?, unavailable?, panel?}]`；`panel` 是 `{title, mount, isolated, launcher, local_draft?, script?, style?, frame?}`（内置给 `script`/`style`，安装的给 `frame`） |
 | `GET /api/tools/<name>/ui/<file>`、`/ui/frame` | 面板文件 / 沙箱文档，见上面「网页面板」 |
 | `GET /api/tools/<name>/catalog` | 表单目录（已过守卫）+ 上面的简介 |
 | `POST /api/tools/<name>/preview` | `{fields}` → `{prompt, summary, fields, used_defaults, rating}`；拒绝时 400 + `code` |
+| `GET/POST /api/sessions/<id>/tools/<name>/drafts/<c_…>`、`POST …/generate` | 内置 `local_draft` 面板的草稿读 / 存 / 出图（#101），只认这个工具登记的有效句柄 |
 | `POST /api/sessions/<id>/tools/<name>/run` | `{fields, count, aspect_ratio, seed?, backend, privacy, confirmed?}`，返回和发消息相同的事件流 |
 
 旧接口 `/api/character`、`/api/character/preview`、`/api/sessions/<id>/character` 保留，等于 `character_image` 的这三个。

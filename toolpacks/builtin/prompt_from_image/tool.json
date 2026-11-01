@@ -1,0 +1,40 @@
+{
+  "schema": "mas.tool/1",
+  "name": "prompt_from_image",
+  "version": "0.2.0",
+  "description": "从用户本机选中的图片里读出嵌入的正向提示词（ComfyUI PNG prompt、A1111 parameters、EXIF 尽力），登记成本地出图句柄，并在本机面板里打开给用户编辑：用户在面板里选「出图」或「保存」。调用后会弹出本机选图；你只收到 content_handle、source、found，看不到也绝不要索要提示词正文；读到后不要自己调用 generate_image，等用户在面板里操作。没有读到提示词时 found=false，再调用 accept_local_content（purpose=image_prompt）让用户手写。不要填写正文、字节、路径或文件名。",
+  "order": 14,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "mutating": true,
+  "confirm": "always",
+  "entry": {
+    "kind": "host"
+  },
+  "ui": {
+    "title": "读图提示词",
+    "panel": {
+      "script": "ui/panel.js",
+      "style": "ui/panel.css",
+      "title": "编辑读出的提示词",
+      "mount": "dialog",
+      "launcher": "chat",
+      "local_draft": true
+    }
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": true,
+    "network": false,
+    "write_files": true,
+    "send_local_to_model": false,
+    "ui": true
+  }
+}

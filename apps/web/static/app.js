@@ -82,7 +82,15 @@ document.querySelector("#tool-policy").addEventListener("keydown", (event) => {
 document.querySelector("#file").addEventListener("change", (event) => {
   const chosen = event.target.files && event.target.files[0];
   event.target.value = "";
-  if (chosen) addPendingFile(chosen);
+  if (!chosen) return;
+  // #101：有等待中的「本机文件」请求（如读图换一张）时，附件按钮选的文件交给它（只在本机解析），
+  // 不当成发给模型的附件。
+  const waiting = waitingLocalFileForm();
+  if (waiting) {
+    waiting._localDrop(chosen);
+    return;
+  }
+  addPendingFile(chosen);
 });
 document.querySelector("#stop").addEventListener("click", stopRun);
 
@@ -192,7 +200,56 @@ async function runFormTool(tool, body, label) {
   await runTurn(`/api/sessions/${state.currentId}/tools/${encodeURIComponent(tool)}/run`, body, label, []);
   return true;
 }
-window.MASHost = Object.freeze({ runFormTool });
+// #101：对话唤起的工具面板（tool.panel 事件）里点「出图」。url 由 panels.js 按 句柄 拼好，只认当前会话。
+async function runToolDraft(sessionId, url, body, label) {
+  if (state.sending || !sessionId || sessionId !== state.currentId) return false;
+  if (typeof url !== "string" || !url.startsWith(`/api/sessions/${sessionId}/tools/`)) return false;
+  await runTurn(url, body, label, []);
+  return true;
+}
+
+// 按 tool.panel 事件打开面板；页面只转交工具名和句柄，不认识具体工具。
+function openToolPanel(event) {
+  if (!event || !window.MASPanels || typeof window.MASPanels.openFor !== "function") return;
+  window.MASPanels.openFor(String(event.tool || ""), { handle: event.content_handle, session_id: state.currentId });
+}
+
+// 同一个句柄在这个页面里只自动弹一次：一轮结束后的接回（subscribe 回放全部事件）不会再弹第二次，
+// 两次 open 也就不会互相打架。之后要再开，点消息下方的按钮。
+const autoOpenedPanels = new Set();
+function autoOpenToolPanel(event) {
+  const key = `${state.currentId || ""}:${String(event.tool || "")}:${String(event.content_handle || "")}`;
+  if (autoOpenedPanels.has(key)) return;
+  autoOpenedPanels.add(key);
+  openToolPanel(event);
+}
+
+// 服务端每个 JSON 回应带 X-MAS-Build（启动时网页静态文件的指纹）。页面记下第一次见到的值；
+// 变了说明服务换了新代码而这个标签还跑着旧脚本，旧脚本可能不认识新事件（比如 tool.panel），提示刷新。
+let pageBuild = "";
+function noteBuild(response) {
+  const build = response && response.headers ? response.headers.get("X-MAS-Build") || "" : "";
+  if (!build) return;
+  if (!pageBuild) {
+    pageBuild = build;
+    return;
+  }
+  if (build === pageBuild || document.querySelector("#stale-page")) return;
+  const bar = document.createElement("div");
+  bar.id = "stale-page";
+  bar.className = "stale-page";
+  bar.setAttribute("role", "alert");
+  const text = document.createElement("span");
+  text.textContent = "本机服务已更新，这个页面还是旧版本，部分功能（比如提示词编辑面板）可能不出现。请刷新页面（Ctrl+F5）。";
+  const reload = document.createElement("button");
+  reload.type = "button";
+  reload.textContent = "刷新";
+  reload.addEventListener("click", () => window.location.reload());
+  bar.append(text, reload);
+  document.body.prepend(bar);
+}
+
+window.MASHost = Object.freeze({ runFormTool, runToolDraft, busy: () => Boolean(state.sending) });
 
 async function runTurn(url, body, userText, attachments) {
   state.stopped = false;
@@ -298,7 +355,8 @@ function onEvent(event) {
     event.type === "agent" ||
     event.type === "planning.todo" ||
     event.type === "planning.goal" ||
-    event.type === "plan.proposed"
+    event.type === "plan.proposed" ||
+    event.type === "tool.panel"
   ) {
     if (state.stopped && (event.type === "progress" || event.type === "artifact")) return;
     if (event.type === "content_request" && event.run_id) assistant.run_id = event.run_id;
@@ -310,6 +368,7 @@ function onEvent(event) {
       document.querySelector("#live").textContent = event.media === "html" ? "已收到等距图" : "已收到图片";
     }
     if (event.type === "progress") document.querySelector("#live").textContent = progressLine(event);
+    if (event.type === "tool.panel" && !state.stopped) autoOpenToolPanel(event); // 每个句柄只自动弹一次，回放不再弹
     if (event.type === "error") document.querySelector("#live").textContent = event.message || "";
   } else if (event.type === "message.completed") {
     assistant.text = event.text || "";
@@ -345,9 +404,15 @@ function resetAssistantForReplay() {
   assistant.error = null;
 }
 
+function sameContentRequest(a, b) {
+  return ["run_id", "kind", "purpose", "hint", "attempt"].every((key) => (a[key] || "") === (b[key] || ""));
+}
+
 function rememberAgentEvent(assistant, event) {
   const events = assistant.events || (assistant.events = []);
-  if (event.type === "content_request" && events.some((item) => item.type === "content_request")) return;
+  // 回放去重只去掉「同一个」请求；同一运行里后来的新请求（读图换一张、模型改要文字）要换掉旧的输入框，
+  // 否则界面停在旧的选图框上，用户再选的图会交给已经在等文字的请求。
+  if (event.type === "content_request" && events.some((item) => item.type === "content_request" && sameContentRequest(item, event))) return;
   if (event.type === "agent") {
     const node = events.find((item) => item.type === "agent" && item.run_id === event.run_id);
     if (node) {
@@ -968,6 +1033,14 @@ function bubble(message) {
   if (planning) item.append(planning);
   const calls = events.filter((entry) => entry.type === "tool_call");
   if (calls.length) item.append(toolTimeline(message, calls));
+  for (const panelEvent of events.filter((entry) => entry.type === "tool.panel")) {
+    const reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.className = "tool-panel-reopen";
+    reopen.textContent = String(panelEvent.label || "打开面板").slice(0, 40);
+    reopen.addEventListener("click", () => openToolPanel(panelEvent));
+    item.append(reopen);
+  }
   // 只显示仍在进行中的进度：其后已有成片或新的工具调用时，旧进度不再显示。
   const latest = [...events].reverse().find((entry) => ["progress", "artifact", "tool_call"].includes(entry.type));
   const progress = latest && latest.type === "progress" ? latest : null;
@@ -1222,7 +1295,7 @@ async function pickNativeFile(message, request, pick, button) {
       button.disabled = false;
       if (result && result.code === "cancelled") return;
       const reasons = {
-        payload_too_large: "文件太大了，本机内容最大 256 KB。",
+        payload_too_large: "文件太大了（本机内容最大 256 KB，读图最大 8 MB）。",
         empty: "这个文件是空的。",
         not_waiting: "现在没有在等待本地内容。",
       };
@@ -1237,6 +1310,11 @@ async function pickNativeFile(message, request, pick, button) {
 
 // 13.B：拖进窗口的文件。WebView 默认会跳转去打开 file://，这里拦下来：
 // 有等待中的「本机文件」请求就交给它（走同一个上传接口、只得句柄），否则只提示，不读文件。
+function waitingLocalFileForm() {
+  const forms = [...document.querySelectorAll("form.local-entry-file")].filter((form) => form._localDrop);
+  return forms[forms.length - 1] || null;
+}
+
 document.addEventListener("dragover", (event) => event.preventDefault());
 document.addEventListener("drop", (event) => {
   event.preventDefault();
@@ -1486,7 +1564,7 @@ async function addPendingFile(file) {
     return;
   }
   if (file.size > 8 * 1024 * 1024) {
-    showNote("这条消息太长了。");
+    showNote("附件太大了（最大 8 MB）。");
     return;
   }
   const kind = kindFromFile(file);
@@ -2131,6 +2209,7 @@ async function api(method, path, body) {
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
+  noteBuild(response);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(payload.message || "请求失败。");

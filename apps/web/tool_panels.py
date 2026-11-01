@@ -49,7 +49,7 @@ def _not_found() -> PanelError:
 def _pack_and_files(name: str):
     import module_tools  # 晚加载：server 先装好 sys.path
     packs = tool_config._packs()
-    pack = module_tools.get(name)
+    pack = module_tools.panel_pack(name)
     if pack is None or not packs.panel_spec(pack.manifest):
         raise _not_found()
     if not pack.builtin:

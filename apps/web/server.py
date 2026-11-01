@@ -44,6 +44,9 @@ from services.gateway import egress
 _SESSION_MESSAGES = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/messages$")
 _SESSION_CHARACTER = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/character$")
 _SESSION_TOOL_RUN = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/tools/([a-z][a-z0-9_]{1,47})/run$")
+# #101：内置工具面板的本地草稿（ui.panel.local_draft）。GET 读正文、POST 保存、/generate 出图（SSE）。
+_SESSION_TOOL_DRAFT = re.compile(
+    r"^/api/sessions/(s_[0-9a-f]{32})/tools/([a-z][a-z0-9_]{1,47})/drafts/(c_[0-9a-f]{32})(/generate)?$")
 _SESSION_STOP = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/stop$")
 _SESSION_ATTACHMENTS = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments$")
 _SESSION_ATTACHMENT = re.compile(r"^/api/sessions/(s_[0-9a-f]{32})/attachments/(a_[0-9a-f]{32})$")
@@ -64,6 +67,40 @@ _STATIC = {
     "app.css": "text/css; charset=utf-8",
 }
 _MAX_BODY = 1_000_000
+
+
+def _static_build() -> str:
+    """#101：本次服务启动时网页静态文件（含内置工具面板）的指纹。
+
+    每个 JSON 回应都带 X-MAS-Build；页面记下第一次看到的值，之后变了就提示刷新。
+    这样服务换了新代码、浏览器标签还跑着旧 app.js 时（旧页面不认识新事件，比如 tool.panel），
+    用户会看到「请刷新」，而不是悄悄少了功能。
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    names = sorted(_STATIC) + ["index.html"]
+    for name in names:
+        try:
+            with open(os.path.join(WEB_DIR, "static", name), "rb") as handle:
+                digest.update(name.encode("utf-8") + b"\0" + handle.read().replace(b"\r\n", b"\n"))
+        except OSError:
+            digest.update(name.encode("utf-8") + b"\0missing")
+    ui_root = os.path.join(os.path.dirname(os.path.dirname(WEB_DIR)), "toolpacks", "builtin")
+    for folder, _dirs, files in sorted(os.walk(ui_root)):
+        if os.path.basename(folder) != "ui":
+            continue
+        for name in sorted(files):
+            try:
+                with open(os.path.join(folder, name), "rb") as handle:
+                    rel = os.path.relpath(os.path.join(folder, name), ui_root).replace(os.sep, "/")
+                    digest.update(rel.encode("utf-8") + b"\0" + handle.read().replace(b"\r\n", b"\n"))
+            except OSError:
+                continue
+    return digest.hexdigest()[:16]
+
+
+STATIC_BUILD = _static_build()
 _MAX_ATTACHMENT_BODY = 12_000_000
 
 
@@ -773,6 +810,12 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
         if method == "GET" and path == "/":
             _send_file(handler, os.path.join(WEB_DIR, "static", "index.html"), "text/html; charset=utf-8")
             return
+        if method == "GET" and path == "/favicon.ico":
+            handler.send_response(204)  # 没有图标；204 免得浏览器控制台每次报 404
+            handler.send_header("Cache-Control", "max-age=86400")
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
         if method == "GET" and path.startswith("/static/"):
             name = path[len("/static/"):]
             if name not in _STATIC:
@@ -951,6 +994,22 @@ def _dispatch_inner(handler: BaseHTTPRequestHandler, app: App, method: str) -> N
             session = _owned_session(app, matched.group(1))
             run = chat_run.start_form_tool(app, session["session_id"], matched.group(2), _read_json(handler))
             _send_sse(handler, run, 0)
+            return
+        matched = _SESSION_TOOL_DRAFT.fullmatch(path)
+        if matched and method in ("GET", "POST"):
+            session = _owned_session(app, matched.group(1))
+            sid, name, handle = session["session_id"], matched.group(2), matched.group(3)
+            if matched.group(4):
+                if method != "POST":
+                    _send_json(handler, 405, {"code": "method_not_allowed", "message": "只能 POST。"})
+                    return
+                run = chat_run.start_tool_draft(app, sid, name, handle, _read_json(handler))
+                _send_sse(handler, run, 0)
+                return
+            if method == "GET":
+                _send_json(handler, 200, chat_run.draft_read(app, sid, name, handle))
+            else:
+                _send_json(handler, 200, chat_run.draft_save(app, sid, name, handle, _read_json(handler)))
             return
         if path == "/api/sessions" and method == "GET":
             user = app.identity.current()
@@ -1272,6 +1331,7 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> N
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-MAS-Build", STATIC_BUILD)
     handler.end_headers()
     handler.wfile.write(raw)
 

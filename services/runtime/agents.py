@@ -31,8 +31,8 @@ MANIFEST = "agent.json"
 ORCHESTRATOR = "orchestrator"
 DELEGATE = "delegate"
 ROLES = ("orchestrator", "planner", "image", "writer", "reviewer", "worker")
-# 只有面对用户的编排者能弹本地内容对话框。
-ORCHESTRATOR_ONLY = ("accept_local_content",)
+# 只有面对用户的编排者能弹本地内容 / 选图对话框。
+ORCHESTRATOR_ONLY = ("accept_local_content", "prompt_from_image")
 MAX_DEPTH = 2
 MAX_TASKS = 4
 MAX_PARALLEL = 2
@@ -358,7 +358,7 @@ def _delegate_function(choices: list[str]) -> dict:
 
 
 def allowed_tools(agent: Agent, *, depth: int, registered=None) -> set[str]:
-    """清单允许 ∩ 已注册。子 Agent 永远拿不到 accept_local_content；到了深度上限拿不到 delegate。"""
+    """清单允许 ∩ 已注册。子 Agent 永远拿不到 accept_local_content / prompt_from_image；到了深度上限拿不到 delegate。"""
     names = set(agent.tools())
     names &= set(registered if registered is not None else registered_tools()) | {DELEGATE}
     if depth > 0:
@@ -591,7 +591,7 @@ def run_child(agent: Agent, task: str, *, model: str, api_key: str, base_url, ca
               run_id: str, depth: int, tool_source: list[dict], execute, mutating, confirm,
               delegator_factory=None, on_event=None, artifacts=None, local_bodies=None,
               timeout_sec: float = 30, system_suffix: str = "", choices=None) -> dict:
-    """跑一个子 Agent。工具越权在运行时拒绝；accept_local_content 子 Agent 永远拿不到。"""
+    """跑一个子 Agent。工具越权在运行时拒绝；accept_local_content / prompt_from_image 子 Agent 永远拿不到。"""
     from packages.contracts.events import (
         EVENT_MESSAGE_COMPLETED, EVENT_MESSAGE_DELTA, EVENT_RUN_FAILED, EVENT_TOOL_CONFIRM, EVENT_TOOL_REQUESTED,
     )

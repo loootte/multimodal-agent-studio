@@ -39,6 +39,20 @@ def get(name: str):
     return pack
 
 
+def panel_pack(name: str):
+    """带网页面板（ui.panel）的工具：module 工具，或内置名单里的宿主工具（#101 prompt_from_image）。"""
+    try:
+        pack = _packs().find(str(name or ""))
+    except Exception:
+        return None
+    if pack is None or not _packs().panel_spec(pack.manifest):
+        return None
+    kind = pack.manifest["entry"]["kind"]
+    if kind == "module" or (kind == "host" and pack.builtin):
+        return pack
+    return None
+
+
 def is_module_tool(name) -> bool:
     return isinstance(name, str) and get(name) is not None
 
@@ -68,7 +82,10 @@ def panel_info(pack) -> dict | None:
         return None
     base = f"/api/tools/{pack.name}/"
     out = {"title": str(spec.get("title") or (pack.manifest.get("ui") or {}).get("title") or pack.name),
-           "mount": spec.get("mount", "dialog"), "isolated": not pack.builtin}
+           "mount": spec.get("mount", "dialog"), "isolated": not pack.builtin,
+           "launcher": spec.get("launcher", "sidebar")}
+    if pack.builtin and spec.get("local_draft") is True:
+        out["local_draft"] = True  # 只给内置面板：可按句柄读写本机草稿（宿主接口另行核对来源）
     if pack.builtin:
         out["script"] = base + spec["script"]
         if spec.get("style"):
@@ -87,7 +104,10 @@ def form_tools() -> list[dict]:
         return out
     for pack in found:
         ui = pack.manifest.get("ui") or {}
-        if pack.manifest["entry"]["kind"] != "module" or not (ui.get("form") or ui.get("panel")):
+        kind = pack.manifest["entry"]["kind"]
+        if kind == "host" and pack.builtin and ui.get("panel"):
+            pass  # #101：内置宿主工具的对话唤起面板
+        elif kind != "module" or not (ui.get("form") or ui.get("panel")):
             continue
         item = describe(pack)
         problem = _packs().gate(pack)
