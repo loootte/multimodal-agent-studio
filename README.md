@@ -2,7 +2,7 @@
 
 多模态 Agent 产品的工程蓝图。这个仓库定义目标、边界、架构和路线图。
 
-产品仍按 [ROADMAP.md](ROADMAP.md) 逐段落地。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前做了本机文字聊天，用来填写第三方大模型的 API key。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页成为多模态 Agent 的界面，第一刀只做文生图。用法见 [`apps/web`](apps/web/README.md)。[issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 另有一个本地脚本 [`poc/comfyui`](poc/comfyui/README.md)，用来向本机 ComfyUI 提交固定工作流。
+产品仍按 [ROADMAP.md](ROADMAP.md) 逐段落地。[issue #103](https://github.com/loootte/multimodal-agent-studio/issues/103) 把第 15 阶段写成「本地资源分级隔离与工具应用」：文字可控披露，图片、音频、视频强隔离，后续工具按句柄和标签做。这一阶段还没开工。[issue #9](https://github.com/loootte/multimodal-agent-studio/issues/9) 提前做了本机文字聊天，用来填写第三方大模型的 API key。[issue #10](https://github.com/loootte/multimodal-agent-studio/issues/10) 让这个聊天页成为多模态 Agent 的界面，第一刀只做文生图。用法见 [`apps/web`](apps/web/README.md)。[issue #1](https://github.com/loootte/multimodal-agent-studio/issues/1) 另有一个本地脚本 [`poc/comfyui`](poc/comfyui/README.md)，用来向本机 ComfyUI 提交固定工作流。
 
 ## 要做成什么
 
@@ -16,12 +16,13 @@
 - 不把某一家模型的 SDK 当成整个系统的中心。
 - 不默认上多 Agent 群聊。默认是一个有边界的循环，加上类型明确的工具。
 - 不把上传的媒体长期塞进提示词。媒体进工件库，提示词里只放引用。
+- 不把本地正文和媒体原始字节默认送进第三方请求。模型默认只看到工具契约和句柄。不把文字完全盲盒当成目标：文字按路线图第 15 阶段可控披露，图片、音频、视频保持强隔离。见 [issue #103](https://github.com/loootte/multimodal-agent-studio/issues/103)。
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [ROADMAP.md](ROADMAP.md) | 分阶段路线图和每阶段的完成标准 |
+| [ROADMAP.md](ROADMAP.md) | 分阶段路线图和每阶段的完成标准。第 15 阶段是本地资源分级隔离与工具应用（[issue #103](https://github.com/loootte/multimodal-agent-studio/issues/103)） |
 | [docs/architecture.md](docs/architecture.md) | 运行时分层、出图和本地内容怎么走，以及每层现在对应的代码文件 |
 | [docs/model-gateway.md](docs/model-gateway.md) | 多模态模型网关要遵守的契约 |
 | [docs/interface.md](docs/interface.md) | 界面范围和首版画面 |
@@ -46,3 +47,5 @@
 左侧会话列表每项可以删除（先确认）。会话记录、只属于它的附件字节和生成工件一起删掉；还在回答的会话拒绝删除，要先停下。
 
 路线图第 0、1、2、3、4、7 阶段已完成。[issue #22](https://github.com/loootte/multimodal-agent-studio/issues/22) 补齐工件库、检索和会话记忆。[issue #20](https://github.com/loootte/multimodal-agent-studio/issues/20) 补齐网页附件、工具时间线、确认和失败重试。issue #9 按 [ADR 0002](docs/adr/0002-implementation-stack.md) 提前做了文字聊天，issue #10 让同一页面调用已有的文生图工具。`poc/comfyui` 包含 issue #1 的提交脚本、issue #2 的 `generate_image` / `generate_video`、issue #3 的工作流模板、issue #4 的 ComfyUI 客户端、issue #5 的会话工件库和 issue #6 的聊天事件。
+
+第 15 阶段（[issue #103](https://github.com/loootte/multimodal-agent-studio/issues/103)）已写入路线图，尚未开工。它不放松第 12 阶段的隔离：媒体原始字节默认不进第三方，文字默认仍走句柄，打开正文要确认并留审计。第 9、13、14 阶段遵守同一原则。子目标是 15.A 媒体强隔离、15.B 标签检索、15.C 文字可控披露、15.D 本地批量处理。
