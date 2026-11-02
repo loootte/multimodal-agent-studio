@@ -28,7 +28,7 @@ from services.gateway.openai_chat import DEFAULT_BASE_URL, DEFAULT_MODEL
 _ID = re.compile(r"^[a-z]_[0-9a-f]{32}$")
 _MEDIA = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
 _REF = re.compile(r"(?:[ac]_[0-9a-f]{32}|art_[0-9a-f]{32})")
-_PURPOSES = ("image_prompt", "keep")
+_PURPOSES = ("image_prompt", "keep", "disclose")
 MAX_FILE = 262144
 MAX_ATTACHMENT = 8 * 1024 * 1024
 MEMORY_KEEP = 6

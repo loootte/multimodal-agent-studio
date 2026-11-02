@@ -2635,10 +2635,124 @@ def run_prompt_from_image(h: Harness, task: dict, live: bool) -> dict:
     return {"case": case, "marker": task.get("marker")}
 
 
+def run_disclose(h: Harness, task: dict, live: bool) -> dict:
+    """15.C #107：打开盲盒确认 / 拒绝 / 不泄露正文。"""
+    case = task["case"]
+    marker = task.get("marker", "LOCAL-DISCLOSE")
+    session_id = check._fresh_session(h.base)
+    # 正文够长：summarize 才允许预览；秘密放在预览窗口（200 字）之外，避免假阳性。
+    body = ("前缀填充文字。" * 40) + f" SECRET-{marker} " + ("后缀填充。" * 10)
+    handle = h.app.sessions.add_content(session_id, body, "keep")["handle"]
+    detail = {"case": case, "handle_prefix": handle[:6]}
+
+    def _telemetry_kinds():
+        status, raw = check.request("GET", h.base + "/api/telemetry?limit=5000")
+        expect(status == 200, f"读遥测失败：{status}")
+        events = json.loads(raw).get("events") or []
+        # 只看本会话，避免同一次 eval 进程里前序 case 的 opened/confirmed 污染断言。
+        return [
+            e.get("kind") for e in events
+            if isinstance(e, dict) and e.get("session_id") == session_id
+        ]
+
+    if case == "denied":
+        asked = []
+        sent = len(h.provider.requests)
+        h.provider.mode = "probe"
+        h.provider.probe_tool = "disclose_local_text"
+        h.provider.probe = {"content_handle": handle, "mode": "validate"}
+        h.provider.probe_times = 1
+
+        def on_event(event):
+            if event.get("type") == "tool.confirm" and event.get("name") == "disclose_local_text":
+                asked.append(event.get("name"))
+                check._post_confirm(h.base, event.get("run_id") or "", False)
+
+        try:
+            status, _raw, events = check.read_sse(
+                check.site_port(h.base),
+                f"/api/sessions/{session_id}/messages",
+                {"text": "请打开这个本地文字盲盒做校验"},
+                on_event=on_event,
+                timeout=15,
+            )
+        finally:
+            h.provider.probe = None
+            h.provider.probe_tool = None
+            h.provider.mode = "ok"
+        expect(status == 200 and events, "拒绝路径没有事件流")
+        expect(asked == ["disclose_local_text"], f"没有弹打开盲盒确认卡：{asked}")
+        expect(_status(events) == "completed", f"拒绝后未完成：{_status(events)}")
+        results = [e for e in events if e.get("tool") == "disclose_local_text" or e.get("name") == "disclose_local_text"]
+        expect(results, f"拒绝后没有打开盲盒相关事件：{[e.get('type') for e in events]}")
+        # 拒绝后不应出现 ok=True 的工具结果；可能是 tool_call status=rejected / 带 rejected 错误
+        opened = []
+        for e in results:
+            result = e.get("result") if isinstance(e.get("result"), dict) else {}
+            if result.get("ok") is True:
+                opened.append(result)
+            if e.get("status") == "completed" and result.get("ok"):
+                opened.append(result)
+        expect(not opened, f"拒绝后仍执行了：{opened}")
+        blob = json.dumps(events, ensure_ascii=False)
+        expect("disclose_opened" not in blob, "事件流暗示已打开")
+        dumped = json.dumps([item["body"] for item in h.provider.requests[sent:]], ensure_ascii=False)
+        expect(marker not in dumped and body[:40] not in dumped, "拒绝后正文仍进了供应商请求")
+        kinds = _telemetry_kinds()
+        expect("security.disclose_denied" in kinds, f"没有 disclose_denied：{kinds[-20:]}")
+        expect("security.disclose_opened" not in kinds, "拒绝后仍记了 disclose_opened")
+        detail.update(asked=asked, denied=True)
+        return detail
+
+    # confirm + no_leak 共用：同意后跑 validate / extract / summarize
+    modes = ("validate", "extract", "summarize") if case == "no_leak" else ("validate",)
+    sent0 = len(h.provider.requests)
+    for mode in modes:
+        events, bodies = _memory_speak(
+            h, session_id, "disclose_local_text",
+            {"content_handle": handle, "mode": mode},
+            text=f"请对本机文字做 {mode}",
+        )
+        confirms = [e for e in events if e.get("type") == "tool.confirm" and e.get("name") == "disclose_local_text"]
+        expect(confirms, f"{mode} 没有确认卡")
+        card = confirms[0].get("card") or {}
+        if mode == "summarize":
+            expect(card.get("requires_ack") == "high_risk" or card.get("risk") == "high",
+                   f"summarize 确认卡未标高危：{card}")
+        else:
+            expect(card.get("requires_ack") in (None, ""), f"{mode} 不应高危：{card}")
+        result = _memory_result(events, "disclose_local_text")
+        expect(result.get("ok"), f"{mode} 失败：{result}")
+        blob = json.dumps(result, ensure_ascii=False)
+        expect(marker not in blob and f"SECRET-{marker}" not in blob, f"{mode} 结果含秘密：{result}")
+        expect(body not in blob, f"{mode} 结果含全文")
+        dumped = json.dumps(bodies, ensure_ascii=False)
+        expect(marker not in dumped and f"SECRET-{marker}" not in dumped, f"{mode} 请求含秘密")
+        if mode == "validate":
+            expect("char_count" in result and "preview" not in result, f"validate 字段不对：{result}")
+        if mode == "extract":
+            expect("tags" in result and "placeholders" in result, f"extract 字段不对：{result}")
+        if mode == "summarize":
+            # 正文够长应有预览，但预览窗口在秘密之前
+            expect(result.get("preview"), f"summarize 无预览：{result}")
+            expect(marker not in (result.get("preview") or ""), "预览窗口含秘密")
+            expect(result.get("disclose_handle"), f"summarize 未签发 disclose 句柄：{result}")
+
+    kinds = _telemetry_kinds()
+    expect("security.disclose_confirmed" in kinds, f"没有 disclose_confirmed：{kinds[-30:]}")
+    expect("security.disclose_opened" in kinds, f"没有 disclose_opened：{kinds[-30:]}")
+    all_bodies = json.dumps([item["body"] for item in h.provider.requests[sent0:]], ensure_ascii=False)
+    expect(marker not in all_bodies, "整轮请求泄露 marker")
+    detail.update(modes=list(modes), confirmed=True)
+    return detail
+
+
+
 RUNNERS = {
     "chat": run_chat,
     "local_content": run_local_content,
     "prompt_from_image": run_prompt_from_image,
+    "disclose": run_disclose,
     "confirm_web": run_confirm_web,
     "confirm_runtime": run_confirm_runtime,
     "injection": run_injection,

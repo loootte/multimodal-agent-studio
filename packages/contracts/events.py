@@ -126,7 +126,11 @@ HANDLE_SCHEMA = "mas.handle/1"
 HANDLE_ERRORS = ("handle_not_found", "handle_expired", "handle_forbidden")
 HANDLE_STATES = ("active", "expired", "revoked", "used")
 # 每种用途默认允许哪些工具消费正文。keep 只存不用：模型拿它出图会得到 handle_forbidden。
-HANDLE_PURPOSE_TOOLS = {"image_prompt": ("generate_image",), "keep": ()}
+HANDLE_PURPOSE_TOOLS = {
+    "image_prompt": ("generate_image", "disclose_local_text"),
+    "keep": ("disclose_local_text",),
+    "disclose": ("disclose_local_text",),
+}
 
 TERMINAL_EVENTS = (EVENT_MESSAGE_COMPLETED, EVENT_RUN_FAILED)
 

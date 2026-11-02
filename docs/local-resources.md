@@ -36,3 +36,21 @@
 | POST | `/api/resources/revoke` | `{id}` → `{id, state: "revoked"}`：撤销本地提示词/文字/文件的句柄，正文留在本机（12.B #58） |
 
 资源 id 形如 `type:会话id:句柄`。代码在 `apps/web/resources.py`，测试在 `apps/web/check.py` 的 `_resources_case`。
+
+
+## 文字可控披露（15.C / #107）
+
+默认仍只把句柄交给模型。需要对本机**文字**句柄做校验、抽取或短摘要时，编排者调用宿主工具 `disclose_local_text`（打开盲盒）：
+
+| 模式 | 工具结果里有什么 | 完整正文 |
+| --- | --- | --- |
+| `validate` | 字数 / 行数 / 词数等统计 | 不离开本机 |
+| `extract` | 标签、邮箱/电话占位符个数（不含原文） | 不离开本机 |
+| `summarize` | 脱敏短预览（≤200 字；正文过短则省略预览）+ 可选 `purpose=disclose` 预览句柄 | 不离开本机 |
+
+- 每次调用都弹确认卡（`confirm=always` + `confirm_every_call`）；`summarize` 标高危并要求 `acknowledge=high_risk`。
+- 拒绝 → `security.disclose_denied`，结果 `rejected`，正文不进任何供应商请求。
+- 同意并执行 → `security.disclose_confirmed` + `security.disclose_opened`；结果只有结构化字段或脱敏预览。
+- 邮箱 / 电话做廉价占位符；**完整可逆回复映射**未做，见缺口。
+- 子 Agent 拿不到本工具。`send_local_to_model` 仍为 false（#93）。
+- 决定见 [ADR 0012](adr/0012-local-resource-graded-isolation.md)；评测 `security.disclose_*`。

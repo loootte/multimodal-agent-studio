@@ -21,6 +21,7 @@ import content_guard
 import module_tools
 import image_run
 import memory_api
+import disclose
 import schedule_api
 import skill_page
 import store
@@ -65,6 +66,7 @@ SYSTEM = (
     "用户提交后你只会收到句柄、种类和大小。"
     "查看本会话内容调用 list_local_content。丢掉一枚句柄调用 forget_local_content。"
     "检索本会话附件、本地内容和生成结果调用 retrieve_local，传入 query。结果带来源标识和可打开的地址，没有正文。"
+    "需要对本机文字句柄做校验、抽取或短摘要时调用 disclose_local_text（打开盲盒）：传入 content_handle 和 mode（validate / extract / summarize）。每次都要用户确认；你只会拿到结构化字段或脱敏短预览，看不到完整正文。"
     "只读演示查询调用 lookup_demo，传入 topic。"
     "要用文字句柄出图时，再调用 generate_image。一次调用只生成一张。"
     "请求意味着多张图片时（不管有没有写出数字），第一步就调用 plan_images 报出总张数，"
@@ -132,6 +134,7 @@ _WEB_TOOLS = (
     "list_local_content",
     "forget_local_content",
     "retrieve_local",
+    "disclose_local_text",
     "generate_image",
     "plan_images",
     "build_skill_page",
@@ -828,11 +831,15 @@ def _generate_text_turn(
                 run.cancel.set()
             elif ok and not confirm_every_call(name):
                 allowed.add(name)
+            if name == "disclose_local_text":
+                disclose.audit_user_decision(session_id, run.run_id, arguments or {}, allowed=bool(ok))
             return ok
         ok = run.wait_confirm()
         # 12.E：联网 / 读本地内容的第三方工具每次都问，不记进「本轮已确认」。
         if ok and not confirm_every_call(name):
             allowed.add(name)
+        if name == "disclose_local_text":
+            disclose.audit_user_decision(session_id, run.run_id, arguments or {}, allowed=bool(ok))
         return ok
 
     def mutating(name, arguments=None):
@@ -1331,7 +1338,7 @@ def _follow_local_tool(app, session_id, message_id, run, provider, user_text, to
 def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None:
     name = tool_call.get("name") if isinstance(tool_call, dict) else ""
     denied = authorize_tool(name) if name in ("list_local_content", "retrieve_local", "forget_local_content",
-                                              *_MEMORY_TOOLS, *_SCHEDULE_TOOLS) else None
+                                              "disclose_local_text", *_MEMORY_TOOLS, *_SCHEDULE_TOOLS) else None
     ok = denied is None
     if denied:  # 12.D：清单没声明它要的权限（例如被改过），不碰会话存储
         result = denied
@@ -1359,6 +1366,11 @@ def _apply_local_tool(app, session_id, message_id, run, tool_call) -> str | None
         if handle:
             result["handle"] = handle
         arguments = {"content_handle": handle} if handle else {}
+    elif name == "disclose_local_text":
+        raw = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
+        result = disclose.run(app, session_id, run.run_id, raw)
+        ok = bool(result.get("ok"))
+        arguments = {key: raw[key] for key in ("content_handle", "mode") if isinstance(raw.get(key), str)}
     elif name in _MEMORY_TOOLS:
         raw = tool_call.get("arguments") if isinstance(tool_call.get("arguments"), dict) else {}
         result = memory_api.host(app, session_id, run.run_id).call(name, raw)
@@ -2464,6 +2476,7 @@ def _egress_listener(app, session_id: str, message_id: str, run: Run):
 _PURPOSE_LABELS = {
     "image_prompt": "出图提示词",
     "keep": "留存的本地内容",
+    "disclose": "打开盲盒后的脱敏预览",
 }
 _SOURCE_LABELS = {
     "local": "本地提示词（1.3，只在本机）",
@@ -2548,6 +2561,19 @@ def _confirm_egress(app, session_id: str, run: Run, name: str, args: dict, base:
     summary["local_to_third_party"] = bool(
         summary["contains_local_derived"] and destination == "third_party_image"
     )
+    # 15.C：打开盲盒不联网；summarize 预览会进下一轮对话模型。
+    if name == "disclose_local_text":
+        summary["destination"] = "none"
+        summary["destination_host"] = ""
+        summary["destination_scope"] = ""
+        summary["network"] = False
+        summary["reads_local"] = True
+        summary["contains_local_derived"] = True
+        summary["disclose_to_model"] = (args.get("mode") == "summarize")
+        summary["fixed"] = _egress_fixed(summary)
+        summary["text"] = _egress_text(summary)
+        summary["risk"] = "high" if injection.high_risk(summary) else "normal"
+        return summary
     summary["fixed"] = _egress_fixed(summary)
     summary["text"] = _egress_text(summary)
     summary["risk"] = "high" if injection.high_risk(summary) else "normal"
@@ -2605,6 +2631,11 @@ def _egress_text(summary: dict) -> str:
         parts.append(f"句柄 {summary.get('handle_id_prefix', '')}… 是{label}" + (f"，用途：{purpose}" if purpose else ""))
     if destination == "third_party_image" and source == "local":
         parts.append("本地提示词正文会发给出图服务，但不会发给对话模型")
+    if summary.get("disclose_to_model"):
+        parts.append("summarize 脱敏短预览会进入下一轮对话模型请求；完整正文仍留在本机")
+    elif summary.get("contains_local_derived") and summary.get("destination") == "none" and summary.get("reads_local"):
+        # 15.C validate/extract：读本地但不把正文/预览交给模型
+        pass
     return "；".join(parts) + "。"
 
 

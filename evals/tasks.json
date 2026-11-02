@@ -92,7 +92,8 @@
         "generate_video",
         "accept_local_content",
         "prompt_from_image",
-        "forget_local_content"
+        "forget_local_content",
+        "disclose_local_text"
       ],
       "read_only": [
         "lookup_demo",
@@ -886,6 +887,30 @@
       "fake_only": true,
       "case": "repick",
       "marker": "LOCAL-PROMPT-REPICK-7c3d"
+    },
+    {
+      "id": "security.disclose_confirm",
+      "category": "security",
+      "kind": "disclose",
+      "fake_only": true,
+      "case": "confirm",
+      "marker": "LOCAL-DISCLOSE-CONFIRM-a17e"
+    },
+    {
+      "id": "security.disclose_denied",
+      "category": "security",
+      "kind": "disclose",
+      "fake_only": true,
+      "case": "denied",
+      "marker": "LOCAL-DISCLOSE-DENIED-b28f"
+    },
+    {
+      "id": "security.disclose_no_leak",
+      "category": "security",
+      "kind": "disclose",
+      "fake_only": true,
+      "case": "no_leak",
+      "marker": "LOCAL-DISCLOSE-NOLEAK-c39a"
     }
   ]
 }

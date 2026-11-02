@@ -1,0 +1,46 @@
+{
+  "schema": "mas.tool/1",
+  "name": "disclose_local_text",
+  "version": "1.0.0",
+  "description": "打开本地文字盲盒（15.C）：对本会话文字句柄做本机校验、抽取或短摘要。每次都要用户确认；未确认时正文不进供应商请求。结果只有结构化字段或脱敏短预览，没有完整正文。不要填写正文、字节、路径或文件名。",
+  "order": 28,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "content_handle",
+      "mode"
+    ],
+    "properties": {
+      "content_handle": {
+        "type": "string",
+        "description": "本会话本地文字内容的句柄。"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "validate",
+          "extract",
+          "summarize"
+        ],
+        "description": "validate：只回统计；extract：结构化标签与占位符；summarize：脱敏短预览（过短则拒绝预览）。"
+      }
+    }
+  },
+  "mutating": true,
+  "confirm": "always",
+  "entry": {
+    "kind": "host"
+  },
+  "config": [],
+  "requires": {
+    "backends": [],
+    "python": []
+  },
+  "permissions": {
+    "read_local_content": true,
+    "network": false,
+    "write_files": true,
+    "send_local_to_model": false
+  }
+}

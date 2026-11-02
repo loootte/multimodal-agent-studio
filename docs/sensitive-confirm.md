@@ -86,7 +86,16 @@ python evals/run.py --only security.confirm_never_network_rejected security.egre
    - 再走第三方本地提示词出图：确认卡固定区块写出站主机、含本地派生「是」、句柄用途；确认后才发，下一轮再问一次。
    - 装一个 `network: true`、`confirm: "always"` 的包，让模型一轮调两次 → 弹两次确认。
 
-## 6. 局限
+## 6. 打开盲盒（15.C / #107）
+
+内置宿主工具 `disclose_local_text`：`confirm=always`，且在 `confirm_every_call` 名单里——同一轮多次打开也每次都问。
+
+- 确认卡由宿主 `_confirm_egress` 生成：`destination=none`、`reads_local=true`、`contains_local_derived=true`。
+- `mode=summarize` 时 `disclose_to_model=true` → `risk=high`、`requires_ack=high_risk`（预览会进下一轮对话模型请求）。
+- 同意记 `security.disclose_confirmed`；拒绝记 `security.disclose_denied`；真正读正文后记 `security.disclose_opened`。
+- 未确认时宿主不调用 `disclose.run`，正文不进供应商请求。
+
+## 7. 局限
 
 - 已经装好的旧包若是 `network` + `never`，升级后发现阶段报 `invalid_manifest`，要改清单重装。
 - 数据流图只画经过 12.A 审计的出站（网关、出图客户端、沙箱连接）；沙箱包的载荷对宿主不透明，图里只有「连了哪台主机」。

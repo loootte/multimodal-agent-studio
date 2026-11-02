@@ -92,6 +92,8 @@ def confirm_every_call(name: str) -> bool:
         return True
     if pack is not None and pack.builtin and pack.name in packs.SCHEDULE_WRITES:  # 14.E：每次建 / 改 / 删定时任务都问
         return True
+    if pack is not None and pack.builtin and pack.name in packs.DISCLOSE_TOOLS:  # 15.C：每次打开盲盒都问
+        return True
     if packs.is_mcp(pack):  # 14.A：默认每次确认。#93 起这个开关走策略，默认仍是每次确认。
         from services.tools import policy
 
@@ -109,7 +111,7 @@ def egress_preview(name: str, arguments=None) -> dict:
 
     pack = packs.find_tool(name)
     permissions = (pack.manifest.get("permissions") or {}) if pack is not None else {}
-    return {
+    out = {
         "by": "host",
         "network": bool(permissions.get("network")),
         "reads_local": bool(permissions.get("read_local_content")),
@@ -118,6 +120,13 @@ def egress_preview(name: str, arguments=None) -> dict:
         "sensitive": bool(pack is not None and packs.sensitive(pack)),
         **(_mcp_preview(pack) if packs.is_mcp(pack) else {}),
     }
+    # 15.C：summarize 预览会进下一轮 chat_completion，确认卡标高危。
+    if name == "disclose_local_text":
+        mode = arguments.get("mode") if isinstance(arguments, dict) else None
+        out["disclose_to_model"] = mode == "summarize"
+        out["reads_local"] = True
+        out["sensitive"] = True
+    return out
 
 
 def _mcp_preview(pack) -> dict:

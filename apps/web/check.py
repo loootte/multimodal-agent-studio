@@ -704,6 +704,102 @@ def serve(httpd: ThreadingHTTPServer) -> None:
     thread.start()
 
 
+
+def _disclose_units() -> None:
+    """15.C #107：廉价脱敏、模式结果不含正文、短正文省略预览、用途句柄、确认审计种类。"""
+    import disclose
+    from services.runtime import injection, tools as runtime_tools
+    from services.tools import packs
+
+    pack = packs.find("disclose_local_text")
+    if pack is None or not pack.builtin:
+        fail("disclose_local_text 工具包缺失")
+    problems = packs.validate_manifest(pack.manifest, builtin=True)
+    if problems:
+        fail(f"disclose_local_text 清单不合格：{problems}")
+    needs = packs.HOST_TOOLS["disclose_local_text"]
+    if not needs <= pack.declared():
+        fail(f"disclose_local_text 清单权限不足：{sorted(needs - pack.declared())}")
+    if pack.manifest.get("permissions", {}).get("send_local_to_model"):
+        fail("disclose_local_text 不得声明 send_local_to_model")
+    if pack.manifest.get("confirm") != "always" or not pack.manifest.get("mutating"):
+        fail("disclose_local_text 必须 confirm=always 且 mutating")
+    if not runtime_tools.confirm_every_call("disclose_local_text"):
+        fail("disclose_local_text 应每次确认")
+
+    secret = "contact alice@example.com or +86 138-0013-8000 please"
+    redacted, mapping = disclose.pseudonymize(secret)
+    if "alice@example.com" in redacted or "138-0013-8000" in redacted:
+        fail(f"廉价脱敏没换掉邮箱/电话：{redacted}")
+    if "[EMAIL_1]" not in redacted or not any(k.startswith("PHONE_") for k in mapping):
+        fail(f"占位符不对：{redacted} / {mapping}")
+    if "alice@example.com" not in mapping.values():
+        fail("映射应保留原文以便本机使用")
+
+    preview = runtime_tools.egress_preview("disclose_local_text", {"mode": "summarize", "content_handle": "c_" + "a" * 32})
+    if not preview.get("disclose_to_model") or not preview.get("reads_local") or not preview.get("sensitive"):
+        fail(f"summarize 出站预览不对：{preview}")
+    if not injection.high_risk(preview):
+        fail("summarize 应标高危")
+    card = injection.confirm_card("disclose_local_text", {"mode": "summarize"}, preview)
+    if card.get("requires_ack") != "high_risk":
+        fail(f"summarize 确认卡缺 high_risk：{card}")
+    normal = runtime_tools.egress_preview("disclose_local_text", {"mode": "validate", "content_handle": "c_" + "b" * 32})
+    if normal.get("disclose_to_model") or injection.high_risk(normal):
+        fail(f"validate 不应高危：{normal}")
+
+    # 无会话的纯函数边界：短正文 summarize 必须省略预览
+    class _FakeSessions:
+        def __init__(self, record):
+            self._record = record
+        def resolve_content(self, session_id, handle, tool=None, run_id=None, consume=True):
+            if self._record is None:
+                return None, "handle_not_found"
+            return self._record, "ok"
+        def add_content(self, session_id, text, purpose="keep"):
+            return {"handle": "c_" + "d" * 32, "purpose": purpose}
+
+    class _FakeApp:
+        def __init__(self, record):
+            self.sessions = _FakeSessions(record)
+
+    short = "短正文不可预览"
+    app = _FakeApp({"text": short, "kind": "text", "purpose": "keep", "scope": {"purpose": "keep"}})
+    out = disclose.run(app, "s_test", "r_test", {"content_handle": "c_" + "c" * 32, "mode": "summarize"})
+    if out.get("preview") is not None or out.get("preview_omitted") != "body_too_short_for_safe_preview":
+        fail(f"短正文仍给出预览：{out}")
+    if short in json.dumps(out, ensure_ascii=False):
+        fail("短正文 summarize 结果里出现了原文")
+
+    long_body = ("甲" * 50) + " alice@example.com " + ("乙" * 180)
+    app = _FakeApp({"text": long_body, "kind": "text", "purpose": "keep", "scope": {"purpose": "keep"}})
+    out = disclose.run(app, "s_test", "r_test", {"content_handle": "c_" + "c" * 32, "mode": "summarize"})
+    if not out.get("ok") or not out.get("preview") or "alice@example.com" in (out.get("preview") or ""):
+        fail(f"长正文 summarize 不对：{out}")
+    if long_body in json.dumps(out, ensure_ascii=False) or out.get("preview") == long_body:
+        fail("summarize 结果泄露全文")
+    if out.get("disclose_handle") != "c_" + "d" * 32:
+        fail(f"未签发 disclose 句柄：{out}")
+
+    out = disclose.run(app, "s_test", "r_test", {"content_handle": "c_" + "c" * 32, "mode": "validate"})
+    blob = json.dumps(out, ensure_ascii=False)
+    if not out.get("ok") or "alice@example.com" in blob or long_body[:20] in blob:
+        fail(f"validate 泄露正文：{out}")
+
+    out = disclose.run(app, "s_test", "r_test", {"content_handle": "c_" + "c" * 32, "mode": "extract"})
+    blob = json.dumps(out, ensure_ascii=False)
+    if not out.get("ok") or "alice@example.com" in blob or out.get("email_count") != 1:
+        fail(f"extract 不对：{out}")
+    if "[EMAIL_1]" not in (out.get("placeholders") or []):
+        fail(f"extract 缺占位符：{out}")
+
+    denied = disclose.run(_FakeApp(None), "s_test", "r_test", {"content_handle": "c_" + "c" * 32, "mode": "validate"})
+    if denied.get("ok") or (denied.get("error") or {}).get("code") != "handle_not_found":
+        fail(f"缺句柄未拒：{denied}")
+
+    print("disclose units ok")
+
+
 def self_check() -> None:
     saved = {name: os.environ.pop(name, None) for name in ("XAI_API_KEY", "LLM_API_KEY")}
     try:
@@ -723,6 +819,7 @@ def self_check() -> None:
         _agent_cases()
         _tool_pack_guide_cases()
         _desktop_token_unit()
+        _disclose_units()
         _live()
     finally:
         for name, value in saved.items():
@@ -751,6 +848,7 @@ def _agent_cases() -> None:
         "装上委托": dict(good, tools=["delegate"]),
         "子 Agent 弹本地内容": dict(good, tools=["accept_local_content"]),
         "子 Agent 读图提示词": dict(good, tools=["prompt_from_image"]),
+        "子 Agent 打开盲盒": dict(good, tools=["disclose_local_text"]),
         "未注册的工具": dict(good, tools=["rm_rf"]),
         "子 Agent 的树预算": dict(good, budget={"tree_steps": 10}),
         "预算越界": dict(good, budget={"steps": 999}),
@@ -807,9 +905,11 @@ def _agent_cases() -> None:
         fail("子 Agent 拿到了 accept_local_content")
     if "prompt_from_image" in agents.allowed_tools(planner, depth=1):
         fail("子 Agent 拿到了 prompt_from_image")
+    if "disclose_local_text" in agents.allowed_tools(planner, depth=1):
+        fail("子 Agent 拿到了 disclose_local_text")
     lead_tools = agents.allowed_tools(lead, depth=0)
-    if "prompt_from_image" not in lead_tools or "accept_local_content" not in lead_tools:
-        fail(f"编排者缺读图/本地内容工具：{sorted(lead_tools)}")
+    if "prompt_from_image" not in lead_tools or "accept_local_content" not in lead_tools or "disclose_local_text" not in lead_tools:
+        fail(f"编排者缺读图/本地内容/打开盲盒工具：{sorted(lead_tools)}")
     if "delegate" not in agents.allowed_tools(lead, depth=0) or "delegate" in agents.allowed_tools(lead, depth=agents.MAX_DEPTH):
         fail("delegate 的层数限制不对")
     if agents.not_allowed("generate_image", "planner")["error"]["code"] != "tool_not_allowed":
@@ -6644,6 +6744,7 @@ def _egress_http_case(base: str, provider, directory: str) -> None:
 
 BUILTIN_TOOLS = {"accept_local_content", "prompt_from_image", "list_local_content", "forget_local_content", "retrieve_local", "plan_images",
                  "generate_image", "generate_video", "build_skill_page", "read_skill", "lookup_demo", "stage_prompt", "character_image",
+                 "disclose_local_text",  # 15.C：打开文字盲盒
                  "remember", "recall", "forget",  # 14.D：长期记忆，默认不进模型请求
                  "schedule_create", "schedule_list", "schedule_update", "schedule_delete"}  # 14.E：定时任务，默认不进
 MODEL_TOOLS = BUILTIN_TOOLS - {"generate_video", "remember", "recall", "forget",

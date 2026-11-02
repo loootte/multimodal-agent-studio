@@ -14,9 +14,9 @@
 | --- | --- |
 | `handle_schema` | `mas.handle/1` |
 | `scope.session_id` | 签发它的会话。消费时必须一致 |
-| `scope.purpose` | `image_prompt` / `keep` |
+| `scope.purpose` | `image_prompt` / `keep` / `disclose`（15.C 脱敏预览） |
 | `scope.run_id` | 可选：只给这次运行用（`bind_run`，只能收窄不能改绑） |
-| `allowed_tools` | 能消费正文的工具。默认按用途：`image_prompt` → `generate_image`；`keep` → 无 |
+| `allowed_tools` | 能消费正文的工具。默认按用途：`image_prompt` → `generate_image`+`disclose_local_text`；`keep` → `disclose_local_text`；`disclose` → `disclose_local_text` |
 | `issued_at`、`expires_at` | UTC ISO 时间。默认 4 小时，`MAS_HANDLE_TTL_SEC` 可改（夹在 60 秒到 7 天） |
 | `revoked_at` | 撤销时间（资源面板「撤销句柄」或 `revoke_run`） |
 | `single_use`、`used_at` | 可选：一次性句柄，消费一次后作废 |

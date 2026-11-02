@@ -62,6 +62,8 @@
 | 3.7 | 被注入诱导的外泄：工具结果诱导模型把本地内容指纹带出去，对话通道在发出前按 `local_fingerprint` 拦下，记 `egress.blocked`（#63） | 自动：`security.injection_exfil_blocked`；`apps/web/check.py` 的 `_fingerprint_exfil_unit` |
 | 3.8 | 高危组合（读本地 + 联网：第三方沙箱包同时有 `read_local_content` 和 `network`，或本地提示词发第三方出图）要二次确认：只点一次「确认」不执行，提交缺 `acknowledge=high_risk` 返回 409 `acknowledge_required` 并记 `security.high_risk_ack_missing`，运行继续等；拒绝不需要二次确认（#63） | 自动：`security.injection_high_risk_ack`；`_high_risk_ack_unit` |
 | 3.9 | 配置变更只走设置 API + 本机界面：工具执行期间（`tool_scope`）写 `tools.json` / `provider.json` 一律拒绝并记 `security.config_write_denied`；所有已登记工具都在 `tool_scope` 里执行；写配置的接口（工具配置、模型配置、装 / 卸工具包）拒绝跨站 `Origin` / `Sec-Fetch-Site`（403 `config_write_forbidden`）；每次成功写入记 `security.config_changed`（只有目标、字段名、通道）；诱导修改 `remote_local_prompt` 改不动（#63） | 自动：`security.injection_config_change_refused`；`_config_scope_unit`、`_config_origin_case` |
+| 3.10 | 文字打开盲盒（`disclose_local_text`）：每次确认；未确认正文不进供应商；结果只有统计 / 标签 / 脱敏短预览；`summarize` 高危二次确认；审计 `security.disclose_confirmed` / `denied` / `opened`；子 Agent 不可用（#107） | 自动：`security.disclose_confirm`、`security.disclose_denied`、`security.disclose_no_leak`；`apps/web/check.py` 的 `_disclose_units` |
+
 
 ## 5. 桌面壳
 

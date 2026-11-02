@@ -93,6 +93,8 @@ HOST_TOOLS = {
     "schedule_list": frozenset({"read_local_content"}),
     "schedule_update": frozenset({"read_local_content", "write_files"}),
     "schedule_delete": frozenset({"read_local_content", "write_files"}),
+    # 15.C #107：打开文字盲盒。读本地 + 可能把脱敏预览放进工具结果；每次确认，不进 HANDLE_ONLY_READERS。
+    "disclose_local_text": frozenset({"read_local_content", "write_files"}),
 }
 # 14.D #81：长期记忆工具默认不给模型。只有网页宿主在记忆打开时显式放进请求（registry.external_contracts(include=...)）。
 MEMORY_TOOLS = frozenset({"remember", "recall", "forget"})
@@ -100,6 +102,7 @@ MEMORY_WRITES = frozenset({"remember", "forget"})  # 每次写入都要用户确
 # 14.E #82：定时任务工具同样默认不给模型，只在调度打开、单 Agent 文字轮时由网页宿主放进 include。
 SCHEDULE_TOOLS = frozenset({"schedule_create", "schedule_list", "schedule_update", "schedule_delete"})
 SCHEDULE_WRITES = frozenset({"schedule_create", "schedule_update", "schedule_delete"})  # 每次都确认
+DISCLOSE_TOOLS = frozenset({"disclose_local_text"})  # 15.C #107：每次打开盲盒都问
 BUILTIN_PYTHON = {
     "generate_image": frozenset({"network", "read_local_content", "write_files"}),
     "generate_video": frozenset({"network", "read_local_content", "write_files"}),
